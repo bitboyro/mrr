@@ -1,0 +1,56 @@
+spring:
+  application:
+    name: mrr
+  datasource:
+    url: jdbc:sqlite:${MRR_DB_PATH:/data/mrr.db}
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      # SQLite takes a write lock per connection; a small pool avoids SQLITE_BUSY
+      # under concurrent webhook delivery.
+      maximum-pool-size: 4
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+
+  ai:
+    mcp:
+      server:
+        enabled: true
+        protocol: STREAMABLE
+        name: mrr
+        version: ${APP_VERSION:dev}
+        type: sync
+        streamable-http:
+          mcp-endpoint: /mcp
+          keep-alive-interval: ${MCP_KEEP_ALIVE_INTERVAL:30s}
+
+server:
+  port: ${SERVER_PORT:8130}
+
+mrr:
+  # Where the bootstrap root token is written on first boot, alongside the console banner.
+  root-token-file: ${MRR_ROOT_TOKEN_FILE:/data/root-token.txt}
+  # Public base URL, used only to print the webhook URL when a project is registered.
+  base-url: ${MRR_BASE_URL:http://localhost:8130}
+  review:
+    workers: ${MRR_REVIEW_WORKERS:2}
+    # Diffs larger than this are truncated before the model sees them.
+    max-diff-chars: ${MRR_MAX_DIFF_CHARS:200000}
+    timeout-seconds: ${MRR_REVIEW_TIMEOUT:300}
+    # Files fetched via read_file are truncated at this many characters.
+    max-file-chars: ${MRR_MAX_FILE_CHARS:80000}
+    # Each enabled project document is truncated at this many characters.
+    max-document-chars: ${MRR_MAX_DOCUMENT_CHARS:20000}
+    # Tool results stored on reviews.trace / replies.trace are capped at this many characters.
+    # The model still sees the full file; DEBUG logs still print the full body.
+    max-trace-chars: ${MRR_MAX_TRACE_CHARS:8000}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui
+
+logging:
+  level:
+    ro.bitboy.mrr: INFO
+    org.springframework.web: WARN

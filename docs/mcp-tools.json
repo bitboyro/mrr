@@ -1,0 +1,106 @@
+{
+  "tools": [
+    {
+      "description": "Fetch one review in full, including the prompt sent to the model and the review it produced. Use to inspect why a review said what it said.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "reviewId": {
+            "description": "The review id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reviewId"
+        ],
+        "type": "object"
+      },
+      "name": "get_review"
+    },
+    {
+      "description": "List the currently open merge requests for a registered project, as reported by GitLab. Use when you need to know what is in flight.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "projectId": {
+            "description": "The mrr project id, from list_projects",
+            "type": "string"
+          }
+        },
+        "required": [
+          "projectId"
+        ],
+        "type": "object"
+      },
+      "name": "list_merge_requests"
+    },
+    {
+      "description": "List the GitLab projects registered with mrr that you have access to. Call this first to find the project id needed by the other tools.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "list_projects"
+    },
+    {
+      "description": "List recent AI reviews, newest first. Returns summaries without the prompt or response bodies \u2014 call get_review for those.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "description": "Maximum reviews to return (default 20)",
+            "type": "integer"
+          },
+          "projectId": {
+            "description": "Restrict to one project id; omit for all you can see",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "list_reviews"
+    },
+    {
+      "description": "Re-run a finished review against the same commit \u2014 for example after editing the project's review instructions. Returns immediately; poll get_review until state is READY or FAILED.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "reviewId": {
+            "description": "The review id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reviewId"
+        ],
+        "type": "object"
+      },
+      "name": "rerun_review"
+    },
+    {
+      "description": "Replace the body of the review comment mrr posted on the merge request. Use to correct or amend a review in place rather than adding a second comment.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "markdown": {
+            "description": "The new comment body, in GitLab-flavoured Markdown",
+            "type": "string"
+          },
+          "reviewId": {
+            "description": "The review id whose posted comment should be edited",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reviewId",
+          "markdown"
+        ],
+        "type": "object"
+      },
+      "name": "update_comment"
+    }
+  ]
+}

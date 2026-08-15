@@ -1,0 +1,194 @@
+-- mrr schema. Applied on every boot; every statement is IF NOT EXISTS, so this file
+-- is both the initial schema and the (currently empty) migration history.
+
+CREATE TABLE IF NOT EXISTS users (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    role        TEXT NOT NULL,                       -- ADMIN | USER
+    created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tokens (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    name         TEXT NOT NULL,
+    token_hash   TEXT NOT NULL UNIQUE,               -- SHA-256 of the secret; never the secret
+    prefix       TEXT NOT NULL,                      -- display only, e.g. "mrr_a3f9"
+    created_at   TEXT NOT NULL,
+    last_used_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens(user_id);
+
+CREATE TABLE IF NOT EXISTS projects (
+    id                TEXT PRIMARY KEY,
+    owner_id          TEXT NOT NULL REFERENCES users(id),
+    name              TEXT NOT NULL,
+    enabled           INTEGER NOT NULL DEFAULT 1,
+
+    -- GitLab: base_url is what makes self-hosted work. Never hardcode gitlab.com.
+    gitlab_url        TEXT NOT NULL,
+    gitlab_project_id TEXT NOT NULL,
+    gitlab_token      TEXT NOT NULL,
+    webhook_secret    TEXT NOT NULL,
+
+    provider          TEXT NOT NULL,                 -- ANTHROPIC | OPENAI_COMPAT
+    model_base_url    TEXT,
+    model             TEXT NOT NULL,
+    model_key         TEXT NOT NULL,
+
+    skill             TEXT,                          -- legacy single blob; agent_skills is the set
+    skip_drafts       INTEGER NOT NULL DEFAULT 0,    -- draft MRs cost the same as any other
+    agent_max_turns   INTEGER NOT NULL DEFAULT 1,    -- 1 = today's single shot
+    agent_tools       TEXT,                          -- comma-separated; empty = no tools
+    auto_approve      INTEGER NOT NULL DEFAULT 0,    -- approve the MR when zero findings remain
+    last_error_kind   TEXT,                          -- FailureKind of the last fail-closed event
+    last_error        TEXT,
+    last_error_at     TEXT,
+    created_at        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id);
+
+-- Named skills and documents the reviewer may use. Same idea as agent_tools: a set
+-- you enable per project, not a single blob. Enabled skills go into the system prompt;
+-- enabled documents go into the user prompt as reference material.
+CREATE TABLE IF NOT EXISTS agent_skills (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id),
+    name        TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    position    INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL,
+    UNIQUE (project_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS agent_documents (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id),
+    name        TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL,
+    UNIQUE (project_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS reviews (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id),
+    mr_iid      INTEGER NOT NULL,
+    head_sha    TEXT NOT NULL,
+    state       TEXT NOT NULL,                       -- PENDING | PROCESSING | READY | FAILED | CANCELLED
+    payload     TEXT,                                -- raw webhook body, verbatim
+    prompt      TEXT,                                -- initial system + user; tool trail is `trace`
+    response    TEXT,
+    agent_turns INTEGER NOT NULL DEFAULT 0,          -- complete() calls that actually ran
+    trace       TEXT,                                -- JSON AgentTrace; omitted from list views
+    note_id       TEXT,                              -- GitLab note id
+    discussion_id TEXT,                              -- owning thread; both needed to edit
+    error       TEXT,
+    error_kind  TEXT,                                -- FailureKind; set on fail-closed reviews
+    created_at  TEXT NOT NULL,
+    finished_at TEXT,
+
+    -- ── merge-request snapshot ──────────────────────────────────────────────────────
+    -- Denormalised on purpose. A review is "this MR at this commit", so these are the
+    -- facts as they stood when the review ran, not the MR's current state. Retitle an MR
+    -- and push again and you get two rows with two titles — which is the history you
+    -- want when you are asking why a review said what it said.
+    mr_title            TEXT,
+    mr_url              TEXT,
+    mr_state            TEXT,                        -- opened | merged | closed
+    mr_action           TEXT,                        -- open | reopen | update
+    mr_draft            INTEGER,
+    source_branch       TEXT,
+    target_branch       TEXT,
+
+    -- Three distinct people, routinely confused. author = who owns the MR (enriched from
+    -- the API, since the webhook carries only a numeric author_id); actor = who triggered
+    -- this specific delivery; commit_author = who wrote the head commit.
+    mr_author_name      TEXT,
+    mr_author_username  TEXT,
+    actor_name          TEXT,
+    actor_username      TEXT,
+    commit_message      TEXT,
+    commit_author_name  TEXT,
+    commit_author_email TEXT,
+    commit_at           TEXT,
+
+    labels              TEXT,                        -- JSON array
+    files_changed       INTEGER,
+
+    -- This constraint IS the idempotency mechanism: a redelivered webhook for the same
+    -- head commit collides here and we return the existing review instead of re-reviewing.
+    UNIQUE (project_id, mr_iid, head_sha)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reviews_project ON reviews(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reviews_mr ON reviews(project_id, mr_iid);
+CREATE INDEX IF NOT EXISTS idx_reviews_author ON reviews(mr_author_username);
+
+-- One row per thing the reviewer found, and the GitLab thread carrying it.
+--
+-- Findings outlive the review that produced them: when a later commit addresses one, the
+-- thread opened by the earlier review is what gets resolved. That is why project_id and
+-- mr_iid are denormalised here — the lookup is "what is still open on this MR", which spans
+-- reviews.
+CREATE TABLE IF NOT EXISTS findings (
+    id            TEXT PRIMARY KEY,
+    review_id     TEXT NOT NULL REFERENCES reviews(id),
+    project_id    TEXT NOT NULL,
+    mr_iid        INTEGER NOT NULL,
+
+    file_path     TEXT,
+    line          INTEGER,
+    severity      TEXT,                                -- BLOCKER | MAJOR | MINOR
+    title         TEXT,
+    body          TEXT,
+
+    discussion_id TEXT,                                -- the GitLab thread
+    note_id       TEXT,
+    inline        INTEGER NOT NULL DEFAULT 0,          -- attached to a diff line, or fell back
+
+    state         TEXT NOT NULL,                       -- OPEN | ADDRESSED
+    created_at    TEXT NOT NULL,
+    resolved_at   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_findings_open ON findings(project_id, mr_iid, state);
+CREATE INDEX IF NOT EXISTS idx_findings_review ON findings(review_id);
+
+-- One model answer on a finding thread. A review is a commit; a reply is a human talking
+-- back to a finding mrr already posted. prompt + trace are the transcript.
+CREATE TABLE IF NOT EXISTS replies (
+    id             TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL,
+    mr_iid         INTEGER NOT NULL,
+    discussion_id  TEXT NOT NULL,
+    finding_id     TEXT,
+    prompt         TEXT,
+    response       TEXT,
+    trace          TEXT,                             -- JSON AgentTrace
+    created_at     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_replies_mr ON replies(project_id, mr_iid, created_at);
+CREATE INDEX IF NOT EXISTS idx_replies_discussion ON replies(project_id, discussion_id);
+
+-- Live status of one merge request across every review of it. The reviews table is a
+-- snapshot per commit; this row is "where the MR stands right now".
+CREATE TABLE IF NOT EXISTS mr_status (
+    project_id        TEXT NOT NULL,
+    mr_iid            INTEGER NOT NULL,
+    current_status    TEXT NOT NULL,                 -- REVIEWING | NEEDS_WORK | CLEAN | FAILED | CANCELLED
+    latest_review_id  TEXT,
+    latest_head_sha   TEXT,
+    open_findings     INTEGER NOT NULL DEFAULT 0,
+    mrr_approved      INTEGER NOT NULL DEFAULT 0,    -- 1 only when *mrr* approved, not a human
+    mrr_approved_sha  TEXT,
+    updated_at        TEXT NOT NULL,
+    PRIMARY KEY (project_id, mr_iid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mr_status_project ON mr_status(project_id, updated_at DESC);

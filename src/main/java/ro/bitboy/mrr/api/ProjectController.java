@@ -1,0 +1,226 @@
+package ro.bitboy.mrr.api;
+
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.annotation.RestController;
+import ro.bitboy.mrr.MrrProperties;
+import ro.bitboy.mrr.auth.Ids;
+import ro.bitboy.mrr.auth.Principal;
+import ro.bitboy.mrr.model.Project;
+import ro.bitboy.mrr.store.Store;
+import ro.bitboy.mrr.web.ApiException;
+
+import java.time.Instant;
+import java.util.List;
+
+/**
+ * The project registry. Every response is {@link Project#redacted()} — the GitLab PAT, the
+ * webhook secret, and the model key are write-only over this API.
+ *
+ * <p>The one exception is creation, which returns the webhook secret once: you need it to
+ * paste into GitLab, and there is no way to read it back afterwards.
+ */
+@RestController
+@Tag(name = "Projects",
+     description = """
+             The registry of GitLab projects mrr reviews. One row carries everything needed \
+             to review that project: where its GitLab lives, the token to read it with, which \
+             model to use, and the review instructions to use as the system prompt.
+
+             Owned. A USER sees only its own; an ADMIN sees all. Asking for someone else's \
+             returns 404, not 403.""")
+public class ProjectController {
+
+    private final Store store;
+    private final MrrProperties properties;
+
+    public ProjectController(Store store, MrrProperties properties) {
+        this.store = store;
+        this.properties = properties;
+    }
+
+    @Operation(summary = "Register a GitLab project",
+            description = """
+                    The caller becomes the owner. A webhook secret is generated unless you \
+                    supply one.
+
+                    **The response contains the only readable copy of the webhook secret.** \
+                    Paste it, with `webhookUrl`, into the project's *Settings → Webhooks* in \
+                    GitLab and tick **Merge request events**. Every later read masks it.""")
+    @ApiResponse(responseCode = "201", description = "Registered; carries the webhook URL and secret")
+    @ApiResponse(responseCode = "400", description = "A required field is missing or `provider` is invalid", content = @io.swagger.v3.oas.annotations.media.Content(schema = @io.swagger.v3.oas.annotations.media.Schema(implementation = ro.bitboy.mrr.web.ErrorResponse.class)))
+    @PostMapping("/api/projects")
+    @ResponseStatus(HttpStatus.CREATED)
+    public Registered create(Principal caller, @RequestBody Upsert request) {
+        require(request.name(), "name");
+        require(request.gitlabUrl(), "gitlabUrl");
+        require(request.gitlabProjectId(), "gitlabProjectId");
+        require(request.gitlabToken(), "gitlabToken");
+        require(request.model(), "model");
+        require(request.modelKey(), "modelKey");
+        if (request.provider() == null) {
+            throw ApiException.badRequest("provider must be ANTHROPIC or OPENAI_COMPAT");
+        }
+
+        // Generated unless supplied, so registering a project never silently ends up with a
+        // guessable webhook secret.
+        String secret = request.webhookSecret() == null || request.webhookSecret().isBlank()
+                ? Ids.newSecret()
+                : request.webhookSecret();
+
+        Project project = new Project(
+                Ids.newId(), caller.userId(), request.name().trim(), true,
+                request.gitlabUrl().replaceAll("/+$", ""), request.gitlabProjectId(),
+                request.gitlabToken(), secret, request.provider(), request.modelBaseUrl(),
+                request.model(), request.modelKey(), request.skill(),
+                Boolean.TRUE.equals(request.skipDrafts()),
+                request.agentMaxTurns() == null ? 1 : Math.max(1, request.agentMaxTurns()),
+                request.agentTools() == null ? List.of() : request.agentTools(),
+                Boolean.TRUE.equals(request.autoApprove()),
+                null, null, null, Instant.now());
+
+        store.createProject(project);
+        if (project.skill() != null && !project.skill().isBlank()) {
+            store.createSkill(project.id(), "reviewer", project.skill(), true);
+        }
+
+        return new Registered(project.redacted(), secret,
+                properties.baseUrl() + "/webhooks/gitlab/" + project.id());
+    }
+
+    @Operation(summary = "List projects you can see",
+            description = "Your own, or all of them for an ADMIN. Secrets masked.")
+    @GetMapping("/api/projects")
+    public List<Project> list(Principal caller) {
+        return store.listProjects(caller).stream().map(Project::redacted).toList();
+    }
+
+    @Operation(summary = "Fetch one project", description = "Secrets masked.")
+    @ApiResponse(responseCode = "404", description = "No such project, or not yours", content = @io.swagger.v3.oas.annotations.media.Content(schema = @io.swagger.v3.oas.annotations.media.Schema(implementation = ro.bitboy.mrr.web.ErrorResponse.class)))
+    @GetMapping("/api/projects/{id}")
+    public Project get(Principal caller, @PathVariable String id) {
+        return store.requireVisible(caller, id).redacted();
+    }
+
+    /** Secret fields are left untouched when omitted, so a partial update can't blank them. */
+    @Operation(summary = "Update a project",
+            description = """
+                    A partial update: omitted fields keep their current value. That applies to \
+                    the secrets too, so you can change the model without re-sending the GitLab \
+                    token. Send `skill` to change the review instructions; the next review \
+                    picks them up.""")
+    @ApiResponse(responseCode = "404", description = "No such project, or not yours", content = @io.swagger.v3.oas.annotations.media.Content(schema = @io.swagger.v3.oas.annotations.media.Schema(implementation = ro.bitboy.mrr.web.ErrorResponse.class)))
+    @PutMapping("/api/projects/{id}")
+    public Project update(Principal caller, @PathVariable String id, @RequestBody Upsert request) {
+        Project existing = store.requireVisible(caller, id);
+
+        Project updated = new Project(
+                existing.id(), existing.ownerId(),
+                orKeep(request.name(), existing.name()),
+                request.enabled() == null ? existing.enabled() : request.enabled(),
+                orKeep(request.gitlabUrl(), existing.gitlabUrl()),
+                orKeep(request.gitlabProjectId(), existing.gitlabProjectId()),
+                orKeep(request.gitlabToken(), existing.gitlabToken()),
+                orKeep(request.webhookSecret(), existing.webhookSecret()),
+                request.provider() == null ? existing.provider() : request.provider(),
+                orKeep(request.modelBaseUrl(), existing.modelBaseUrl()),
+                orKeep(request.model(), existing.model()),
+                orKeep(request.modelKey(), existing.modelKey()),
+                request.skill() == null ? existing.skill() : request.skill(),
+                request.skipDrafts() == null ? existing.skipDrafts() : request.skipDrafts(),
+                request.agentMaxTurns() == null ? existing.agentMaxTurns()
+                        : Math.max(1, request.agentMaxTurns()),
+                request.agentTools() == null ? existing.agentTools() : request.agentTools(),
+                request.autoApprove() == null ? existing.autoApprove() : request.autoApprove(),
+                existing.lastErrorKind(), existing.lastError(), existing.lastErrorAt(),
+                existing.createdAt());
+
+        store.updateProject(updated);
+        if (request.skill() != null) {
+            store.upsertNamedSkill(updated.id(), "reviewer", request.skill());
+        }
+        return updated.redacted();
+    }
+
+    @Operation(summary = "Delete a project",
+            description = "Deletes its review history too. Comments already posted to GitLab stay.")
+    @ApiResponse(responseCode = "204", description = "Deleted")
+    @ApiResponse(responseCode = "404", description = "No such project, or not yours", content = @io.swagger.v3.oas.annotations.media.Content(schema = @io.swagger.v3.oas.annotations.media.Schema(implementation = ro.bitboy.mrr.web.ErrorResponse.class)))
+    @DeleteMapping("/api/projects/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void delete(Principal caller, @PathVariable String id) {
+        store.requireVisible(caller, id);
+        store.deleteProject(id);
+    }
+
+    private static void require(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw ApiException.badRequest(field + " is required");
+        }
+    }
+
+    private static String orKeep(String candidate, String existing) {
+        return candidate == null || candidate.isBlank() ? existing : candidate;
+    }
+
+    @Schema(description = "Project registration or update. On update, omitted fields are kept.")
+    public record Upsert(
+            @Schema(description = "Display name.", example = "test-repo") String name,
+            @Schema(description = "Set false to make mrr ignore this project's webhooks without deleting it.")
+            Boolean enabled,
+            @Schema(description = "Your GitLab's base URL. This is what makes self-hosted work.",
+                    example = "https://gitlab.com") String gitlabUrl,
+            @Schema(description = "Numeric id or `group/project` path — both work.",
+                    example = "bitboy.ro/test-repo") String gitlabProjectId,
+            @Schema(description = "PAT used to read the diff, post the review, and optionally Approve. "
+                    + "Needs `api` scope, or fine-grained `read_code` + `read_merge_request` + "
+                    + "`update_merge_request`. Approving also needs permission to approve merge requests. "
+                    + "Write-only.",
+                    example = "glpat-xxxxxxxxxxxxxxxxxxxx") String gitlabToken,
+            @Schema(description = "Shared secret GitLab sends as `X-Gitlab-Token`. Generated if omitted. Write-only.")
+            String webhookSecret,
+            @Schema(description = "Which adapter reviews this project.", example = "OPENAI_COMPAT")
+            Project.Provider provider,
+            @Schema(description = "Only for OPENAI_COMPAT. Omit for OpenAI itself; set it to reach "
+                    + "Ollama, vLLM, llama.cpp, or a gateway.", example = "http://ollama:11434/v1")
+            String modelBaseUrl,
+            @Schema(description = "Model id, passed through verbatim.", example = "claude-opus-5") String model,
+            @Schema(description = "API key for the model provider. Write-only.", example = "sk-...") String modelKey,
+            @Schema(description = "Legacy single instruction blob. On create, becomes the first "
+                    + "enabled skill named `reviewer`. Prefer POST `/api/projects/{id}/skills`.",
+                    example = "Focus on concurrency bugs and error handling.")
+            String skill,
+            @Schema(description = "Skip merge requests marked draft. Every push to a draft costs a "
+                    + "model call, and a draft is by definition not finished. Defaults to false.")
+            Boolean skipDrafts,
+            @Schema(description = "Maximum model turns per review. 1 (default) is a single shot. "
+                    + "Raise this together with `agentTools` to let the reviewer call read_file.",
+                    example = "8") Integer agentMaxTurns,
+            @Schema(description = "Tool names the reviewer may call. Currently only `read_file`. "
+                    + "Empty (default) advertises no tools.", example = "[\"read_file\"]")
+            List<String> agentTools,
+            @Schema(description = "When true, mrr Approves the GitLab MR after a review that leaves "
+                    + "zero open findings, and Unapproves if a later commit reintroduces one. Default false.")
+            Boolean autoApprove) {
+    }
+
+    @Schema(description = "A newly registered project, plus the two values GitLab needs.")
+    public record Registered(
+            @Schema(description = "The stored project, secrets masked.") Project project,
+            @Schema(description = "Readable exactly once. Paste into GitLab's webhook *Secret token*.")
+            String webhookSecret,
+            @Schema(description = "Paste into GitLab's webhook *URL*.",
+                    example = "https://mrr.example.com/webhooks/gitlab/9c51deb6-89fd-4f8c-bd1b-309310563fa8")
+            String webhookUrl) {
+    }
+}

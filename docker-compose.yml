@@ -1,0 +1,20 @@
+services:
+  mrr:
+    build: .
+    image: mrr:latest
+    container_name: mrr
+    restart: unless-stopped
+    ports:
+      - "${MRR_PORT:-8130}:8130"
+    environment:
+      # Public URL GitLab will call. Must be reachable from your GitLab instance —
+      # localhost works only if GitLab runs on this same machine.
+      MRR_BASE_URL: ${MRR_BASE_URL:-http://localhost:8130}
+      MRR_REVIEW_WORKERS: ${MRR_REVIEW_WORKERS:-2}
+      MRR_MAX_DIFF_CHARS: ${MRR_MAX_DIFF_CHARS:-200000}
+      MRR_MAX_TRACE_CHARS: ${MRR_MAX_TRACE_CHARS:-8000}
+    volumes:
+      - mrr-data:/data
+
+volumes:
+  mrr-data:

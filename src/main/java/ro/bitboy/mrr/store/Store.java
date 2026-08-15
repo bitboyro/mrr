@@ -1,0 +1,810 @@
+package ro.bitboy.mrr.store;
+
+import org.springframework.dao.DataAccessException;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.stereotype.Component;
+import ro.bitboy.mrr.auth.Ids;
+import ro.bitboy.mrr.auth.Principal;
+import ro.bitboy.mrr.model.AgentDocument;
+import ro.bitboy.mrr.model.AgentSkill;
+import ro.bitboy.mrr.model.AgentTrace;
+import ro.bitboy.mrr.model.FailureKind;
+import ro.bitboy.mrr.model.Finding;
+import ro.bitboy.mrr.model.MergeRequestInfo;
+import ro.bitboy.mrr.model.MrStatus;
+import ro.bitboy.mrr.model.Project;
+import ro.bitboy.mrr.model.Reply;
+import ro.bitboy.mrr.model.Review;
+import ro.bitboy.mrr.model.Role;
+import ro.bitboy.mrr.model.User;
+import ro.bitboy.mrr.web.ApiException;
+
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.time.Instant;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * Every SQL statement in mrr. One class instead of four repositories and a service layer —
+ * the whole data access surface fits on two screens and stays that way.
+ *
+ * <p>Timestamps are ISO-8601 TEXT because SQLite has no date type. Queries stay
+ * dialect-neutral so a Postgres swap remains a config change.
+ */
+@Component
+public class Store {
+
+    private final JdbcClient db;
+
+    public Store(JdbcClient db) {
+        this.db = db;
+    }
+
+    // ── users ────────────────────────────────────────────────────────────────────────
+
+    public long countUsers() {
+        return db.sql("SELECT COUNT(*) FROM users").query(Long.class).single();
+    }
+
+    public User createUser(String name, Role role) {
+        User user = new User(Ids.newId(), name, role, Instant.now());
+        db.sql("INSERT INTO users (id, name, role, created_at) VALUES (?, ?, ?, ?)")
+                .params(user.id(), user.name(), user.role().name(), user.createdAt().toString())
+                .update();
+        return user;
+    }
+
+    public List<User> listUsers() {
+        return db.sql("SELECT * FROM users ORDER BY created_at").query(Store::toUser).list();
+    }
+
+    public Optional<User> findUser(String id) {
+        return db.sql("SELECT * FROM users WHERE id = ?").param(id).query(Store::toUser).optional();
+    }
+
+    // ── tokens ───────────────────────────────────────────────────────────────────────
+
+    /**
+     * Mints a token. The plaintext is returned here and nowhere else — only its SHA-256 hash
+     * and a display prefix reach the database.
+     */
+    public String createToken(String userId, String name) {
+        String token = Ids.newToken();
+        db.sql("""
+                INSERT INTO tokens (id, user_id, name, token_hash, prefix, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """)
+                .params(Ids.newId(), userId, name, Ids.sha256(token), Ids.prefixOf(token),
+                        Instant.now().toString())
+                .update();
+        return token;
+    }
+
+    /** Resolves a presented token to its caller. The hash lookup is the authentication. */
+    public Optional<Principal> resolveToken(String token) {
+        return db.sql("""
+                SELECT u.id, u.name, u.role
+                FROM tokens t JOIN users u ON u.id = t.user_id
+                WHERE t.token_hash = ?
+                """)
+                .param(Ids.sha256(token))
+                .query((rs, n) -> new Principal(
+                        rs.getString("id"), rs.getString("name"), Role.valueOf(rs.getString("role"))))
+                .optional();
+    }
+
+    public void touchToken(String token) {
+        db.sql("UPDATE tokens SET last_used_at = ? WHERE token_hash = ?")
+                .params(Instant.now().toString(), Ids.sha256(token))
+                .update();
+    }
+
+    public List<TokenInfo> listTokens(String userId) {
+        return db.sql("SELECT id, name, prefix, created_at, last_used_at FROM tokens WHERE user_id = ? ORDER BY created_at")
+                .param(userId)
+                .query((rs, n) -> new TokenInfo(rs.getString("id"), rs.getString("name"),
+                        rs.getString("prefix"), rs.getString("created_at"), rs.getString("last_used_at")))
+                .list();
+    }
+
+    /** Scoped by user so a USER can only ever revoke its own. */
+    public boolean deleteToken(String tokenId, String userId) {
+        return db.sql("DELETE FROM tokens WHERE id = ? AND user_id = ?")
+                .params(tokenId, userId).update() > 0;
+    }
+
+    public record TokenInfo(String id, String name, String prefix, String createdAt, String lastUsedAt) {
+    }
+
+    // ── projects ─────────────────────────────────────────────────────────────────────
+
+    public Project createProject(Project p) {
+        db.sql("""
+                INSERT INTO projects (id, owner_id, name, enabled, gitlab_url, gitlab_project_id,
+                                      gitlab_token, webhook_secret, provider, model_base_url,
+                                      model, model_key, skill, skip_drafts, agent_max_turns,
+                                      agent_tools, auto_approve, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)
+                .params(p.id(), p.ownerId(), p.name(), p.enabled() ? 1 : 0, p.gitlabUrl(),
+                        p.gitlabProjectId(), p.gitlabToken(), p.webhookSecret(), p.provider().name(),
+                        p.modelBaseUrl(), p.model(), p.modelKey(), p.skill(), p.skipDrafts() ? 1 : 0,
+                        p.agentMaxTurns(), toolsCsv(p.agentTools()), p.autoApprove() ? 1 : 0,
+                        p.createdAt().toString())
+                .update();
+        return p;
+    }
+
+    public void updateProject(Project p) {
+        db.sql("""
+                UPDATE projects SET name = ?, enabled = ?, gitlab_url = ?, gitlab_project_id = ?,
+                       gitlab_token = ?, webhook_secret = ?, provider = ?, model_base_url = ?,
+                       model = ?, model_key = ?, skill = ?, skip_drafts = ?, agent_max_turns = ?,
+                       agent_tools = ?, auto_approve = ?
+                WHERE id = ?
+                """)
+                .params(p.name(), p.enabled() ? 1 : 0, p.gitlabUrl(), p.gitlabProjectId(),
+                        p.gitlabToken(), p.webhookSecret(), p.provider().name(), p.modelBaseUrl(),
+                        p.model(), p.modelKey(), p.skill(), p.skipDrafts() ? 1 : 0,
+                        p.agentMaxTurns(), toolsCsv(p.agentTools()), p.autoApprove() ? 1 : 0, p.id())
+                .update();
+    }
+
+    public Optional<Project> findProject(String id) {
+        return db.sql("SELECT * FROM projects WHERE id = ?").param(id)
+                .query(Store::toProject).optional();
+    }
+
+    /**
+     * The single authorization gate for a project, shared by the REST API and the MCP tools
+     * so there is no second place to get it wrong.
+     *
+     * <p>A non-owner gets the same 404 as a caller asking for an id that does not exist —
+     * answering 403 would confirm the project is real.
+     */
+    public Project requireVisible(Principal caller, String projectId) {
+        return findProject(projectId)
+                .filter(caller::owns)
+                .orElseThrow(() -> ApiException.notFound("project"));
+    }
+
+    /** Admins list everything; everyone else lists only their own. */
+    public List<Project> listProjects(Principal caller) {
+        return caller.isAdmin()
+                ? db.sql("SELECT * FROM projects ORDER BY created_at").query(Store::toProject).list()
+                : db.sql("SELECT * FROM projects WHERE owner_id = ? ORDER BY created_at")
+                        .param(caller.userId()).query(Store::toProject).list();
+    }
+
+    public boolean deleteProject(String id) {
+        db.sql("DELETE FROM findings WHERE project_id = ?").param(id).update();
+        db.sql("DELETE FROM replies WHERE project_id = ?").param(id).update();
+        db.sql("DELETE FROM reviews WHERE project_id = ?").param(id).update();
+        db.sql("DELETE FROM mr_status WHERE project_id = ?").param(id).update();
+        db.sql("DELETE FROM agent_skills WHERE project_id = ?").param(id).update();
+        db.sql("DELETE FROM agent_documents WHERE project_id = ?").param(id).update();
+        return db.sql("DELETE FROM projects WHERE id = ?").param(id).update() > 0;
+    }
+
+    // ── reviews ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * Claims a review for this head commit, or returns the existing one.
+     *
+     * <p>The {@code UNIQUE(project_id, mr_iid, head_sha)} constraint is the idempotency
+     * mechanism: a redelivered webhook collides here and gets the original review back rather
+     * than spending tokens on a duplicate. A new push is a new SHA and so a new review.
+     *
+     * @return the review, and whether this call is the one that created it
+     */
+    public Claim claimReview(String projectId, long mrIid, String headSha, String payload,
+                            MergeRequestInfo mr) {
+        // Check first: a re-delivery is the common case, and this keeps it off the error path.
+        Optional<Review> existing = findReview(projectId, mrIid, headSha);
+        if (existing.isPresent()) {
+            return new Claim(existing.get(), false);
+        }
+
+        Review review = new Review(Ids.newId(), projectId, mrIid, headSha, Review.State.PENDING,
+                mr, payload, null, null, null, null, null, null, Instant.now(), null, 0, null);
+        try {
+            db.sql("""
+                    INSERT INTO reviews (id, project_id, mr_iid, head_sha, state, payload, created_at,
+                                         mr_title, mr_url, mr_state, mr_action, mr_draft,
+                                         source_branch, target_branch,
+                                         mr_author_name, mr_author_username,
+                                         actor_name, actor_username,
+                                         commit_message, commit_author_name, commit_author_email,
+                                         commit_at, labels, files_changed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """)
+                    .params(review.id(), projectId, mrIid, headSha, review.state().name(),
+                            payload, review.createdAt().toString(),
+                            mr.title(), mr.url(), mr.state(), mr.action(), bool(mr.draft()),
+                            mr.sourceBranch(), mr.targetBranch(),
+                            mr.authorName(), mr.authorUsername(),
+                            mr.actorName(), mr.actorUsername(),
+                            mr.commitMessage(), mr.commitAuthorName(), mr.commitAuthorEmail(),
+                            mr.commitAt() == null ? null : mr.commitAt().toString(),
+                            mr.labels(), mr.filesChanged())
+                    .update();
+            return new Claim(review, true);
+        } catch (DataAccessException e) {
+            // Two concurrent deliveries of the same event both passed the check above; the
+            // constraint arbitrated and one lost. Catch DataAccessException, not
+            // DuplicateKeyException: Spring has no error-code mapping for SQLite, so a
+            // unique-constraint failure surfaces as UncategorizedSQLException.
+            return findReview(projectId, mrIid, headSha)
+                    .map(found -> new Claim(found, false))
+                    .orElseThrow(() -> e);
+        }
+    }
+
+    public record Claim(Review review, boolean created) {
+    }
+
+    public Optional<Review> findReview(String id) {
+        return db.sql("SELECT * FROM reviews WHERE id = ?").param(id)
+                .query(Store::toReview).optional();
+    }
+
+    public Optional<Review> findReview(String projectId, long mrIid, String headSha) {
+        return db.sql("SELECT * FROM reviews WHERE project_id = ? AND mr_iid = ? AND head_sha = ?")
+                .params(projectId, mrIid, headSha)
+                .query(Store::toReview).optional();
+    }
+
+    public List<Review> listReviews(Principal caller, String projectId, int limit) {
+        return listReviews(caller, projectId, null, limit);
+    }
+
+    public List<Review> listReviews(Principal caller, String projectId, Long mrIid, int limit) {
+        String sql = "SELECT r.* FROM reviews r JOIN projects p ON p.id = r.project_id WHERE 1=1"
+                + (projectId == null ? "" : " AND r.project_id = ?")
+                + (mrIid == null ? "" : " AND r.mr_iid = ?")
+                + (caller.isAdmin() ? "" : " AND p.owner_id = ?")
+                + " ORDER BY r.created_at DESC LIMIT ?";
+        var spec = db.sql(sql);
+        int i = 1;
+        if (projectId != null) spec = spec.param(i++, projectId);
+        if (mrIid != null) spec = spec.param(i++, mrIid);
+        if (!caller.isAdmin()) spec = spec.param(i++, caller.userId());
+        return spec.param(i, limit).query(Store::toReview).list();
+    }
+
+    public void markProcessing(String reviewId, String prompt) {
+        db.sql("UPDATE reviews SET state = ?, prompt = ? WHERE id = ?")
+                .params(Review.State.PROCESSING.name(), prompt, reviewId).update();
+    }
+
+    /**
+     * Writes back the fields only the GitLab API knows — chiefly the MR author, which the
+     * webhook identifies by numeric id alone. Also runs on a re-run, so a review re-done
+     * after a retitle picks up the new title.
+     */
+    public void updateMergeRequestInfo(String reviewId, MergeRequestInfo mr) {
+        db.sql("""
+                UPDATE reviews SET mr_title = ?, mr_url = ?, source_branch = ?, target_branch = ?,
+                       mr_author_name = ?, mr_author_username = ?, files_changed = ?
+                WHERE id = ?
+                """)
+                .params(mr.title(), mr.url(), mr.sourceBranch(), mr.targetBranch(),
+                        mr.authorName(), mr.authorUsername(), mr.filesChanged(), reviewId)
+                .update();
+    }
+
+    /**
+     * Persists the agent's conversation after it finishes (or refuses). {@code prompt} is
+     * left as the initial system+user send — the trail lives here, not there.
+     */
+    public void saveTrace(String reviewId, AgentTrace trace) {
+        int turns = trace == null ? 0 : trace.turns();
+        db.sql("UPDATE reviews SET agent_turns = ?, trace = ? WHERE id = ?")
+                .params(turns, trace == null ? null : trace.toJson(), reviewId).update();
+    }
+
+    /**
+     * Persists the model's output the moment it exists, before we try to deliver it. The
+     * model call is the expensive, non-repeatable part; a failure to post must not throw its
+     * result away.
+     */
+    public void saveResponse(String reviewId, String response) {
+        db.sql("UPDATE reviews SET response = ? WHERE id = ?").params(response, reviewId).update();
+    }
+
+    /**
+     * Deliberately does not touch {@code response} — {@link #saveResponse} already stored the
+     * model's raw output, and that is what the column is for. Overwriting it here with the
+     * rendered summary comment would lose the thing you actually want when asking why a
+     * review said what it said.
+     */
+    public void markReady(String reviewId, String discussionId, String noteId) {
+        db.sql("""
+                UPDATE reviews SET state = ?, discussion_id = ?, note_id = ?, finished_at = ?
+                WHERE id = ?
+                """)
+                .params(Review.State.READY.name(), discussionId, noteId,
+                        Instant.now().toString(), reviewId)
+                .update();
+    }
+
+    public void markFailed(String reviewId, String error) {
+        markFailed(reviewId, FailureKind.UNKNOWN, error);
+    }
+
+    public void markFailed(String reviewId, FailureKind kind, String error) {
+        FailureKind resolved = kind == null ? FailureKind.UNKNOWN : kind;
+        String message = error == null ? resolved.headline() : error;
+        db.sql("UPDATE reviews SET state = ?, error = ?, error_kind = ?, finished_at = ? WHERE id = ?")
+                .params(Review.State.FAILED.name(), message, resolved.name(),
+                        Instant.now().toString(), reviewId)
+                .update();
+        findReview(reviewId).ifPresent(r -> recordProjectError(r.projectId(), resolved, message));
+    }
+
+    public void recordProjectError(String projectId, FailureKind kind, String error) {
+        db.sql("""
+                UPDATE projects SET last_error_kind = ?, last_error = ?, last_error_at = ?
+                WHERE id = ?
+                """)
+                .params(kind.name(), error, Instant.now().toString(), projectId)
+                .update();
+    }
+
+    public void clearProjectError(String projectId) {
+        db.sql("""
+                UPDATE projects SET last_error_kind = NULL, last_error = NULL, last_error_at = NULL
+                WHERE id = ?
+                """).param(projectId).update();
+    }
+
+    /**
+     * Lets a re-run reuse the row instead of tripping the unique constraint. {@code note_id}
+     * is deliberately preserved, so the re-run edits the comment it already posted.
+     */
+    public void resetForRerun(String reviewId) {
+        db.sql("""
+                UPDATE reviews SET state = ?, response = NULL, error = NULL, error_kind = NULL,
+                       finished_at = NULL, prompt = NULL, agent_turns = 0, trace = NULL
+                WHERE id = ?
+                """)
+                .params(Review.State.PENDING.name(), reviewId).update();
+    }
+
+    /**
+     * Cancels a review the moment its merge request is merged or closed. The worker checks
+     * this before posting, so a review that finishes after the MR is gone is recorded but
+     * never delivered — nobody wants a bot comment on an MR that merged ten minutes ago.
+     *
+     * @return true when a live review was actually cancelled
+     */
+    public boolean cancelRunning(String projectId, long mrIid, String reason) {
+        boolean cancelled = db.sql("""
+                UPDATE reviews SET state = ?, error = ?, finished_at = ?
+                WHERE project_id = ? AND mr_iid = ? AND state IN (?, ?)
+                """)
+                .params(Review.State.CANCELLED.name(), reason, Instant.now().toString(),
+                        projectId, mrIid,
+                        Review.State.PENDING.name(), Review.State.PROCESSING.name())
+                .update() > 0;
+        if (cancelled) {
+            MrStatus previous = findMrStatus(projectId, mrIid).orElse(null);
+            upsertMrStatus(projectId, mrIid, MrStatus.Status.CANCELLED,
+                    previous == null ? null : previous.latestReviewId(),
+                    previous == null ? null : previous.latestHeadSha(),
+                    openFindings(projectId, mrIid).size());
+        }
+        return cancelled;
+    }
+
+    public Review.State stateOf(String reviewId) {
+        return db.sql("SELECT state FROM reviews WHERE id = ?").param(reviewId)
+                .query(String.class).optional().map(Review.State::valueOf).orElse(null);
+    }
+
+    // ── findings ─────────────────────────────────────────────────────────────────────
+
+    public Finding createFinding(Finding f) {
+        db.sql("""
+                INSERT INTO findings (id, review_id, project_id, mr_iid, file_path, line, severity,
+                                      title, body, discussion_id, note_id, inline, state, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)
+                .params(f.id(), f.reviewId(), f.projectId(), f.mrIid(), f.filePath(), f.line(),
+                        f.severity().name(), f.title(), f.body(), f.discussionId(), f.noteId(),
+                        f.inline() ? 1 : 0, f.state().name(), f.createdAt().toString())
+                .update();
+        return f;
+    }
+
+    /**
+     * Everything still standing on this merge request, across every review of it. This is the
+     * set handed to the model on the next commit so it can say which ones were fixed.
+     */
+    public List<Finding> openFindings(String projectId, long mrIid) {
+        return db.sql("SELECT * FROM findings WHERE project_id = ? AND mr_iid = ? AND state = ? ORDER BY created_at")
+                .params(projectId, mrIid, Finding.State.OPEN.name())
+                .query(Store::toFinding).list();
+    }
+
+    public List<Finding> findingsOf(String reviewId) {
+        return db.sql("SELECT * FROM findings WHERE review_id = ? ORDER BY created_at")
+                .param(reviewId).query(Store::toFinding).list();
+    }
+
+    /**
+     * The finding behind a GitLab thread, if mrr owns that thread. This is the guard on note
+     * events: no match means the comment is on somebody else's conversation.
+     */
+    public Optional<Finding> findByDiscussion(String projectId, long mrIid, String discussionId) {
+        return db.sql("SELECT * FROM findings WHERE project_id = ? AND mr_iid = ? AND discussion_id = ?")
+                .params(projectId, mrIid, discussionId)
+                .query(Store::toFinding).optional();
+    }
+
+    public void markAddressed(String findingId) {
+        db.sql("UPDATE findings SET state = ?, resolved_at = ? WHERE id = ?")
+                .params(Finding.State.ADDRESSED.name(), Instant.now().toString(), findingId)
+                .update();
+    }
+
+    public List<Finding> findingsOfMr(String projectId, long mrIid) {
+        return db.sql("SELECT * FROM findings WHERE project_id = ? AND mr_iid = ? ORDER BY created_at")
+                .params(projectId, mrIid)
+                .query(Store::toFinding).list();
+    }
+
+    // ── replies ──────────────────────────────────────────────────────────────────────
+
+    public Reply createReply(Reply reply) {
+        db.sql("""
+                INSERT INTO replies (id, project_id, mr_iid, discussion_id, finding_id,
+                                     prompt, response, trace, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)
+                .params(reply.id(), reply.projectId(), reply.mrIid(), reply.discussionId(),
+                        reply.findingId(), reply.prompt(), reply.response(),
+                        reply.trace() == null ? null : reply.trace().toJson(),
+                        reply.createdAt().toString())
+                .update();
+        return reply;
+    }
+
+    public Optional<Reply> findReply(String id) {
+        return db.sql("SELECT * FROM replies WHERE id = ?").param(id)
+                .query(Store::toReply).optional();
+    }
+
+    public List<Reply> listReplies(String projectId, long mrIid) {
+        return db.sql("SELECT * FROM replies WHERE project_id = ? AND mr_iid = ? ORDER BY created_at")
+                .params(projectId, mrIid)
+                .query(Store::toReply).list();
+    }
+
+    // ── mr_status ────────────────────────────────────────────────────────────────────
+
+    public void upsertMrStatus(String projectId, long mrIid, MrStatus.Status status,
+                               String reviewId, String headSha, int openFindings) {
+        Optional<MrStatus> existing = findMrStatus(projectId, mrIid);
+        String now = Instant.now().toString();
+        if (existing.isEmpty()) {
+            db.sql("""
+                    INSERT INTO mr_status (project_id, mr_iid, current_status, latest_review_id,
+                                           latest_head_sha, open_findings, mrr_approved,
+                                           mrr_approved_sha, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?)
+                    """)
+                    .params(projectId, mrIid, status.name(), reviewId, headSha, openFindings, now)
+                    .update();
+            return;
+        }
+        db.sql("""
+                UPDATE mr_status SET current_status = ?, latest_review_id = ?, latest_head_sha = ?,
+                       open_findings = ?, updated_at = ?
+                WHERE project_id = ? AND mr_iid = ?
+                """)
+                .params(status.name(), reviewId, headSha, openFindings, now, projectId, mrIid)
+                .update();
+    }
+
+    public void markMrrApproved(String projectId, long mrIid, String headSha) {
+        db.sql("""
+                UPDATE mr_status SET mrr_approved = 1, mrr_approved_sha = ?, updated_at = ?
+                WHERE project_id = ? AND mr_iid = ?
+                """)
+                .params(headSha, Instant.now().toString(), projectId, mrIid)
+                .update();
+    }
+
+    public void clearMrrApproved(String projectId, long mrIid) {
+        db.sql("""
+                UPDATE mr_status SET mrr_approved = 0, mrr_approved_sha = NULL, updated_at = ?
+                WHERE project_id = ? AND mr_iid = ?
+                """)
+                .params(Instant.now().toString(), projectId, mrIid)
+                .update();
+    }
+
+    public Optional<MrStatus> findMrStatus(String projectId, long mrIid) {
+        return db.sql("SELECT * FROM mr_status WHERE project_id = ? AND mr_iid = ?")
+                .params(projectId, mrIid)
+                .query(Store::toMrStatus).optional();
+    }
+
+    public List<MrStatus> listMrStatus(String projectId) {
+        return db.sql("SELECT * FROM mr_status WHERE project_id = ? ORDER BY updated_at DESC")
+                .param(projectId)
+                .query(Store::toMrStatus).list();
+    }
+
+    // ── agent skills / documents ─────────────────────────────────────────────────────
+
+    public List<AgentSkill> listSkills(String projectId) {
+        return db.sql("SELECT * FROM agent_skills WHERE project_id = ? ORDER BY position, name")
+                .param(projectId).query(Store::toSkill).list();
+    }
+
+    public AgentSkill createSkill(String projectId, String name, String body, boolean enabled) {
+        String trimmed = requireName(name);
+        int position = db.sql("SELECT COALESCE(MAX(position), -1) + 1 FROM agent_skills WHERE project_id = ?")
+                .param(projectId).query(Integer.class).optional().orElse(0);
+        AgentSkill skill = new AgentSkill(Ids.newId(), projectId, trimmed,
+                body == null ? "" : body, enabled, position, Instant.now());
+        try {
+            db.sql("""
+                    INSERT INTO agent_skills (id, project_id, name, body, enabled, position, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """)
+                    .params(skill.id(), projectId, skill.name(), skill.body(),
+                            skill.enabled() ? 1 : 0, skill.position(), skill.createdAt().toString())
+                    .update();
+        } catch (DataAccessException e) {
+            throw ApiException.conflict("a skill named '" + trimmed + "' already exists");
+        }
+        return skill;
+    }
+
+    /**
+     * Legacy {@code projects.skill} writes land on a skill named {@code reviewer}. Blank
+     * body is ignored so a partial project update cannot wipe the set.
+     */
+    public void upsertNamedSkill(String projectId, String name, String body) {
+        if (body == null || body.isBlank()) {
+            return;
+        }
+        Optional<AgentSkill> existing = listSkills(projectId).stream()
+                .filter(s -> s.name().equalsIgnoreCase(name)).findFirst();
+        if (existing.isPresent()) {
+            updateSkill(existing.get().id(), existing.get().name(), body, existing.get().enabled(),
+                    existing.get().position());
+        } else {
+            createSkill(projectId, name, body, true);
+        }
+    }
+
+    public Optional<AgentSkill> findSkill(String projectId, String skillId) {
+        return db.sql("SELECT * FROM agent_skills WHERE project_id = ? AND id = ?")
+                .params(projectId, skillId).query(Store::toSkill).optional();
+    }
+
+    public AgentSkill updateSkill(String skillId, String name, String body, Boolean enabled,
+                                  Integer position) {
+        AgentSkill current = db.sql("SELECT * FROM agent_skills WHERE id = ?").param(skillId)
+                .query(Store::toSkill).optional()
+                .orElseThrow(() -> ApiException.notFound("skill"));
+        String nextName = name == null || name.isBlank() ? current.name() : requireName(name);
+        String nextBody = body == null ? current.body() : body;
+        boolean nextEnabled = enabled == null ? current.enabled() : enabled;
+        int nextPosition = position == null ? current.position() : position;
+        try {
+            db.sql("""
+                    UPDATE agent_skills SET name = ?, body = ?, enabled = ?, position = ?
+                    WHERE id = ?
+                    """)
+                    .params(nextName, nextBody, nextEnabled ? 1 : 0, nextPosition, skillId)
+                    .update();
+        } catch (DataAccessException e) {
+            throw ApiException.conflict("a skill named '" + nextName + "' already exists");
+        }
+        return new AgentSkill(current.id(), current.projectId(), nextName, nextBody,
+                nextEnabled, nextPosition, current.createdAt());
+    }
+
+    public boolean deleteSkill(String projectId, String skillId) {
+        return db.sql("DELETE FROM agent_skills WHERE project_id = ? AND id = ?")
+                .params(projectId, skillId).update() > 0;
+    }
+
+    public List<AgentDocument> listDocuments(String projectId) {
+        return db.sql("SELECT * FROM agent_documents WHERE project_id = ? ORDER BY name")
+                .param(projectId).query(Store::toDocument).list();
+    }
+
+    public AgentDocument createDocument(String projectId, String name, String body, boolean enabled) {
+        String trimmed = requireName(name);
+        AgentDocument doc = new AgentDocument(Ids.newId(), projectId, trimmed,
+                body == null ? "" : body, enabled, Instant.now());
+        try {
+            db.sql("""
+                    INSERT INTO agent_documents (id, project_id, name, body, enabled, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """)
+                    .params(doc.id(), projectId, doc.name(), doc.body(),
+                            doc.enabled() ? 1 : 0, doc.createdAt().toString())
+                    .update();
+        } catch (DataAccessException e) {
+            throw ApiException.conflict("a document named '" + trimmed + "' already exists");
+        }
+        return doc;
+    }
+
+    public Optional<AgentDocument> findDocument(String projectId, String documentId) {
+        return db.sql("SELECT * FROM agent_documents WHERE project_id = ? AND id = ?")
+                .params(projectId, documentId).query(Store::toDocument).optional();
+    }
+
+    public AgentDocument updateDocument(String documentId, String name, String body, Boolean enabled) {
+        AgentDocument current = db.sql("SELECT * FROM agent_documents WHERE id = ?").param(documentId)
+                .query(Store::toDocument).optional()
+                .orElseThrow(() -> ApiException.notFound("document"));
+        String nextName = name == null || name.isBlank() ? current.name() : requireName(name);
+        String nextBody = body == null ? current.body() : body;
+        boolean nextEnabled = enabled == null ? current.enabled() : enabled;
+        try {
+            db.sql("UPDATE agent_documents SET name = ?, body = ?, enabled = ? WHERE id = ?")
+                    .params(nextName, nextBody, nextEnabled ? 1 : 0, documentId)
+                    .update();
+        } catch (DataAccessException e) {
+            throw ApiException.conflict("a document named '" + nextName + "' already exists");
+        }
+        return new AgentDocument(current.id(), current.projectId(), nextName, nextBody,
+                nextEnabled, current.createdAt());
+    }
+
+    public boolean deleteDocument(String projectId, String documentId) {
+        return db.sql("DELETE FROM agent_documents WHERE project_id = ? AND id = ?")
+                .params(projectId, documentId).update() > 0;
+    }
+
+    private static String requireName(String name) {
+        if (name == null || name.isBlank()) {
+            throw ApiException.badRequest("name is required");
+        }
+        String trimmed = name.trim();
+        if (trimmed.length() > 80) {
+            throw ApiException.badRequest("name is too long");
+        }
+        return trimmed;
+    }
+
+    // ── row mapping ──────────────────────────────────────────────────────────────────
+
+    private static User toUser(ResultSet rs, int n) throws SQLException {
+        return new User(rs.getString("id"), rs.getString("name"),
+                Role.valueOf(rs.getString("role")), instant(rs.getString("created_at")));
+    }
+
+    private static Project toProject(ResultSet rs, int n) throws SQLException {
+        return new Project(
+                rs.getString("id"), rs.getString("owner_id"), rs.getString("name"),
+                rs.getInt("enabled") == 1, rs.getString("gitlab_url"), rs.getString("gitlab_project_id"),
+                rs.getString("gitlab_token"), rs.getString("webhook_secret"),
+                Project.Provider.valueOf(rs.getString("provider")), rs.getString("model_base_url"),
+                rs.getString("model"), rs.getString("model_key"), rs.getString("skill"),
+                rs.getInt("skip_drafts") == 1,
+                rs.getInt("agent_max_turns") == 0 ? 1 : rs.getInt("agent_max_turns"),
+                toolsList(rs.getString("agent_tools")),
+                rs.getInt("auto_approve") == 1,
+                failureKind(rs.getString("last_error_kind")),
+                rs.getString("last_error"),
+                instant(rs.getString("last_error_at")),
+                instant(rs.getString("created_at")));
+    }
+
+    private static Review toReview(ResultSet rs, int n) throws SQLException {
+        MergeRequestInfo mr = new MergeRequestInfo(
+                rs.getString("mr_title"), rs.getString("mr_url"), rs.getString("mr_state"),
+                rs.getString("mr_action"), nullableBool(rs, "mr_draft"),
+                rs.getString("source_branch"), rs.getString("target_branch"),
+                rs.getString("mr_author_name"), rs.getString("mr_author_username"),
+                rs.getString("actor_name"), rs.getString("actor_username"),
+                rs.getString("commit_message"), rs.getString("commit_author_name"),
+                rs.getString("commit_author_email"), instant(rs.getString("commit_at")),
+                rs.getString("labels"), nullableInt(rs, "files_changed"));
+
+        return new Review(
+                rs.getString("id"), rs.getString("project_id"), rs.getLong("mr_iid"),
+                rs.getString("head_sha"), Review.State.valueOf(rs.getString("state")),
+                mr,
+                rs.getString("payload"), rs.getString("prompt"), rs.getString("response"),
+                rs.getString("note_id"), rs.getString("discussion_id"), rs.getString("error"),
+                failureKind(rs.getString("error_kind")),
+                instant(rs.getString("created_at")), instant(rs.getString("finished_at")),
+                rs.getInt("agent_turns"), AgentTrace.parse(rs.getString("trace")));
+    }
+
+    private static Finding toFinding(ResultSet rs, int n) throws SQLException {
+        return new Finding(
+                rs.getString("id"), rs.getString("review_id"), rs.getString("project_id"),
+                rs.getLong("mr_iid"), rs.getString("file_path"), nullableInt(rs, "line"),
+                Finding.Severity.valueOf(rs.getString("severity")), rs.getString("title"),
+                rs.getString("body"), rs.getString("discussion_id"), rs.getString("note_id"),
+                rs.getInt("inline") == 1, Finding.State.valueOf(rs.getString("state")),
+                instant(rs.getString("created_at")), instant(rs.getString("resolved_at")));
+    }
+
+    private static Reply toReply(ResultSet rs, int n) throws SQLException {
+        return new Reply(
+                rs.getString("id"), rs.getString("project_id"), rs.getLong("mr_iid"),
+                rs.getString("discussion_id"), rs.getString("finding_id"),
+                rs.getString("prompt"), rs.getString("response"),
+                AgentTrace.parse(rs.getString("trace")),
+                instant(rs.getString("created_at")));
+    }
+
+    private static MrStatus toMrStatus(ResultSet rs, int n) throws SQLException {
+        return new MrStatus(
+                rs.getString("project_id"), rs.getLong("mr_iid"),
+                MrStatus.Status.valueOf(rs.getString("current_status")),
+                rs.getString("latest_review_id"), rs.getString("latest_head_sha"),
+                rs.getInt("open_findings"), rs.getInt("mrr_approved") == 1,
+                rs.getString("mrr_approved_sha"), instant(rs.getString("updated_at")));
+    }
+
+    private static AgentSkill toSkill(ResultSet rs, int n) throws SQLException {
+        return new AgentSkill(
+                rs.getString("id"), rs.getString("project_id"), rs.getString("name"),
+                rs.getString("body"), rs.getInt("enabled") == 1, rs.getInt("position"),
+                instant(rs.getString("created_at")));
+    }
+
+    private static AgentDocument toDocument(ResultSet rs, int n) throws SQLException {
+        return new AgentDocument(
+                rs.getString("id"), rs.getString("project_id"), rs.getString("name"),
+                rs.getString("body"), rs.getInt("enabled") == 1,
+                instant(rs.getString("created_at")));
+    }
+
+    private static FailureKind failureKind(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return FailureKind.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            return FailureKind.UNKNOWN;
+        }
+    }
+
+    private static String toolsCsv(List<String> tools) {
+        return tools == null || tools.isEmpty() ? null : String.join(",", tools);
+    }
+
+    private static List<String> toolsList(String csv) {
+        if (csv == null || csv.isBlank()) {
+            return List.of();
+        }
+        return Arrays.stream(csv.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList();
+    }
+
+    private static Instant instant(String value) {
+        return value == null ? null : Instant.parse(value);
+    }
+
+    /** SQLite has no boolean; absent must stay absent rather than collapsing to false. */
+    private static Integer bool(Boolean value) {
+        return value == null ? null : (value ? 1 : 0);
+    }
+
+    private static Boolean nullableBool(ResultSet rs, String column) throws SQLException {
+        int value = rs.getInt(column);
+        return rs.wasNull() ? null : value == 1;
+    }
+
+    private static Integer nullableInt(ResultSet rs, String column) throws SQLException {
+        int value = rs.getInt(column);
+        return rs.wasNull() ? null : value;
+    }
+}

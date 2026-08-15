@@ -1,0 +1,1089 @@
+{
+  "components": {
+    "schemas": {
+      "CreateToken": {
+        "description": "Token request.",
+        "properties": {
+          "name": {
+            "description": "Label to recognise it by later. Defaults to \"token\".",
+            "example": "ci",
+            "type": "string"
+          },
+          "userId": {
+            "description": "Whose token this is. Omit to mint one for yourself.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CreateUser": {
+        "description": "New user.",
+        "properties": {
+          "name": {
+            "description": "Unique, human-readable.",
+            "example": "alice",
+            "type": "string"
+          },
+          "role": {
+            "description": "Defaults to USER. ADMIN can mint tokens and see every project.",
+            "enum": [
+              "ADMIN",
+              "USER"
+            ],
+            "example": "USER",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "CreatedToken": {
+        "description": "A freshly minted token. The only time the secret is readable.",
+        "properties": {
+          "name": {
+            "description": "The label given at creation.",
+            "type": "string"
+          },
+          "token": {
+            "description": "The secret. Store it now \u2014 it cannot be retrieved again.",
+            "example": "mrr_ec031d0820e28221c5584065aa46566006e1fbeeb4cdb587815e80df5096d326",
+            "type": "string"
+          },
+          "userId": {
+            "description": "Owner of the token.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "description": "The shape every error in this API takes.",
+        "properties": {
+          "code": {
+            "description": "Stable, machine-readable. Branch on this, not on the message.",
+            "example": "not_found",
+            "type": "string"
+          },
+          "detail": {
+            "description": "Extra context when there is any.",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable.",
+            "example": "project not found",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "MergeRequestInfo": {
+        "description": "The merge request as GitLab described it when this review ran.\n\nA snapshot, not a live view: retitle the MR and push again and you get a second review carrying the new title, with the first left untouched. That history is the point \u2014 it is what lets you ask why a review said what it said.\n\nNote the three different people. `author` owns the MR. `actor` triggered this particular delivery. `commitAuthor` wrote the head commit. On a rebase or a cherry-pick these are routinely three different names.",
+        "properties": {
+          "action": {
+            "description": "The event that triggered this review.",
+            "example": "update",
+            "type": "string"
+          },
+          "actorName": {
+            "description": "Who triggered this delivery \u2014 pushed, opened, reopened.",
+            "type": "string"
+          },
+          "actorUsername": {
+            "type": "string"
+          },
+          "authorName": {
+            "description": "Who owns the MR. Filled in from the API \u2014 the webhook carries only a numeric author_id.",
+            "type": "string"
+          },
+          "authorUsername": {
+            "type": "string"
+          },
+          "commitAt": {
+            "description": "When the head commit was authored.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "commitAuthorEmail": {
+            "type": "string"
+          },
+          "commitAuthorName": {
+            "description": "Who wrote the head commit.",
+            "type": "string"
+          },
+          "commitMessage": {
+            "description": "Message of the head commit.",
+            "type": "string"
+          },
+          "draft": {
+            "description": "Null when GitLab did not say.",
+            "type": "boolean"
+          },
+          "filesChanged": {
+            "description": "Files in the diff. Filled in from the API.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "labels": {
+            "description": "Label names as a JSON array.",
+            "example": [
+              "backend"
+            ],
+            "type": "string"
+          },
+          "sourceBranch": {
+            "example": "fix/batch-reporting",
+            "type": "string"
+          },
+          "state": {
+            "description": "opened | merged | closed",
+            "example": "opened",
+            "type": "string"
+          },
+          "targetBranch": {
+            "example": "main",
+            "type": "string"
+          },
+          "title": {
+            "description": "MR title at review time.",
+            "example": "Add batch CSV reporting for the nightly job",
+            "type": "string"
+          },
+          "url": {
+            "description": "Web URL of the MR.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Project": {
+        "description": "A registered GitLab project. The three secrets \u2014 `gitlabToken`, `webhookSecret`, and `modelKey` \u2014 are write-only: accepted on create and update, always masked on read.",
+        "properties": {
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "enabled": {
+            "description": "False makes mrr acknowledge this project's webhooks and skip them.",
+            "type": "boolean"
+          },
+          "gitlabProjectId": {
+            "description": "Numeric id or `group/project` path.",
+            "example": "bitboy.ro/test-repo",
+            "type": "string"
+          },
+          "gitlabToken": {
+            "description": "Masked on read.",
+            "example": "****v38q",
+            "type": "string"
+          },
+          "gitlabUrl": {
+            "description": "Base URL of the GitLab holding this project \u2014 this is what makes self-hosted work.",
+            "example": "https://gitlab.com",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "example": "claude-opus-5",
+            "type": "string"
+          },
+          "modelBaseUrl": {
+            "description": "OPENAI_COMPAT only. Null means OpenAI itself.",
+            "example": "http://ollama:11434/v1",
+            "type": "string"
+          },
+          "modelKey": {
+            "description": "Masked on read.",
+            "example": "****oosA",
+            "type": "string"
+          },
+          "name": {
+            "example": "test-repo",
+            "type": "string"
+          },
+          "ownerId": {
+            "description": "The user that registered it. Only this user and admins can see it.",
+            "type": "string"
+          },
+          "provider": {
+            "description": "Which adapter reviews this project. ANTHROPIC uses the official Anthropic SDK. OPENAI_COMPAT speaks the chat-completions shape and so reaches OpenAI, Ollama, vLLM, llama.cpp, and most gateways \u2014 pick the one you want with `modelBaseUrl`.",
+            "enum": [
+              "ANTHROPIC",
+              "OPENAI_COMPAT"
+            ],
+            "type": "string"
+          },
+          "skill": {
+            "description": "Review instructions used as the system prompt. Null uses mrr's built-in reviewer prompt.",
+            "type": "string"
+          },
+          "skipDrafts": {
+            "description": "Skip merge requests marked draft. Every push to a draft costs a model call, and a draft is by definition not finished.",
+            "type": "boolean"
+          },
+          "webhookSecret": {
+            "description": "Masked on read. Readable only in the create response.",
+            "example": "****e091",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Registered": {
+        "description": "A newly registered project, plus the two values GitLab needs.",
+        "properties": {
+          "project": {
+            "$ref": "#/components/schemas/Project",
+            "description": "The stored project, secrets masked."
+          },
+          "webhookSecret": {
+            "description": "Readable exactly once. Paste into GitLab's webhook *Secret token*.",
+            "type": "string"
+          },
+          "webhookUrl": {
+            "description": "Paste into GitLab's webhook *URL*.",
+            "example": "https://mrr.example.com/webhooks/gitlab/9c51deb6-89fd-4f8c-bd1b-309310563fa8",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Review": {
+        "description": "One review of one commit on one merge request.\n\nKeyed on `(projectId, mrIid, headSha)` \u2014 that triple is what makes redelivered webhooks free. The `mr` block is a snapshot taken when the review ran, not a live view of the merge request.",
+        "properties": {
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "discussionId": {
+            "description": "GitLab id of the thread holding it. Both are needed to edit.",
+            "type": "string"
+          },
+          "error": {
+            "description": "Why it failed, when it did.",
+            "type": "string"
+          },
+          "finishedAt": {
+            "description": "Set when the review reached a terminal state.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "headSha": {
+            "description": "Commit reviewed. A new push means a new SHA and so a new review.",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "mr": {
+            "$ref": "#/components/schemas/MergeRequestInfo",
+            "description": "The merge request as it stood at this commit."
+          },
+          "mrIid": {
+            "description": "The MR's `iid` \u2014 its number within the project, the one in the URL.",
+            "example": 1,
+            "format": "int64",
+            "type": "integer"
+          },
+          "noteId": {
+            "description": "GitLab id of the posted comment.",
+            "type": "string"
+          },
+          "payload": {
+            "description": "The webhook body, verbatim. Null in list responses.",
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "prompt": {
+            "description": "Exactly what was sent to the model, system prompt included. Null in list responses.",
+            "type": "string"
+          },
+          "response": {
+            "description": "The review the model produced. Null in list responses. May be set even on a FAILED review \u2014 the model succeeded and posting did not.",
+            "type": "string"
+          },
+          "state": {
+            "description": "PENDING \u2014 claimed, queued.\nPROCESSING \u2014 diff fetched, model running.\nREADY \u2014 reviewed and posted. Terminal.\nFAILED \u2014 see `error`. Terminal.\nCANCELLED \u2014 the MR was merged or closed while the review was running, so the result was never posted. Terminal.\n\nStop polling on any terminal state.",
+            "enum": [
+              "PENDING",
+              "PROCESSING",
+              "READY",
+              "FAILED",
+              "CANCELLED"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TokenInfo": {
+        "properties": {
+          "createdAt": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "lastUsedAt": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Upsert": {
+        "description": "Project registration or update. On update, omitted fields are kept.",
+        "properties": {
+          "enabled": {
+            "description": "Set false to make mrr ignore this project's webhooks without deleting it.",
+            "type": "boolean"
+          },
+          "gitlabProjectId": {
+            "description": "Numeric id or `group/project` path \u2014 both work.",
+            "example": "bitboy.ro/test-repo",
+            "type": "string"
+          },
+          "gitlabToken": {
+            "description": "PAT used to read the diff and post the review. Needs `api` scope, or fine-grained `read_code` + `read_merge_request` + `update_merge_request`. Write-only.",
+            "example": "glpat-xxxxxxxxxxxxxxxxxxxx",
+            "type": "string"
+          },
+          "gitlabUrl": {
+            "description": "Your GitLab's base URL. This is what makes self-hosted work.",
+            "example": "https://gitlab.com",
+            "type": "string"
+          },
+          "model": {
+            "description": "Model id, passed through verbatim.",
+            "example": "claude-opus-5",
+            "type": "string"
+          },
+          "modelBaseUrl": {
+            "description": "Only for OPENAI_COMPAT. Omit for OpenAI itself; set it to reach Ollama, vLLM, llama.cpp, or a gateway.",
+            "example": "http://ollama:11434/v1",
+            "type": "string"
+          },
+          "modelKey": {
+            "description": "API key for the model provider. Write-only.",
+            "example": "sk-...",
+            "type": "string"
+          },
+          "name": {
+            "description": "Display name.",
+            "example": "test-repo",
+            "type": "string"
+          },
+          "provider": {
+            "description": "Which adapter reviews this project.",
+            "enum": [
+              "ANTHROPIC",
+              "OPENAI_COMPAT"
+            ],
+            "example": "OPENAI_COMPAT",
+            "type": "string"
+          },
+          "skill": {
+            "description": "Review instructions, used as the system prompt. Omit for mrr's built-in reviewer prompt.",
+            "example": "Focus on concurrency bugs and error handling.",
+            "type": "string"
+          },
+          "skipDrafts": {
+            "description": "Skip merge requests marked draft. Every push to a draft costs a model call, and a draft is by definition not finished. Defaults to false.",
+            "type": "boolean"
+          },
+          "webhookSecret": {
+            "description": "Shared secret GitLab sends as `X-Gitlab-Token`. Generated if omitted. Write-only.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "User": {
+        "description": "A person or system that can own projects and hold tokens.",
+        "properties": {
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "description": "Server-assigned id.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Unique, human-readable.",
+            "example": "alice",
+            "type": "string"
+          },
+          "role": {
+            "description": "ADMIN can mint tokens and see every project; USER sees only its own.",
+            "enum": [
+              "ADMIN",
+              "USER"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "token": {
+        "description": "An mrr API token, as `Authorization: Bearer mrr_\u2026`. `X-API-Key: mrr_\u2026` is accepted as an alternative and is what the MCP endpoint uses.\n\nTokens are minted by an **admin** token via `POST /api/tokens`. The very first one is printed to the console on first boot and written to `/data/root-token.txt`; it is never recoverable afterwards, because only its SHA-256 hash is stored.",
+        "name": "Authorization",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "AI code review for GitLab merge requests.\n\nA merge request is opened or pushed to, GitLab calls the webhook, mrr pulls the diff, sends it to a model with that project's review instructions, and posts the review back to the MR as a resolvable discussion thread. Every payload, prompt, and response is kept.\n\n## Authentication\n\nEvery endpoint under `/api` needs an API token. `/webhooks/gitlab/{projectId}` does **not** \u2014 GitLab cannot hold an mrr token, so it authenticates with the per-project secret in `X-Gitlab-Token` instead. `/health` is open.\n\n## Authorization\n\nThree rules govern the whole API:\n\n1. Only an `ADMIN` token can create users or mint tokens. A `USER` token may list    and revoke its own tokens and nothing else.\n2. Projects are owned. A `USER` sees and edits only its own; an `ADMIN` sees all.\n3. Asking for a project you do not own returns **404, not 403** \u2014 a 403 would    confirm that the id exists.\n\n## Reviews are asynchronous\n\nAnything that calls a model returns `202 Accepted` with a `Location` header to poll. A review moves `PENDING \u2192 PROCESSING \u2192 READY | FAILED`; `READY` and `FAILED` are terminal, so stop polling when you see one.\n\nReviews are keyed on `(project, mr_iid, head_sha)`. A redelivered webhook, or an `update` event that changed only a label, returns the review that already exists rather than spending tokens on a duplicate. A new push is a new head SHA and so a new review.\n\n## Secrets\n\nGitLab tokens, model keys, and webhook secrets are write-only. They are accepted on create and update, and always masked on read (`****ab12`). The webhook secret is returned exactly once, in the response to `POST /api/projects`.\n",
+    "license": {
+      "name": "Proprietary"
+    },
+    "title": "mrr",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/projects": {
+      "get": {
+        "description": "Your own, or all of them for an ADMIN. Secrets masked.",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Project"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "List projects you can see",
+        "tags": [
+          "Projects"
+        ]
+      },
+      "post": {
+        "description": "The caller becomes the owner. A webhook secret is generated unless you supply one.\n\n**The response contains the only readable copy of the webhook secret.** Paste it, with `webhookUrl`, into the project's *Settings \u2192 Webhooks* in GitLab and tick **Merge request events**. Every later read masks it.",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Upsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Registered"
+                }
+              }
+            },
+            "description": "Registered; carries the webhook URL and secret"
+          },
+          "400": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "A required field is missing or `provider` is invalid"
+          }
+        },
+        "summary": "Register a GitLab project",
+        "tags": [
+          "Projects"
+        ]
+      }
+    },
+    "/api/projects/{id}": {
+      "delete": {
+        "description": "Deletes its review history too. Comments already posted to GitLab stay.",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "No such project, or not yours"
+          }
+        },
+        "summary": "Delete a project",
+        "tags": [
+          "Projects"
+        ]
+      },
+      "get": {
+        "description": "Secrets masked.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "No such project, or not yours"
+          }
+        },
+        "summary": "Fetch one project",
+        "tags": [
+          "Projects"
+        ]
+      },
+      "put": {
+        "description": "A partial update: omitted fields keep their current value. That applies to the secrets too, so you can change the model without re-sending the GitLab token. Send `skill` to change the review instructions; the next review picks them up.",
+        "operationId": "update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Upsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "No such project, or not yours"
+          }
+        },
+        "summary": "Update a project",
+        "tags": [
+          "Projects"
+        ]
+      }
+    },
+    "/api/reviews": {
+      "get": {
+        "description": "Summaries: the merge-request snapshot without the payload, prompt, and response, each of which routinely runs to tens of kilobytes. Use `GET /api/reviews/{id}` for those.",
+        "operationId": "list_1",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "projectId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "format": "int32",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`projectId` given is not one you can see"
+          }
+        },
+        "summary": "List reviews, newest first",
+        "tags": [
+          "Reviews"
+        ]
+      }
+    },
+    "/api/reviews/{id}": {
+      "get": {
+        "description": "Includes the raw webhook payload, the full prompt, and the model's response. This is the poll target named in the `Location` header the webhook returns \u2014 stop polling once `state` is `READY` or `FAILED`.\n\nA `FAILED` review may still carry a `response`: the model succeeded and delivery to GitLab did not.",
+        "operationId": "get_1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "No such review, or not yours"
+          }
+        },
+        "summary": "Fetch one review in full",
+        "tags": [
+          "Reviews"
+        ]
+      }
+    },
+    "/api/reviews/{id}/rerun": {
+      "post": {
+        "description": "Reviews the same commit again \u2014 the usual reason is that you changed the project's review instructions and want to see the difference.\n\n**Edits the discussion it already posted** rather than adding a second comment to the MR. Returns immediately; poll until terminal. Calls the model again, so it costs again.",
+        "operationId": "rerun",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            },
+            "description": "Queued; poll the `Location`"
+          },
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "No such review, or not yours"
+          },
+          "409": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Already running"
+          }
+        },
+        "summary": "Re-run a finished review",
+        "tags": [
+          "Reviews"
+        ]
+      }
+    },
+    "/api/tokens": {
+      "get": {
+        "description": "Metadata only \u2014 prefix, name, and last use. Never the secret.",
+        "operationId": "listTokens",
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TokenInfo"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "List your own tokens",
+        "tags": [
+          "Users and tokens"
+        ]
+      },
+      "post": {
+        "description": "Admin only. Omit `userId` to mint one for yourself.\n\nThe plaintext token in the response exists nowhere else \u2014 the database holds only its SHA-256 hash and a display prefix. There is no endpoint that can return it again.",
+        "operationId": "createToken",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedToken"
+                }
+              }
+            },
+            "description": "Created; the response carries the only copy of the secret"
+          },
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          },
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "No such `userId`"
+          }
+        },
+        "summary": "Mint an API token",
+        "tags": [
+          "Users and tokens"
+        ]
+      }
+    },
+    "/api/tokens/{id}": {
+      "delete": {
+        "description": "Scoped to the caller, so a USER can never revoke somebody else's access. Revoking the token you are authenticating with immediately locks you out.",
+        "operationId": "deleteToken",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          },
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "No such token, or not yours"
+          }
+        },
+        "summary": "Revoke one of your own tokens",
+        "tags": [
+          "Users and tokens"
+        ]
+      }
+    },
+    "/api/users": {
+      "get": {
+        "description": "Admin only.",
+        "operationId": "listUsers",
+        "responses": {
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "List all users",
+        "tags": [
+          "Users and tokens"
+        ]
+      },
+      "post": {
+        "description": "Admin only. A new user owns no projects until it registers one.",
+        "operationId": "createUser",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUser"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "400": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`name` missing"
+          },
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Create a user",
+        "tags": [
+          "Users and tokens"
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "description": "Returns 200 once the HTTP listener is up and the context has started. It does not probe the database or GitLab \u2014 a green response means mrr is running, not that a review would succeed.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Up"
+          }
+        },
+        "security": [],
+        "summary": "Liveness check",
+        "tags": [
+          "Health"
+        ]
+      }
+    },
+    "/webhooks/gitlab/{projectId}": {
+      "post": {
+        "description": "Register this URL in GitLab under *Settings \u2192 Webhooks* with **Merge request events** ticked, using the secret returned when the project was created.\n\nReturns immediately. Fetching the diff and calling a model happen on a background worker, because GitLab times deliveries out and retries them \u2014 blocking here would mean re-reviewing.\n\nOnly `open`, `reopen`, and `update` actions are reviewed; merges, closes, and approvals are acknowledged with 200 and ignored.\n\nDeduplicated on `(project, mr_iid, last_commit.id)`. A redelivery, or an `update` that changed only a label, returns the existing review with `created: false` and spends nothing.",
+        "operationId": "receive",
+        "parameters": [
+          {
+            "description": "The mrr project id, from the registration response.",
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The project's webhook secret, as GitLab sends it. Compared constant-time.",
+            "in": "header",
+            "name": "X-Gitlab-Token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Understood but not reviewable \u2014 see `reason`"
+          },
+          "202": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Accepted; poll the `Location` header for the review"
+          },
+          "400": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Body is not JSON, or lacks `iid` / `last_commit.id`"
+          },
+          "401": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "`X-Gitlab-Token` missing or wrong"
+          },
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "No project with that id"
+          }
+        },
+        "security": [],
+        "summary": "Receive a GitLab merge-request event",
+        "tags": [
+          "Webhook"
+        ]
+      }
+    }
+  },
+  "security": [
+    {
+      "token": []
+    }
+  ],
+  "servers": [
+    {
+      "description": "This mrr instance",
+      "url": "https://mrr.example.com"
+    }
+  ],
+  "tags": [
+    {
+      "description": "The record of every review mrr has run: the webhook that triggered it, the merge request as it stood at that commit, the exact prompt sent to the model, and what came back.\n\nA review is a snapshot, not a live view of the MR \u2014 retitle an MR and push again and you get a second review carrying the new title, with the first left intact.",
+      "name": "Reviews"
+    },
+    {
+      "description": "Identity. Only an ADMIN token can create a user or mint a token \u2014 this is the single rule the whole multi-tenant model rests on. A USER token can list and revoke its own tokens and do nothing else here.",
+      "name": "Users and tokens"
+    },
+    {
+      "description": "Where GitLab delivers merge-request events. The only endpoint that does not take an mrr API token \u2014 GitLab has no way to hold one.",
+      "name": "Webhook"
+    },
+    {
+      "description": "The registry of GitLab projects mrr reviews. One row carries everything needed to review that project: where its GitLab lives, the token to read it with, which model to use, and the review instructions to use as the system prompt.\n\nOwned. A USER sees only its own; an ADMIN sees all. Asking for someone else's returns 404, not 403.",
+      "name": "Projects"
+    },
+    {
+      "description": "Liveness. Used by the container healthcheck.",
+      "name": "Health"
+    }
+  ]
+}
