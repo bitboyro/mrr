@@ -6,13 +6,104 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **HTTP DEBUG printed GitLab PATs.** ROOT DEBUG (Logs page) turned on Apache
+  header logging, which dumps `PRIVATE-TOKEN` on every GitLab call. Header and
+  wire loggers stay at WARN even when ROOT is DEBUG; the log ring redacts those
+  headers and `glpat-` tokens. Rotate any token that already hit the console.
+
+- **Webhook POST to `/` looked like a 500.** GitLab's test button hitting the
+  site root (GET-only) was wrapped as `internal_error`. That is now 405, so
+  GitLab does not retry it as a server failure.
+
+- **Periodic scan re-resolved threads.** The two-minute catch-up called GitLab
+  `resolved=true` on overviews that were already resolved. GitLab still records
+  that as "resolved all threads". Align lists every page of discussions and
+  only writes when a listed thread's flag actually differs. An id the list
+  does not contain is left alone.
+
+- **Overview thread vs CLEAN.** A new commit used to post a second `### mrr review`
+  discussion and never resolve either of them. GitLab then kept "unresolved threads" after
+  mrr said CLEAN — including when a fix branch merged into the original MR. The overview is
+  now one thread per MR, edited in place; CLEAN resolves it (and any stacked leftovers),
+  NEEDS_WORK leaves only that live overview unresolved.
+
+- **OPEN findings vs GitLab resolve-all.** mrr only resolved threads the model marked
+  `addressed`. A GitLab "resolve all" or author "fixed in" note could close a thread the
+  model still called `still_present`, so GitLab looked clean while mrr said NEEDS_WORK.
+  After each review, every finding still OPEN is reopened on GitLab.
+
+- **Same review queued twice.** Boot ran the periodic scan and the startup scan
+  back-to-back. Both submitted any non-terminal review, so one commit ran on two
+  workers, posted two overviews, and left GitLab saying "No findings" while mrr
+  showed NEEDS_WORK. `submit` is now single-flight per review id, the scan only
+  counts a queue when it actually starts work, and the periodic scan waits one
+  interval after boot. The live overview is stored on the MR cycle; leftover
+  `### mrr review` threads on GitLab are resolved to match.
+
+- **Merged MRs stuck on NEEDS_WORK.** A merge webhook cancelled in-flight reviews but
+  left the cycle as NEEDS_WORK when the review had already finished. GitLab owns
+  open/merged/closed; mrr owns findings only while the MR is open. Merge/close now mark
+  the cycle MERGED or CLOSED, and a periodic scan (every 2 minutes, same as boot) catches
+  missed hooks and new head SHAs. Human Resolve does not flip a finding to ADDRESSED.
+
+- **Trail details overflow.** Opening a trace details block no longer stretches the page
+  horizontally; long JSON scrolls inside the pre, like the memory card.
+
 ### Changed
+
+- **Unparseable verdicts fail closed.** If the model does not return a JSON verdict, the
+  review is `FAILED` (`PROVIDER`), the raw response is kept, and nothing is posted to
+  GitLab. Re-run the same commit. The old prose-comment fallback looked READY and left
+  later commits with nothing to resolve.
+
+- **Status colors.** CLEAN / ADDRESSED / READY are green, not brand gold. OPEN and
+  NEEDS_WORK are amber; BLOCKER and FAILED stay red; MAJOR and MINOR get their own
+  hues. MR rows and finding cards pick up a matching left edge so the list is scannable.
+
+- **MR list.** Project merge requests are newest iid first, filterable by status and
+  title/`!iid`, and loaded in pages as you scroll. The MR page has a ← project link.
+  Skill/document Enabled is a real checkbox, spaced from the name and Delete.
 
 - **Clean-MR `summary`.** The overview thread is a concise write-up of the change (what was
   reviewed, why it is safe) — to the point, without dropping a merge-relevant fact. Not
   "No findings" alone. Findings stay problems-only.
 
 ### Added
+
+- **MR git facts.** The cycle page shows source → target (GitLab tree links), commit
+  count, head SHA, files changed, and the people on the review (author, who pushed,
+  commit author, assignees, reviewers). Existing MRs backfill from GitLab the first
+  time they are opened.
+
+- **How-to landing.** `/` opens with the name gag, then a short setup guide (token paste
+  if you are signed out). Token kinds and fine-grained permissions stay; the rest is
+  steps and tables.
+
+- **Cat interstitial.** First load always shows the mrr logo, then a random cat. In-app
+  navigation still rolls ~60%. Opaque from the first frame. Click or Escape skips;
+  reduced motion skips.
+
+- **New Project.** The projects list action sits on the right and is no longer Register.
+
+- **Project option toggles.** Skip drafts, auto-approve, tools, librarian, and Logs
+  “mrr only” are grouped pill toggles instead of native checkboxes.
+
+- **Startup scan of open MRs.** On boot (and after a project is registered) mrr lists
+  GitLab's open merge requests and queues a review for any head SHA it has not already
+  finished. Webhooks still handle live pushes; this catches MRs that landed while mrr was
+  down. Drafts respect `skipDrafts`. A GitLab miss on one project does not fail the boot.
+
+- **Agent memory (OKF).** Per-project markdown files under `/data/memory/{projectId}`
+  (`project/` and `mrs/`), SQLite index, REST, and MCP `search_memory` / `list_memories` /
+  `get_memory`. Every READY review upserts `mrs/{iid}.md` from the verdict `memory.change` /
+  `memory.impact` (falls back to `summary`) — librarian on or off. Optional librarian addon
+  (`librarianEnabled`, default off): Initialize / Refresh writes `project/` only and never
+  rewrites MR cards. Disable hides the button and 409s the run endpoint; files stay. The
+  reviewer is not stuffed with memory — `search_memory` / `read_memory` / `write_memory` are
+  opt-in tools, same enable-set as `read_file`. Project page polls the tree and librarian
+  Trail while a run is `RUNNING`; the MR page polls the card while `REVIEWING`.
 
 - **OpenAI Responses for GPT-5.4+ with tools.** First-party `gpt-5.4` / `gpt-5.6-*` reviews
   that advertise `read_file` call `/v1/responses` and round-trip reasoning items on the next
@@ -51,6 +142,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   enable/disable like MCP tools. Enabled skills go into the system prompt; enabled documents
   go into the user prompt. `GET/POST/PUT/DELETE /api/projects/{id}/skills` and `.../documents`.
   Legacy `skill` on the project becomes the first skill named `reviewer`.
+- **Branch-scoped skills.** A skill may carry `branchPattern` so it only fires when the MR
+  source branch matches. A plain name is exact, `hotfix/*` is a glob, `release-\d+` is a
+  Java regex. Blank means every branch. Invalid patterns are rejected on save.
+- **Per-MR context.** Owner-written notes on a merge-request cycle (`userContext`) are
+  included in the next review of that MR. Saving them does not start a review. `PUT
+  /api/projects/{id}/merge-requests/{iid}/context`. Status upserts leave the notes alone.
 - **Fail closed on provider failure.** Quota, rate-limit, auth, unreachable model (or GitLab
   before a verdict): nothing is posted. The UI shows `errorKind` on the project, the MR cycle,
   and the review. `MCP` is reserved for when the agent becomes an MCP client.

@@ -16,6 +16,7 @@ public class SpaController {
     @GetMapping({
             "/",
             "/login",
+            "/howto",
             "/projects",
             "/projects/{id}",
             "/projects/{id}/edit",

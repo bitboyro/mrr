@@ -3,15 +3,14 @@ package ro.bitboy.mrr.review;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import ro.bitboy.mrr.MrrProperties;
 import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.gitlab.GitLabClient;
-import ro.bitboy.mrr.model.AnthropicModel;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.Finding;
-import ro.bitboy.mrr.model.OpenAiModel;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Reply;
 import ro.bitboy.mrr.model.ReviewModel;
@@ -21,6 +20,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Function;
 
 /**
  * Answers a human who replied to one of mrr's threads.
@@ -55,19 +55,27 @@ public class Replier {
 
     private final Store store;
     private final GitLabClient gitlab;
-    private final RestClient.Builder restClients;
     private final MrrProperties properties;
     private final Agent agent;
+    private final Function<Project, ReviewModel> models;
     private final ExecutorService workers;
 
+    @Autowired
     public Replier(Store store, GitLabClient gitlab, RestClient.Builder restClients,
                    MrrProperties properties) {
+        this(store, gitlab, properties,
+                project -> Reviewer.defaultModel(restClients, project),
+                Executors.newFixedThreadPool(1));
+    }
+
+    Replier(Store store, GitLabClient gitlab, MrrProperties properties,
+            Function<Project, ReviewModel> models, ExecutorService workers) {
         this.store = store;
         this.gitlab = gitlab;
-        this.restClients = restClients;
         this.properties = properties;
         this.agent = new Agent();
-        this.workers = Executors.newFixedThreadPool(1);
+        this.models = models;
+        this.workers = workers;
     }
 
     public void submit(String projectId, long mrIid, String discussionId,
@@ -83,8 +91,8 @@ public class Replier {
         });
     }
 
-    private void reply(String projectId, long mrIid, String discussionId,
-                       String note, String author) {
+    void reply(String projectId, long mrIid, String discussionId,
+               String note, String author) {
         if (note == null || note.isBlank()) {
             return;
         }
@@ -117,7 +125,7 @@ public class Replier {
         String user = prompt.toString();
         Agent.Run run;
         try {
-            run = agent.run(modelFor(project), SYSTEM, user, List.of(), 1,
+            run = agent.run(models.apply(project), SYSTEM, user, List.of(), 1,
                     call -> "unused", "reply " + discussionId,
                     properties.review().maxTraceChars());
         } catch (Exception e) {
@@ -142,15 +150,6 @@ public class Replier {
         gitlab.replyToDiscussion(project, mrIid, discussionId, posted);
         store.clearProjectError(project.id());
         log.info("replied on thread {} of {}!{}", discussionId, project.name(), mrIid);
-    }
-
-    private ReviewModel modelFor(Project project) {
-        return switch (project.provider()) {
-            case ANTHROPIC -> new AnthropicModel(
-                    project.modelKey(), project.modelBaseUrl(), project.model());
-            case OPENAI_COMPAT -> new OpenAiModel(
-                    restClients, project.modelKey(), project.modelBaseUrl(), project.model());
-        };
     }
 
     @PreDestroy

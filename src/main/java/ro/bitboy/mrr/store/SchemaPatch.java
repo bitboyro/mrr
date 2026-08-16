@@ -34,6 +34,10 @@ public class SchemaPatch {
         addColumn("projects", "last_error_kind", "TEXT");
         addColumn("projects", "last_error", "TEXT");
         addColumn("projects", "last_error_at", "TEXT");
+        addColumn("projects", "librarian_enabled", "INTEGER NOT NULL DEFAULT 0");
+        addColumn("projects", "memory_head_sha", "TEXT");
+        addColumn("projects", "memory_status", "TEXT");
+        addColumn("projects", "memory_refreshed_at", "TEXT");
         addColumn("reviews", "error_kind", "TEXT");
         addColumn("reviews", "agent_turns", "INTEGER NOT NULL DEFAULT 0");
         addColumn("reviews", "trace", "TEXT");
@@ -55,14 +59,56 @@ public class SchemaPatch {
         db.sql("CREATE INDEX IF NOT EXISTS idx_replies_discussion ON replies(project_id, discussion_id)")
                 .update();
         db.sql("""
-                CREATE TABLE IF NOT EXISTS agent_skills (
+                CREATE TABLE IF NOT EXISTS memory_documents (
                     id          TEXT PRIMARY KEY,
                     project_id  TEXT NOT NULL,
-                    name        TEXT NOT NULL,
-                    body        TEXT NOT NULL,
-                    enabled     INTEGER NOT NULL DEFAULT 1,
-                    position    INTEGER NOT NULL DEFAULT 0,
+                    kind        TEXT NOT NULL,
+                    space       TEXT NOT NULL,
+                    title       TEXT NOT NULL,
+                    subject     TEXT,
+                    tags        TEXT,
+                    status      TEXT,
+                    source_sha  TEXT,
+                    mr_iid      INTEGER,
+                    path        TEXT NOT NULL,
                     created_at  TEXT NOT NULL,
+                    updated_at  TEXT NOT NULL,
+                    UNIQUE (project_id, path)
+                )
+                """).update();
+        db.sql("CREATE INDEX IF NOT EXISTS idx_memory_project ON memory_documents(project_id, space, updated_at DESC)")
+                .update();
+        db.sql("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_mr ON memory_documents(project_id, mr_iid)
+                WHERE mr_iid IS NOT NULL
+                """).update();
+        db.sql("""
+                CREATE TABLE IF NOT EXISTS memory_runs (
+                    id           TEXT PRIMARY KEY,
+                    project_id   TEXT NOT NULL,
+                    kind         TEXT NOT NULL,
+                    state        TEXT NOT NULL,
+                    prompt       TEXT,
+                    response     TEXT,
+                    trace        TEXT,
+                    agent_turns  INTEGER NOT NULL DEFAULT 0,
+                    error        TEXT,
+                    created_at   TEXT NOT NULL,
+                    finished_at  TEXT
+                )
+                """).update();
+        db.sql("CREATE INDEX IF NOT EXISTS idx_memory_runs_project ON memory_runs(project_id, created_at DESC)")
+                .update();
+        db.sql("""
+                CREATE TABLE IF NOT EXISTS agent_skills (
+                    id             TEXT PRIMARY KEY,
+                    project_id     TEXT NOT NULL,
+                    name           TEXT NOT NULL,
+                    body           TEXT NOT NULL,
+                    enabled        INTEGER NOT NULL DEFAULT 1,
+                    branch_pattern TEXT,
+                    position       INTEGER NOT NULL DEFAULT 0,
+                    created_at     TEXT NOT NULL,
                     UNIQUE (project_id, name)
                 )
                 """).update();
@@ -77,7 +123,36 @@ public class SchemaPatch {
                     UNIQUE (project_id, name)
                 )
                 """).update();
+        addColumn("agent_skills", "branch_pattern", "TEXT");
+        addColumn("mr_status", "user_context", "TEXT");
+        addColumn("mr_status", "overview_discussion_id", "TEXT");
+        addColumn("mr_status", "overview_note_id", "TEXT");
+        addColumn("reviews", "commit_count", "INTEGER");
+        addColumn("reviews", "assignees", "TEXT");
+        addColumn("reviews", "reviewers", "TEXT");
+        backfillOverviewThreads();
         migrateLegacySkill();
+    }
+
+    /**
+     * The live overview lives on {@code mr_status}, not on the latest review row. A parallel
+     * run used to overwrite {@code reviews.discussion_id} and orphan the first GitLab thread.
+     */
+    private void backfillOverviewThreads() {
+        int n = db.sql("""
+                UPDATE mr_status SET
+                    overview_discussion_id = (
+                        SELECT r.discussion_id FROM reviews r WHERE r.id = mr_status.latest_review_id
+                    ),
+                    overview_note_id = (
+                        SELECT r.note_id FROM reviews r WHERE r.id = mr_status.latest_review_id
+                    )
+                WHERE overview_discussion_id IS NULL
+                  AND latest_review_id IS NOT NULL
+                """).update();
+        if (n > 0) {
+            log.info("schema: backfilled overview thread on {} merge request(s)", n);
+        }
     }
 
     /**
@@ -102,7 +177,8 @@ public class SchemaPatch {
     }
 
     private void addColumn(String table, String column, String definition) {
-        if (columnsOf(table).contains(column)) {
+        Set<String> columns = columnsOf(table);
+        if (columns.isEmpty() || columns.contains(column)) {
             return;
         }
         db.sql("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition).update();

@@ -241,6 +241,49 @@ class StoreTest {
     }
 
     @Test
+    void closeMrFollowsGitLabWithoutClearingFindings() {
+        Project project = store.createProject(project(alice.id(), "alice-app"));
+        String review = store.claimReview(project.id(), 15, "sha-15", "{}", mrInfo()).review().id();
+        store.createFinding(finding(review, project.id(), 15, "disc-open"));
+        store.upsertMrStatus(project.id(), 15, MrStatus.Status.NEEDS_WORK, review, "sha-15", 1);
+
+        store.closeMr(project.id(), 15, MrStatus.Status.MERGED);
+
+        assertThat(store.findMrStatus(project.id(), 15)).get()
+                .extracting(MrStatus::currentStatus, MrStatus::openFindings)
+                .containsExactly(MrStatus.Status.MERGED, 1);
+        assertThat(store.openFindings(project.id(), 15)).hasSize(1);
+        assertThat(store.listActiveMrStatus(project.id())).isEmpty();
+    }
+
+    @Test
+    void listsMergeRequestsNewestFirstWithFilters() {
+        Project project = store.createProject(project(alice.id(), "alice-app"));
+        String first = store.claimReview(project.id(), 1, "sha-1", "{}", mrInfo()).review().id();
+        String tenth = store.claimReview(project.id(), 10, "sha-10", "{}", mrInfo()).review().id();
+        String third = store.claimReview(project.id(), 3, "sha-3", "{}", mrInfo()).review().id();
+        store.upsertMrStatus(project.id(), 1, MrStatus.Status.CLEAN, first, "sha-1", 0);
+        store.upsertMrStatus(project.id(), 10, MrStatus.Status.NEEDS_WORK, tenth, "sha-10", 1);
+        store.upsertMrStatus(project.id(), 3, MrStatus.Status.MERGED, third, "sha-3", 0);
+
+        MrStatus.Page firstPage = store.listMrStatus(project.id(), null, null, 0, 2);
+        assertThat(firstPage.total()).isEqualTo(3);
+        assertThat(firstPage.items()).extracting(MrStatus::mrIid).containsExactly(10L, 3L);
+
+        MrStatus.Page rest = store.listMrStatus(project.id(), null, null, 2, 2);
+        assertThat(rest.items()).extracting(MrStatus::mrIid).containsExactly(1L);
+
+        MrStatus.Page needs = store.listMrStatus(project.id(), "NEEDS_WORK", null, 0, 10);
+        assertThat(needs.total()).isEqualTo(1);
+        assertThat(needs.items().getFirst().title()).contains("Guard");
+
+        assertThat(store.listMrStatus(project.id(), null, "10", 0, 10).items())
+                .extracting(MrStatus::mrIid).containsExactly(10L);
+        assertThat(store.listMrStatus(project.id(), null, "!3", 0, 10).items())
+                .extracting(MrStatus::mrIid).containsExactly(3L);
+    }
+
+    @Test
     void openFindingsSpanEveryReviewOfTheMergeRequest() {
         Project project = store.createProject(project(alice.id(), "alice-app"));
         String first = store.claimReview(project.id(), 9, "sha-1", "{}", mrInfo()).review().id();
@@ -261,6 +304,42 @@ class StoreTest {
                     assertThat(f.state()).isEqualTo(Finding.State.ADDRESSED);
                     assertThat(f.resolvedAt()).isNotNull();
                 });
+    }
+
+    @Test
+    void theLatestOverviewIsThePreviousReadyReviewOnTheSameMr() {
+        Project project = store.createProject(project(alice.id(), "alice-app"));
+        String first = store.claimReview(project.id(), 10, "sha-1", "{}", mrInfo()).review().id();
+        String second = store.claimReview(project.id(), 10, "sha-2", "{}", mrInfo()).review().id();
+        String third = store.claimReview(project.id(), 10, "sha-3", "{}", mrInfo()).review().id();
+        store.markReady(first, "overview-1", "note-1");
+        store.markReady(second, "overview-2", "note-2");
+
+        assertThat(store.findLatestOverview(project.id(), 10, third)).get()
+                .extracting(Review::id, Review::discussionId)
+                .containsExactly(second, "overview-2");
+        assertThat(store.overviewDiscussionIds(project.id(), 10))
+                .containsExactly("overview-1", "overview-2");
+        assertThat(store.findLatestOverview(project.id(), 11, third)).isEmpty();
+    }
+
+    @Test
+    void overviewThreadIsStoredOnTheMergeRequest() {
+        Project project = store.createProject(project(alice.id(), "alice-app"));
+        String first = store.claimReview(project.id(), 12, "sha-1", "{}", mrInfo()).review().id();
+        store.upsertMrStatus(project.id(), 12, MrStatus.Status.CLEAN, first, "sha-1", 0);
+        store.saveOverview(project.id(), 12, "ov-live", "note-live");
+        store.markReady(first, "ov-old", "note-old");
+
+        assertThat(store.findOverview(project.id(), 12)).get()
+                .extracting(Store.Overview::discussionId, Store.Overview::noteId)
+                .containsExactly("ov-live", "note-live");
+
+        store.saveOverview(project.id(), 12, "ov-live", "note-live");
+        store.upsertMrStatus(project.id(), 12, MrStatus.Status.NEEDS_WORK, first, "sha-1", 1);
+        assertThat(store.findOverview(project.id(), 12)).get()
+                .extracting(Store.Overview::discussionId)
+                .isEqualTo("ov-live");
     }
 
     @Test
@@ -313,12 +392,50 @@ class StoreTest {
                 .containsExactly(tuple("security", true), tuple("style", false));
 
         AgentSkill style = store.listSkills(project.id()).get(1);
-        store.updateSkill(style.id(), null, null, true, null);
+        store.updateSkill(style.id(), null, null, true, null, null);
         assertThat(store.findSkill(project.id(), style.id())).get()
                 .extracting(AgentSkill::enabled).isEqualTo(true);
 
         assertThatThrownBy(() -> store.createSkill(project.id(), "security", "dup", true))
                 .isInstanceOf(ApiException.class);
+    }
+
+    @Test
+    void aSkillCanBeScopedToASourceBranchPattern() {
+        Project project = store.createProject(project(alice.id(), "alice-app"));
+        AgentSkill hotfix = store.createSkill(project.id(), "hotfix", "Be strict.", true, "hotfix/*");
+        assertThat(hotfix.branchPattern()).isEqualTo("hotfix/*");
+        assertThat(hotfix.appliesTo("hotfix/prod")).isTrue();
+        assertThat(hotfix.appliesTo("feature/x")).isFalse();
+
+        store.updateSkill(hotfix.id(), null, null, null, null, "release-\\d+");
+        assertThat(store.findSkill(project.id(), hotfix.id())).get()
+                .extracting(AgentSkill::branchPattern).isEqualTo("release-\\d+");
+
+        store.updateSkill(hotfix.id(), null, null, null, null, "");
+        assertThat(store.findSkill(project.id(), hotfix.id())).get()
+                .extracting(AgentSkill::branchPattern).isNull();
+
+        assertThatThrownBy(() -> store.createSkill(project.id(), "bad", "x", true, "["))
+                .isInstanceOf(ApiException.class);
+    }
+
+    @Test
+    void userContextOnAnMrSurvivesStatusUpserts() {
+        Project project = store.createProject(project(alice.id(), "alice-app"));
+        String id = store.claimReview(project.id(), 11, "sha-ctx", "{}", mrInfo()).review().id();
+        store.upsertMrStatus(project.id(), 11, MrStatus.Status.REVIEWING, id, "sha-ctx", 0);
+
+        store.setMrContext(project.id(), 11, "Implements JIRA-12. Flag is off.");
+        store.upsertMrStatus(project.id(), 11, MrStatus.Status.CLEAN, id, "sha-ctx", 0);
+
+        assertThat(store.findMrStatus(project.id(), 11)).get()
+                .extracting(MrStatus::userContext, MrStatus::currentStatus)
+                .containsExactly("Implements JIRA-12. Flag is off.", MrStatus.Status.CLEAN);
+
+        store.setMrContext(project.id(), 11, "  ");
+        assertThat(store.findMrStatus(project.id(), 11)).get()
+                .extracting(MrStatus::userContext).isNull();
     }
 
     @Test
@@ -364,14 +481,14 @@ class StoreTest {
                 "opened", "open", false, "fix/div-zero", "main",
                 "Alan Turing", "alan", "Ada Lovelace", "ada",
                 "Guard against divide by zero", "Grace Hopper", "grace@example.com",
-                Instant.parse("2026-08-14T07:15:30Z"), "[\"backend\"]", 3);
+                Instant.parse("2026-08-14T07:15:30Z"), "[\"backend\"]", 3, null, null, null);
     }
 
     private Project project(String ownerId, String name) {
         return new Project(Ids.newId(), ownerId, name, true,
                 "https://gitlab.com", "group/" + name,                 "glpat-x", Ids.newSecret(),
                 Project.Provider.ANTHROPIC, null, "claude-opus-5", "sk-x",
-                null, false, 1, List.of(), false, null, null, null, Instant.now());
+                null, false, 1, List.of(), false, false, null, null, null, null, null, null, Instant.now());
     }
 
 }

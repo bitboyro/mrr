@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS projects (
     last_error_kind   TEXT,                          -- FailureKind of the last fail-closed event
     last_error        TEXT,
     last_error_at     TEXT,
+    librarian_enabled INTEGER NOT NULL DEFAULT 0,    -- optional memory librarian addon
+    memory_head_sha   TEXT,                          -- default-branch tip last librarian run saw
+    memory_status     TEXT,                          -- NONE | READY | RUNNING | FAILED
+    memory_refreshed_at TEXT,
     created_at        TEXT NOT NULL
 );
 
@@ -52,15 +56,17 @@ CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id);
 
 -- Named skills and documents the reviewer may use. Same idea as agent_tools: a set
 -- you enable per project, not a single blob. Enabled skills go into the system prompt;
--- enabled documents go into the user prompt as reference material.
+-- enabled documents go into the user prompt as reference material. branch_pattern is
+-- an optional glob or regex against the MR source branch; NULL/blank = every branch.
 CREATE TABLE IF NOT EXISTS agent_skills (
-    id          TEXT PRIMARY KEY,
-    project_id  TEXT NOT NULL REFERENCES projects(id),
-    name        TEXT NOT NULL,
-    body        TEXT NOT NULL,
-    enabled     INTEGER NOT NULL DEFAULT 1,
-    position    INTEGER NOT NULL DEFAULT 0,
-    created_at  TEXT NOT NULL,
+    id             TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL REFERENCES projects(id),
+    name           TEXT NOT NULL,
+    body           TEXT NOT NULL,
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    branch_pattern TEXT,                             -- glob or regex; blank = every branch
+    position       INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL,
     UNIQUE (project_id, name)
 );
 
@@ -119,6 +125,9 @@ CREATE TABLE IF NOT EXISTS reviews (
 
     labels              TEXT,                        -- JSON array
     files_changed       INTEGER,
+    commit_count        INTEGER,
+    assignees           TEXT,                        -- Name (@user), one per line
+    reviewers           TEXT,
 
     -- This constraint IS the idempotency mechanism: a redelivered webhook for the same
     -- head commit collides here and we return the existing review instead of re-reviewing.
@@ -187,8 +196,51 @@ CREATE TABLE IF NOT EXISTS mr_status (
     open_findings     INTEGER NOT NULL DEFAULT 0,
     mrr_approved      INTEGER NOT NULL DEFAULT 0,    -- 1 only when *mrr* approved, not a human
     mrr_approved_sha  TEXT,
+    user_context      TEXT,                          -- owner-written notes for the next review
+    overview_discussion_id TEXT,                     -- the one ### mrr review thread on this MR
+    overview_note_id  TEXT,
     updated_at        TEXT NOT NULL,
     PRIMARY KEY (project_id, mr_iid)
 );
 
 CREATE INDEX IF NOT EXISTS idx_mr_status_project ON mr_status(project_id, updated_at DESC);
+
+-- Agent-authored OKF memory. Canonical body is a markdown file under /data/memory/{projectId}/;
+-- this table is the filesystem-free index for list/search.
+CREATE TABLE IF NOT EXISTS memory_documents (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id),
+    kind        TEXT NOT NULL,                       -- PROJECT | MERGE_REQUEST | DOCUMENT | COLLECTION
+    space       TEXT NOT NULL,                       -- project | mrs | notes
+    title       TEXT NOT NULL,
+    subject     TEXT,
+    tags        TEXT,                                -- comma-separated
+    status      TEXT,
+    source_sha  TEXT,
+    mr_iid      INTEGER,
+    path        TEXT NOT NULL,                       -- root-relative, e.g. mrs/12.md
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    UNIQUE (project_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_project ON memory_documents(project_id, space, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_mr ON memory_documents(project_id, mr_iid)
+    WHERE mr_iid IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS memory_runs (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL REFERENCES projects(id),
+    kind         TEXT NOT NULL,                      -- INITIALIZE | REFRESH
+    state        TEXT NOT NULL,                      -- PENDING | RUNNING | READY | FAILED
+    prompt       TEXT,
+    response     TEXT,
+    trace        TEXT,
+    agent_turns  INTEGER NOT NULL DEFAULT 0,
+    error        TEXT,
+    created_at   TEXT NOT NULL,
+    finished_at  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_runs_project ON memory_runs(project_id, created_at DESC);
+

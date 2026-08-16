@@ -2,9 +2,11 @@
 
 A study protocol for using mrr as a continuous reviewer while a real project is
 implemented. The interesting signal is the loop over time (usefulness, keep-up,
-learning, cost), not raw finding count. Most of it can be queried from the
-existing SQLite schema; a 30-second human label per finding is what makes the
-rest interpretable.
+learning, cost), not raw finding count.
+
+Most metrics can be reconstructed **after the fact** from `data/mrr.db`, git,
+and GitLab. Labeling as you go is optional and actually changes the behaviour
+being studied. The one thing that must not happen is wiping the database.
 
 ---
 
@@ -42,9 +44,10 @@ second opinion for recall.
 
 ### 1. Is it useful? (precision, not volume)
 
-These need a human label within ~24h, while the reason for acting (or not) is
-still in memory. One tag per finding: `useful` / `nit` / `wrong` /
-`already_knew`.
+These need a human tag per finding: `useful` / `nit` / `wrong` /
+`already_knew`. The tag can wait until a reconstruction pass — see
+[Post factum](#post-factum). What you cannot recover later is the mental
+state (`already_knew`, "I would have caught this anyway").
 
 - **Action rate** — share of findings that become `ADDRESSED` before merge.
   Cheap proxy; biased (a wrong finding may be fixed to silence the thread, or a
@@ -118,23 +121,96 @@ optimize for the plants.
 - **Failure tax** — `FAILED` / `error_kind` rate. A reviewer that is down is a
   different experiment.
 
+## Post factum
+
+Yes. Work first, measure later. mrr already keeps the audit trail a
+reconstruction pass needs.
+
+Do not wipe `data/mrr.db`. Do not delete the GitLab project. That is the whole
+live constraint.
+
+### Reconstructable from the database
+
+Each review row is "this MR at this commit": timestamps, `head_sha`,
+`files_changed`, `mr_draft`, `agent_turns`, `error_kind`, the prompt (diff +
+the skills and documents as they stood *then*), the response, and the trace
+(`read_file` calls, per-turn `elapsedMs`). Findings carry severity, path,
+line, `inline`, `OPEN` / `ADDRESSED`, `created_at`, `resolved_at`. Replies
+are the argument transcript.
+
+From that, without any live log:
+
+| Metric | How |
+|---|---|
+| Review latency | `finished_at - created_at` |
+| Overlap / did you wait | next review's `created_at` vs this one's `finished_at` on the same MR |
+| Time-to-address, commits-to-address | `resolved_at`, then count later `head_sha`s on that `mr_iid` |
+| Action rate | `ADDRESSED` vs still `OPEN` when the MR left `opened` |
+| Location hit rate, severity mix, zero-finding reviews | columns as they are |
+| Findings per `files_changed` | group by review |
+| First vs later commits | new findings on review 1 of an MR vs review 2+ |
+| Model effort | `agent_turns` + `role=tool` events in `trace` |
+| Failure tax | `state = FAILED` / `error_kind` |
+| Skill at review time | the system half of `reviews.prompt` — survives later edits to `agent_skills` |
+| Phases | cluster reviews by prompt prefix / model; a skill edit shows up as a new prompt shape |
+
+`mr_status` is live, not a history. Reconstruct CLEAN / NEEDS_WORK from the
+finding counts on each review, not from that table. Merge time comes from
+GitLab (`merged_at`), not from the snapshot `mr_state` on the last review.
+
+The diff itself is in `reviews.prompt`. If that was truncated, `head_sha` is
+still in GitLab.
+
+### Reconstructable from git and GitLab, labeled later
+
+Precision is an evidence pass, not a memory pass. For each finding:
+
+1. Read the thread and any `replies` row.
+2. Look at commits on that MR after `created_at` until `resolved_at` or merge.
+3. Tag from what happened:
+   - commit clearly fixes that finding → `useful` (or you silenced a nit —
+     the diff usually tells you which)
+   - you argued in the thread → `wrong` or `nit`, as the reply states
+   - still `OPEN` at merge → ignored; usually `nit` or `wrong`
+   - `already_knew` — skip it; that label dies with the moment
+
+Recurrence: cluster finding titles/bodies across MRs by hand or embedding.
+Escapees are *better* late — a bug found in tests or a later MR, blamed to a
+SHA, then checked against reviews of that SHA.
+
+### Gone, or only a coarse proxy
+
+- **Token / dollar cost** — not on the trace. Provider dashboards may give a
+  daily total, not per review.
+- **Minutes you spent triaging** — proxy: `finished_at` to the next commit on
+  that MR. Contaminated by lunch, other work, and "I was not waiting."
+- **`already_knew` / "I would have caught this"** — mental state.
+- **Why a skill was edited** — the *what* is in subsequent prompts; the *why*
+  is not.
+- **Planted defects** — only if you planted them. You cannot invent a recall
+  set after the fact except via escapees.
+
+### Hawthorne
+
+Labeling every finding within 24h makes you a more careful consumer of the
+reviewer than you would be naturally. A post-factum pass measures the loop
+you actually ran. Prefer that unless a specific question needs the mental
+state labels.
+
 ## Protocol
 
-Keep a single log (this file's companion, a markdown note, or a GitLab
-snippet). Three event types, nothing else:
+No live log is required. After a batch of MRs (~15–20 reviews, or whenever a
+phase ends):
 
-1. **Phase** — date, model, skill hash, `agentMaxTurns`, `skipDrafts`, and why
-   anything changed.
-2. **Finding label** — `finding_id`, tag (`useful` / `nit` / `wrong` /
-   `already_knew`), five words of why. Optional: reply in the GitLab thread
-   with the tag so it sits next to the evidence.
-3. **Escapee** — date, SHA that introduced it, one-line bug, "mrr missed /
-   mrr had flagged / never reviewed."
+1. **Dump** — reviews, findings, replies from `data/mrr.db`; MR merged/closed
+   times from GitLab.
+2. **Phase** — infer from prompt shape / model; write one line if you remember
+   why a skill changed.
+3. **Finding labels** — evidence pass as above. Skip `already_knew`.
+4. **Escapees** — keep a running list as bugs appear; they accrue after the
+   fact by definition.
 
-Do not add product features until phase 1 has ~15–20 reviews. The existing DB
-plus that log is enough to answer the four questions.
-
-## Queries from day one (no schema change)
+## Queries (no schema change)
 
 Against `data/mrr.db`, per MR and over calendar time:
 
@@ -155,7 +231,7 @@ Against `data/mrr.db`, per MR and over calendar time:
   with itself."
 - Changing the reviewer skill mid-week to chase a nicer graph.
 
-## Later, only if the log gets painful
+## Later, only if reconstruction gets painful
 
 Instrument mrr with a finding label field, persist token usage on the trace,
 and a tiny experiment view. That is a product change; it is not required to

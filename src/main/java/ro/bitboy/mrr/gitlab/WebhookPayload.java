@@ -102,7 +102,7 @@ public final class WebhookPayload {
                 text(commitAuthor.path("email")),
                 instant(text(commit.path("timestamp"))),
                 labels(body),
-                null);
+                null, null, null, null);
     }
 
     /**

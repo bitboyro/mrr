@@ -13,6 +13,7 @@ import ro.bitboy.mrr.model.ReviewModel.Turn;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -39,6 +40,12 @@ final class Agent {
 
     Run run(ReviewModel model, String system, String user, List<ToolSpec> tools, int maxTurns,
             Function<ToolCall, String> execute, String label, int maxTraceChars) {
+        return run(model, system, user, tools, maxTurns, execute, label, maxTraceChars, null);
+    }
+
+    Run run(ReviewModel model, String system, String user, List<ToolSpec> tools, int maxTurns,
+            Function<ToolCall, String> execute, String label, int maxTraceChars,
+            Consumer<AgentTrace> onTurn) {
         List<Turn> turns = new ArrayList<>();
         turns.add(Turn.user(user));
         if (log.isDebugEnabled()) {
@@ -67,6 +74,10 @@ final class Agent {
                 log.debug("{} turn {}/{} assistant:\n{}", label, used, cap, result.markdown());
             }
 
+            if (onTurn != null) {
+                onTurn.accept(new AgentTrace(used, cap, List.copyOf(events)));
+            }
+
             if (result.refused() || !result.wantsTools()) {
                 break;
             }
@@ -84,6 +95,12 @@ final class Agent {
             }
             turns.add(Turn.assistant(result.markdown(), result.toolCalls(), result.echo()));
             turns.add(Turn.toolResults(executed));
+            if (onTurn != null) {
+                onTurn.accept(new AgentTrace(used, cap, List.copyOf(events)));
+            }
+        }
+        if (onTurn != null) {
+            onTurn.accept(new AgentTrace(used, cap, List.copyOf(events)));
         }
         return new Run(result, new AgentTrace(used, cap, events));
     }

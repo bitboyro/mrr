@@ -10,6 +10,7 @@ import ro.bitboy.mrr.model.AgentSkill;
 import ro.bitboy.mrr.model.AgentTrace;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.Finding;
+import ro.bitboy.mrr.model.MemoryStatus;
 import ro.bitboy.mrr.model.MergeRequestInfo;
 import ro.bitboy.mrr.model.MrStatus;
 import ro.bitboy.mrr.model.Project;
@@ -125,14 +126,14 @@ public class Store {
                 INSERT INTO projects (id, owner_id, name, enabled, gitlab_url, gitlab_project_id,
                                       gitlab_token, webhook_secret, provider, model_base_url,
                                       model, model_key, skill, skip_drafts, agent_max_turns,
-                                      agent_tools, auto_approve, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      agent_tools, auto_approve, librarian_enabled, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)
                 .params(p.id(), p.ownerId(), p.name(), p.enabled() ? 1 : 0, p.gitlabUrl(),
                         p.gitlabProjectId(), p.gitlabToken(), p.webhookSecret(), p.provider().name(),
                         p.modelBaseUrl(), p.model(), p.modelKey(), p.skill(), p.skipDrafts() ? 1 : 0,
                         p.agentMaxTurns(), toolsCsv(p.agentTools()), p.autoApprove() ? 1 : 0,
-                        p.createdAt().toString())
+                        p.librarianEnabled() ? 1 : 0, p.createdAt().toString())
                 .update();
         return p;
     }
@@ -142,13 +143,14 @@ public class Store {
                 UPDATE projects SET name = ?, enabled = ?, gitlab_url = ?, gitlab_project_id = ?,
                        gitlab_token = ?, webhook_secret = ?, provider = ?, model_base_url = ?,
                        model = ?, model_key = ?, skill = ?, skip_drafts = ?, agent_max_turns = ?,
-                       agent_tools = ?, auto_approve = ?
+                       agent_tools = ?, auto_approve = ?, librarian_enabled = ?
                 WHERE id = ?
                 """)
                 .params(p.name(), p.enabled() ? 1 : 0, p.gitlabUrl(), p.gitlabProjectId(),
                         p.gitlabToken(), p.webhookSecret(), p.provider().name(), p.modelBaseUrl(),
                         p.model(), p.modelKey(), p.skill(), p.skipDrafts() ? 1 : 0,
-                        p.agentMaxTurns(), toolsCsv(p.agentTools()), p.autoApprove() ? 1 : 0, p.id())
+                        p.agentMaxTurns(), toolsCsv(p.agentTools()), p.autoApprove() ? 1 : 0,
+                        p.librarianEnabled() ? 1 : 0, p.id())
                 .update();
     }
 
@@ -178,7 +180,14 @@ public class Store {
                         .param(caller.userId()).query(Store::toProject).list();
     }
 
+    public List<Project> listEnabledProjects() {
+        return db.sql("SELECT * FROM projects WHERE enabled = 1 ORDER BY created_at")
+                .query(Store::toProject).list();
+    }
+
     public boolean deleteProject(String id) {
+        db.sql("DELETE FROM memory_runs WHERE project_id = ?").param(id).update();
+        db.sql("DELETE FROM memory_documents WHERE project_id = ?").param(id).update();
         db.sql("DELETE FROM findings WHERE project_id = ?").param(id).update();
         db.sql("DELETE FROM replies WHERE project_id = ?").param(id).update();
         db.sql("DELETE FROM reviews WHERE project_id = ?").param(id).update();
@@ -260,6 +269,77 @@ public class Store {
         return listReviews(caller, projectId, null, limit);
     }
 
+    /**
+     * The overview thread to edit on the next commit of this MR — the most recent READY
+     * review that already posted one, not counting {@code exceptReviewId} (the review
+     * currently running). A new SHA used to post a second overview; GitLab then counted
+     * that leftover as an unresolved thread after CLEAN.
+     */
+    public Optional<Review> findLatestOverview(String projectId, long mrIid, String exceptReviewId) {
+        return db.sql("""
+                SELECT * FROM reviews
+                WHERE project_id = ? AND mr_iid = ? AND id != ?
+                  AND state = ? AND discussion_id IS NOT NULL AND note_id IS NOT NULL
+                ORDER BY created_at DESC LIMIT 1
+                """)
+                .params(projectId, mrIid, exceptReviewId, Review.State.READY.name())
+                .query(Store::toReview).optional();
+    }
+
+    public record Overview(String discussionId, String noteId) {
+    }
+
+    /** The one overview thread this MR should keep editing. Independent of which review last ran. */
+    public Optional<Overview> findOverview(String projectId, long mrIid) {
+        return db.sql("""
+                SELECT overview_discussion_id, overview_note_id FROM mr_status
+                WHERE project_id = ? AND mr_iid = ?
+                  AND overview_discussion_id IS NOT NULL AND overview_note_id IS NOT NULL
+                """)
+                .params(projectId, mrIid)
+                .query((rs, n) -> new Overview(
+                        rs.getString("overview_discussion_id"),
+                        rs.getString("overview_note_id")))
+                .optional();
+    }
+
+    public void saveOverview(String projectId, long mrIid, String discussionId, String noteId) {
+        String now = Instant.now().toString();
+        int updated = db.sql("""
+                UPDATE mr_status SET overview_discussion_id = ?, overview_note_id = ?, updated_at = ?
+                WHERE project_id = ? AND mr_iid = ?
+                """)
+                .params(discussionId, noteId, now, projectId, mrIid)
+                .update();
+        if (updated > 0) {
+            return;
+        }
+        db.sql("""
+                INSERT INTO mr_status (project_id, mr_iid, current_status, latest_review_id,
+                                       latest_head_sha, open_findings, mrr_approved,
+                                       mrr_approved_sha, overview_discussion_id, overview_note_id,
+                                       updated_at)
+                VALUES (?, ?, ?, NULL, NULL, 0, 0, NULL, ?, ?, ?)
+                """)
+                .params(projectId, mrIid, MrStatus.Status.REVIEWING.name(),
+                        discussionId, noteId, now)
+                .update();
+    }
+
+    /**
+     * Every overview discussion mrr has posted on this MR. Used to resolve leftovers from
+     * before overviews were reused across commits.
+     */
+    public List<String> overviewDiscussionIds(String projectId, long mrIid) {
+        return db.sql("""
+                SELECT DISTINCT discussion_id FROM reviews
+                WHERE project_id = ? AND mr_iid = ? AND discussion_id IS NOT NULL
+                ORDER BY discussion_id
+                """)
+                .params(projectId, mrIid)
+                .query(String.class).list();
+    }
+
     public List<Review> listReviews(Principal caller, String projectId, Long mrIid, int limit) {
         String sql = "SELECT r.* FROM reviews r JOIN projects p ON p.id = r.project_id WHERE 1=1"
                 + (projectId == null ? "" : " AND r.project_id = ?")
@@ -287,11 +367,13 @@ public class Store {
     public void updateMergeRequestInfo(String reviewId, MergeRequestInfo mr) {
         db.sql("""
                 UPDATE reviews SET mr_title = ?, mr_url = ?, source_branch = ?, target_branch = ?,
-                       mr_author_name = ?, mr_author_username = ?, files_changed = ?
+                       mr_author_name = ?, mr_author_username = ?, files_changed = ?,
+                       commit_count = ?, assignees = ?, reviewers = ?
                 WHERE id = ?
                 """)
                 .params(mr.title(), mr.url(), mr.sourceBranch(), mr.targetBranch(),
-                        mr.authorName(), mr.authorUsername(), mr.filesChanged(), reviewId)
+                        mr.authorName(), mr.authorUsername(), mr.filesChanged(),
+                        mr.commitCount(), mr.assignees(), mr.reviewers(), reviewId)
                 .update();
     }
 
@@ -344,6 +426,17 @@ public class Store {
         findReview(reviewId).ifPresent(r -> recordProjectError(r.projectId(), resolved, message));
     }
 
+    public void updateMemoryState(String projectId, String headSha, MemoryStatus status,
+                                  Instant refreshedAt) {
+        db.sql("""
+                UPDATE projects SET memory_head_sha = ?, memory_status = ?, memory_refreshed_at = ?
+                WHERE id = ?
+                """)
+                .params(headSha, status == null ? MemoryStatus.NONE.name() : status.name(),
+                        refreshedAt == null ? null : refreshedAt.toString(), projectId)
+                .update();
+    }
+
     public void recordProjectError(String projectId, FailureKind kind, String error) {
         db.sql("""
                 UPDATE projects SET last_error_kind = ?, last_error = ?, last_error_at = ?
@@ -389,13 +482,6 @@ public class Store {
                         projectId, mrIid,
                         Review.State.PENDING.name(), Review.State.PROCESSING.name())
                 .update() > 0;
-        if (cancelled) {
-            MrStatus previous = findMrStatus(projectId, mrIid).orElse(null);
-            upsertMrStatus(projectId, mrIid, MrStatus.Status.CANCELLED,
-                    previous == null ? null : previous.latestReviewId(),
-                    previous == null ? null : previous.latestHeadSha(),
-                    openFindings(projectId, mrIid).size());
-        }
         return cancelled;
     }
 
@@ -527,16 +613,132 @@ public class Store {
                 .update();
     }
 
+    private static final String MR_STATUS_SELECT = """
+            SELECT s.project_id, s.mr_iid, s.current_status, s.latest_review_id, s.latest_head_sha,
+                   s.open_findings, s.mrr_approved, s.mrr_approved_sha, s.user_context, s.updated_at,
+                   r.mr_title AS title
+            FROM mr_status s
+            LEFT JOIN reviews r ON r.id = s.latest_review_id
+            """;
+
     public Optional<MrStatus> findMrStatus(String projectId, long mrIid) {
-        return db.sql("SELECT * FROM mr_status WHERE project_id = ? AND mr_iid = ?")
+        return db.sql(MR_STATUS_SELECT + " WHERE s.project_id = ? AND s.mr_iid = ?")
                 .params(projectId, mrIid)
                 .query(Store::toMrStatus).optional();
     }
 
+    public static final int MAX_USER_CONTEXT_CHARS = 20_000;
+
+    /**
+     * Owner-written notes for this MR. Blank clears. Status upserts leave this column alone,
+     * so a later commit does not wipe what the owner typed.
+     */
+    public MrStatus setMrContext(String projectId, long mrIid, String context) {
+        findMrStatus(projectId, mrIid).orElseThrow(() -> ApiException.notFound("merge request"));
+        String stored = context == null || context.isBlank() ? null : context.trim();
+        if (stored != null && stored.length() > MAX_USER_CONTEXT_CHARS) {
+            throw ApiException.badRequest("context is too long (max "
+                    + MAX_USER_CONTEXT_CHARS + " characters)");
+        }
+        db.sql("""
+                UPDATE mr_status SET user_context = ?, updated_at = ?
+                WHERE project_id = ? AND mr_iid = ?
+                """)
+                .params(stored, Instant.now().toString(), projectId, mrIid)
+                .update();
+        return findMrStatus(projectId, mrIid).orElseThrow();
+    }
+
+    /**
+     * GitLab ended this MR. Findings stay as they were — they are the review record, not
+     * a live merge gate. No-ops when we never reviewed it.
+     */
+    public void closeMr(String projectId, long mrIid, MrStatus.Status status) {
+        if (!status.isClosed() || status == MrStatus.Status.CANCELLED) {
+            throw new IllegalArgumentException("closeMr expects MERGED or CLOSED");
+        }
+        Optional<MrStatus> existing = findMrStatus(projectId, mrIid);
+        if (existing.isEmpty()) {
+            return;
+        }
+        MrStatus row = existing.get();
+        if (row.currentStatus() == status) {
+            return;
+        }
+        upsertMrStatus(projectId, mrIid, status,
+                row.latestReviewId(), row.latestHeadSha(), row.openFindings());
+    }
+
+    /** Cycles GitLab may still move — everything except MERGED and CLOSED. */
+    public List<MrStatus> listActiveMrStatus(String projectId) {
+        return db.sql(MR_STATUS_SELECT + """
+                WHERE s.project_id = ? AND s.current_status NOT IN (?, ?)
+                ORDER BY s.mr_iid DESC
+                """)
+                .params(projectId, MrStatus.Status.MERGED.name(), MrStatus.Status.CLOSED.name())
+                .query(Store::toMrStatus).list();
+    }
+
     public List<MrStatus> listMrStatus(String projectId) {
-        return db.sql("SELECT * FROM mr_status WHERE project_id = ? ORDER BY updated_at DESC")
+        return db.sql(MR_STATUS_SELECT + " WHERE s.project_id = ? ORDER BY s.mr_iid DESC")
                 .param(projectId)
                 .query(Store::toMrStatus).list();
+    }
+
+    /**
+     * Newest iid first. {@code status} is an exact cycle status; {@code q} matches the
+     * GitLab title or the iid. Used by the project page infinite scroll.
+     */
+    public MrStatus.Page listMrStatus(String projectId, String status, String q,
+                                      int offset, int limit) {
+        int capped = Math.clamp(limit, 1, 100);
+        int off = Math.max(0, offset);
+        String statusFilter = parseMrStatus(status);
+        String like = likePattern(q);
+        String where = " WHERE s.project_id = ?"
+                + (statusFilter != null ? " AND s.current_status = ?" : "")
+                + (like != null ? " AND (IFNULL(r.mr_title, '') LIKE ? OR CAST(s.mr_iid AS TEXT) LIKE ?)" : "");
+        var count = db.sql("""
+                SELECT COUNT(*) FROM mr_status s
+                LEFT JOIN reviews r ON r.id = s.latest_review_id
+                """ + where);
+        var list = db.sql(MR_STATUS_SELECT + where + " ORDER BY s.mr_iid DESC LIMIT ? OFFSET ?");
+        count = count.param(projectId);
+        list = list.param(projectId);
+        if (statusFilter != null) {
+            count = count.param(statusFilter);
+            list = list.param(statusFilter);
+        }
+        if (like != null) {
+            count = count.param(like).param(like);
+            list = list.param(like).param(like);
+        }
+        int total = count.query(Integer.class).single();
+        List<MrStatus> items = list.param(capped).param(off).query(Store::toMrStatus).list();
+        return new MrStatus.Page(items, total, off, capped);
+    }
+
+    private static String parseMrStatus(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return MrStatus.Status.valueOf(raw.trim().toUpperCase()).name();
+        } catch (IllegalArgumentException e) {
+            throw ApiException.badRequest("unknown status: " + raw);
+        }
+    }
+
+    private static String likePattern(String q) {
+        if (q == null || q.isBlank()) {
+            return null;
+        }
+        String trimmed = q.trim();
+        if (trimmed.startsWith("!")) {
+            trimmed = trimmed.substring(1);
+        }
+        String escaped = trimmed.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+        return "%" + escaped + "%";
     }
 
     // ── agent skills / documents ─────────────────────────────────────────────────────
@@ -547,18 +749,26 @@ public class Store {
     }
 
     public AgentSkill createSkill(String projectId, String name, String body, boolean enabled) {
+        return createSkill(projectId, name, body, enabled, null);
+    }
+
+    public AgentSkill createSkill(String projectId, String name, String body, boolean enabled,
+                                  String branchPattern) {
         String trimmed = requireName(name);
         int position = db.sql("SELECT COALESCE(MAX(position), -1) + 1 FROM agent_skills WHERE project_id = ?")
                 .param(projectId).query(Integer.class).optional().orElse(0);
         AgentSkill skill = new AgentSkill(Ids.newId(), projectId, trimmed,
-                body == null ? "" : body, enabled, position, Instant.now());
+                body == null ? "" : body, enabled, AgentSkill.validatePattern(branchPattern),
+                position, Instant.now());
         try {
             db.sql("""
-                    INSERT INTO agent_skills (id, project_id, name, body, enabled, position, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO agent_skills (id, project_id, name, body, enabled, branch_pattern,
+                                              position, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """)
                     .params(skill.id(), projectId, skill.name(), skill.body(),
-                            skill.enabled() ? 1 : 0, skill.position(), skill.createdAt().toString())
+                            skill.enabled() ? 1 : 0, skill.branchPattern(),
+                            skill.position(), skill.createdAt().toString())
                     .update();
         } catch (DataAccessException e) {
             throw ApiException.conflict("a skill named '" + trimmed + "' already exists");
@@ -578,7 +788,7 @@ public class Store {
                 .filter(s -> s.name().equalsIgnoreCase(name)).findFirst();
         if (existing.isPresent()) {
             updateSkill(existing.get().id(), existing.get().name(), body, existing.get().enabled(),
-                    existing.get().position());
+                    existing.get().position(), existing.get().branchPattern());
         } else {
             createSkill(projectId, name, body, true);
         }
@@ -590,7 +800,7 @@ public class Store {
     }
 
     public AgentSkill updateSkill(String skillId, String name, String body, Boolean enabled,
-                                  Integer position) {
+                                  Integer position, String branchPattern) {
         AgentSkill current = db.sql("SELECT * FROM agent_skills WHERE id = ?").param(skillId)
                 .query(Store::toSkill).optional()
                 .orElseThrow(() -> ApiException.notFound("skill"));
@@ -598,18 +808,22 @@ public class Store {
         String nextBody = body == null ? current.body() : body;
         boolean nextEnabled = enabled == null ? current.enabled() : enabled;
         int nextPosition = position == null ? current.position() : position;
+        String nextPattern = branchPattern == null
+                ? current.branchPattern()
+                : AgentSkill.validatePattern(branchPattern);
         try {
             db.sql("""
-                    UPDATE agent_skills SET name = ?, body = ?, enabled = ?, position = ?
+                    UPDATE agent_skills SET name = ?, body = ?, enabled = ?, branch_pattern = ?,
+                           position = ?
                     WHERE id = ?
                     """)
-                    .params(nextName, nextBody, nextEnabled ? 1 : 0, nextPosition, skillId)
+                    .params(nextName, nextBody, nextEnabled ? 1 : 0, nextPattern, nextPosition, skillId)
                     .update();
         } catch (DataAccessException e) {
             throw ApiException.conflict("a skill named '" + nextName + "' already exists");
         }
         return new AgentSkill(current.id(), current.projectId(), nextName, nextBody,
-                nextEnabled, nextPosition, current.createdAt());
+                nextEnabled, nextPattern, nextPosition, current.createdAt());
     }
 
     public boolean deleteSkill(String projectId, String skillId) {
@@ -697,6 +911,10 @@ public class Store {
                 rs.getInt("agent_max_turns") == 0 ? 1 : rs.getInt("agent_max_turns"),
                 toolsList(rs.getString("agent_tools")),
                 rs.getInt("auto_approve") == 1,
+                columnInt(rs, "librarian_enabled") == 1,
+                rs.getString("memory_head_sha"),
+                memoryStatus(rs.getString("memory_status")),
+                instant(rs.getString("memory_refreshed_at")),
                 failureKind(rs.getString("last_error_kind")),
                 rs.getString("last_error"),
                 instant(rs.getString("last_error_at")),
@@ -712,7 +930,9 @@ public class Store {
                 rs.getString("actor_name"), rs.getString("actor_username"),
                 rs.getString("commit_message"), rs.getString("commit_author_name"),
                 rs.getString("commit_author_email"), instant(rs.getString("commit_at")),
-                rs.getString("labels"), nullableInt(rs, "files_changed"));
+                rs.getString("labels"), nullableInt(rs, "files_changed"),
+                nullableInt(rs, "commit_count"), rs.getString("assignees"),
+                rs.getString("reviewers"));
 
         return new Review(
                 rs.getString("id"), rs.getString("project_id"), rs.getLong("mr_iid"),
@@ -750,14 +970,15 @@ public class Store {
                 MrStatus.Status.valueOf(rs.getString("current_status")),
                 rs.getString("latest_review_id"), rs.getString("latest_head_sha"),
                 rs.getInt("open_findings"), rs.getInt("mrr_approved") == 1,
-                rs.getString("mrr_approved_sha"), instant(rs.getString("updated_at")));
+                rs.getString("mrr_approved_sha"), rs.getString("user_context"),
+                instant(rs.getString("updated_at")), rs.getString("title"));
     }
 
     private static AgentSkill toSkill(ResultSet rs, int n) throws SQLException {
         return new AgentSkill(
                 rs.getString("id"), rs.getString("project_id"), rs.getString("name"),
-                rs.getString("body"), rs.getInt("enabled") == 1, rs.getInt("position"),
-                instant(rs.getString("created_at")));
+                rs.getString("body"), rs.getInt("enabled") == 1, rs.getString("branch_pattern"),
+                rs.getInt("position"), instant(rs.getString("created_at")));
     }
 
     private static AgentDocument toDocument(ResultSet rs, int n) throws SQLException {
@@ -765,6 +986,22 @@ public class Store {
                 rs.getString("id"), rs.getString("project_id"), rs.getString("name"),
                 rs.getString("body"), rs.getInt("enabled") == 1,
                 instant(rs.getString("created_at")));
+    }
+
+    private static MemoryStatus memoryStatus(String value) {
+        if (value == null || value.isBlank()) {
+            return MemoryStatus.NONE;
+        }
+        try {
+            return MemoryStatus.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            return MemoryStatus.NONE;
+        }
+    }
+
+    private static int columnInt(ResultSet rs, String column) throws SQLException {
+        int value = rs.getInt(column);
+        return rs.wasNull() ? 0 : value;
     }
 
     private static FailureKind failureKind(String value) {

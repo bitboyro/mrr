@@ -33,6 +33,9 @@ mrr:
   root-token-file: ${MRR_ROOT_TOKEN_FILE:/data/root-token.txt}
   # Public base URL, used only to print the webhook URL when a project is registered.
   base-url: ${MRR_BASE_URL:http://localhost:8130}
+  memory-root: ${MRR_MEMORY_ROOT:/data/memory}
+  # Catch-up against GitLab: missed commits and MRs that merged/closed without a webhook.
+  scan-interval-ms: ${MRR_SCAN_INTERVAL_MS:120000}
   review:
     workers: ${MRR_REVIEW_WORKERS:2}
     # Diffs larger than this are truncated before the model sees them.
@@ -45,6 +48,8 @@ mrr:
     # Tool results stored on reviews.trace / replies.trace are capped at this many characters.
     # The model still sees the full file; DEBUG logs still print the full body.
     max-trace-chars: ${MRR_MAX_TRACE_CHARS:8000}
+    librarian-max-turns: ${MRR_LIBRARIAN_MAX_TURNS:6}
+    max-memory-chars: ${MRR_MAX_MEMORY_CHARS:8000}
 
 springdoc:
   swagger-ui:
@@ -54,3 +59,6 @@ logging:
   level:
     ro.bitboy.mrr: INFO
     org.springframework.web: WARN
+    # Apache HttpClient DEBUG prints every header, including PRIVATE-TOKEN.
+    org.apache.hc.client5.http.headers: WARN
+    org.apache.hc.client5.http.wire: WARN

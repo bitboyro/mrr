@@ -101,6 +101,74 @@
         "type": "object"
       },
       "name": "update_comment"
+    },
+    {
+      "description": "Search a project's OKF memory. Returns id — kind — title — tags, never full bodies. Use get_memory to read one document.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "description": "Maximum hits (default 20)",
+            "type": "integer"
+          },
+          "projectId": {
+            "description": "The mrr project id",
+            "type": "string"
+          },
+          "query": {
+            "description": "Text to match in title, subject, or tags",
+            "type": "string"
+          }
+        },
+        "required": [
+          "projectId"
+        ],
+        "type": "object"
+      },
+      "name": "search_memory"
+    },
+    {
+      "description": "List memory documents in a project, optionally restricted to a space (project, mrs, notes). Summaries without bodies.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "projectId": {
+            "description": "The mrr project id",
+            "type": "string"
+          },
+          "space": {
+            "description": "Space: project, mrs, or notes",
+            "type": "string"
+          }
+        },
+        "required": [
+          "projectId"
+        ],
+        "type": "object"
+      },
+      "name": "list_memories"
+    },
+    {
+      "description": "Read one memory document by id, including its markdown body.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "The document id from search_memory or list_memories",
+            "type": "string"
+          },
+          "projectId": {
+            "description": "The mrr project id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "projectId",
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "get_memory"
     }
   ]
 }

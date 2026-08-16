@@ -117,6 +117,36 @@ review, finds it wrong, and should correct it in place rather than arguing with 
 Edits through `PUT /discussions/{id}/notes/{id}`, so mrr needs both ids — a review that never
 posted successfully can't be updated.
 
+### `search_memory`
+
+Search a project's OKF memory. Returns `id — kind — title — tags`, never full bodies. Use
+`get_memory` to read one document. The same store the reviewer searches via its internal tool.
+
+| Argument | | |
+|---|---|---|
+| `projectId` | required | From `list_projects` |
+| `query` | optional | Match title, subject, or tags |
+| `limit` | optional | Default 20, capped at 100 |
+
+### `list_memories`
+
+List memory documents in a project, optionally restricted to a space (`project`, `mrs`,
+`notes`). Summaries without bodies.
+
+| Argument | | |
+|---|---|---|
+| `projectId` | required | From `list_projects` |
+| `space` | optional | `project`, `mrs`, or `notes` |
+
+### `get_memory`
+
+Read one memory document by id, including its markdown body.
+
+| Argument | | |
+|---|---|---|
+| `projectId` | required | From `list_projects` |
+| `id` | required | From `search_memory` or `list_memories` |
+
 ## Errors
 
 Failures come back as MCP tool errors with `isError: true` and a plain-text message:

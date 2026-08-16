@@ -14,9 +14,8 @@ import java.util.List;
  * Turns whatever the model actually returned into a {@link ReviewModel.Verdict}.
  *
  * <p>Deliberately forgiving. Models wrap JSON in prose, fence it in ```json blocks, and
- * occasionally ignore the schema entirely. None of that should lose a review that was already
- * paid for — when parsing fails the caller falls back to posting the raw text as one comment,
- * which is exactly the behaviour mrr had before findings existed.
+ * occasionally ignore the schema entirely. Genuine failure returns {@code null}; the
+ * reviewer then fail-closes (keeps {@code reviews.response}, posts nothing).
  */
 public final class VerdictParser {
 
@@ -28,7 +27,7 @@ public final class VerdictParser {
         this.mapper = mapper;
     }
 
-    /** @return null when the text could not be read as a verdict */
+    /** @return null when the text could not be read as a verdict — caller must fail closed */
     public ReviewModel.Verdict parse(String raw) {
         if (raw == null || raw.isBlank()) {
             return null;
@@ -45,7 +44,8 @@ public final class VerdictParser {
             return new ReviewModel.Verdict(
                     text(root.path("summary")),
                     findings(root.path("findings")),
-                    priorVerdicts(root.path("prior")));
+                    priorVerdicts(root.path("prior")),
+                    memoryNote(root.path("memory")));
         } catch (Exception e) {
             log.debug("model output was not a parseable verdict: {}", e.getMessage());
             return null;
@@ -90,6 +90,18 @@ public final class VerdictParser {
                     id, "addressed".equalsIgnoreCase(status), text(item.path("note"))));
         }
         return verdicts;
+    }
+
+    private ReviewModel.MemoryNote memoryNote(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        String change = text(node.path("change"));
+        String impact = text(node.path("impact"));
+        if (change == null && impact == null) {
+            return null;
+        }
+        return new ReviewModel.MemoryNote(change, impact);
     }
 
     /**

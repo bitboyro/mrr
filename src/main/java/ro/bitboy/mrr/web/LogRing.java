@@ -39,6 +39,7 @@ public class LogRing extends UnsynchronizedAppenderBase<ILoggingEvent> {
         }
         setContext(context);
         start();
+        LogLevels.pinHttpSecretLoggers();
         Logger root = context.getLogger(Logger.ROOT_LOGGER_NAME);
         if (root.getAppender(getName()) == null) {
             root.addAppender(this);
@@ -70,7 +71,8 @@ public class LogRing extends UnsynchronizedAppenderBase<ILoggingEvent> {
         if (ring.size() >= CAPACITY) {
             ring.removeFirst();
         }
-        ring.addLast(new Line(seq, at, level, logger, cap(message), cap(thrown)));
+        ring.addLast(new Line(seq, at, level, logger,
+                cap(SecretRedactor.redact(message)), cap(SecretRedactor.redact(thrown))));
     }
 
     /**

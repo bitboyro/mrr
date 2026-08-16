@@ -42,13 +42,22 @@ public record Project(
         @Schema(description = "Maximum model turns per review, including the first. 1 is a single "
                 + "shot with no tools, which is the default and preserves original behaviour.")
         int agentMaxTurns,
-        @Schema(description = "Tool names the reviewer may call. Currently only `read_file`. "
-                + "Empty means no tools are advertised.")
+        @Schema(description = "Tool names the reviewer may call: `read_file`, `search_memory`, "
+                + "`read_memory`, `write_memory`. Empty means no tools are advertised. The MR "
+                + "card is always written from the verdict, tools or not.")
         List<String> agentTools,
         @Schema(description = "When true, mrr Approves the GitLab MR after a review that leaves "
                 + "zero open findings, and Unapproves if a later commit reintroduces one. The "
                 + "PAT must be allowed to approve. Default false.")
         boolean autoApprove,
+        @Schema(description = "Optional librarian addon. When true, Initialize/Refresh is available. "
+                + "Disable never deletes memory files.")
+        boolean librarianEnabled,
+        @Schema(description = "Default-branch tip the last librarian run observed.", nullable = true)
+        String memoryHeadSha,
+        @Schema(description = "NONE | READY | RUNNING | FAILED. Independent of librarianEnabled.")
+        MemoryStatus memoryStatus,
+        @Schema(nullable = true) Instant memoryRefreshedAt,
         @Schema(description = "Why the last review or reply failed before posting, if it did. "
                 + "Cleared on the next successful model call.", nullable = true)
         FailureKind lastErrorKind,
@@ -69,6 +78,7 @@ public record Project(
     public Project {
         if (agentMaxTurns <= 0) agentMaxTurns = 1;
         agentTools = agentTools == null ? List.of() : List.copyOf(agentTools);
+        if (memoryStatus == null) memoryStatus = MemoryStatus.NONE;
     }
 
     public boolean toolEnabled(String name) {
@@ -80,6 +90,7 @@ public record Project(
         return new Project(id, ownerId, name, enabled, gitlabUrl, gitlabProjectId,
                 mask(gitlabToken), mask(webhookSecret), provider, modelBaseUrl, model,
                 mask(modelKey), skill, skipDrafts, agentMaxTurns, agentTools, autoApprove,
+                librarianEnabled, memoryHeadSha, memoryStatus, memoryRefreshedAt,
                 lastErrorKind, lastError, lastErrorAt, createdAt);
     }
 

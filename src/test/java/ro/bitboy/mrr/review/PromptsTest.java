@@ -20,6 +20,8 @@ class PromptsTest {
         assertThat(system).contains("does not excuse an empty or generic `summary`");
         assertThat(system).contains("Concise and to the point");
         assertThat(system).contains("omit nothing that would change");
+        assertThat(system).contains("\"memory\"");
+        assertThat(system).contains("this merge request's memory card");
     }
 
     @Test
@@ -53,6 +55,38 @@ class PromptsTest {
     }
 
     @Test
+    void branchPatternDropsSkillsThatDoNotMatchTheSourceBranch() {
+        String composed = Prompts.composeSkills(List.of(
+                skill("always", "Every MR.", true, null),
+                skill("hotfix", "Hotfix only.", true, "hotfix/*"),
+                skill("off", "Ignored.", false, null)), null, "hotfix/prod");
+        assertThat(composed).contains("## Skill: always", "Every MR.",
+                "## Skill: hotfix", "Hotfix only.");
+        assertThat(composed).doesNotContain("Ignored");
+
+        String onFeature = Prompts.composeSkills(List.of(
+                skill("always", "Every MR.", true, null),
+                skill("hotfix", "Hotfix only.", true, "hotfix/*")), null, "feature/x");
+        assertThat(onFeature).isEqualTo("Every MR.");
+        assertThat(onFeature).doesNotContain("Hotfix only");
+
+        String noneMatch = Prompts.composeSkills(List.of(
+                skill("hotfix", "Hotfix only.", true, "hotfix/*")), "legacy", "feature/x");
+        assertThat(noneMatch).isEqualTo("legacy");
+    }
+
+    @Test
+    void ownerNotesLandInTheUserPrompt() {
+        GitLabClient.Diff diff = new GitLabClient.Diff(
+                "Fix npe", "desc", "fix", "main", "https://gl/mr/1",
+                "Ada", "ada", List.of("A.java"), "diff --git a/A.java", false);
+        String user = Prompts.user(diff, List.of(), List.of(), 20_000, "Implements JIRA-12.");
+        assertThat(user).contains("## Merge request context", "Implements JIRA-12.");
+        assertThat(Prompts.user(diff, List.of(), List.of(), 20_000, "  "))
+                .doesNotContain("Merge request context");
+    }
+
+    @Test
     void enabledDocumentsLandInTheUserPrompt() {
         GitLabClient.Diff diff = new GitLabClient.Diff(
                 "Fix npe", "desc", "fix", "main", "https://gl/mr/1",
@@ -64,7 +98,19 @@ class PromptsTest {
         assertThat(user).doesNotContain("secret.md", "do not send");
     }
 
+    @Test
+    void overviewPrefixIsHowGitLabLeftoversAreRecognised() {
+        assertThat(Prompts.isOverview("### mrr review\n\nNo findings.\n")).isTrue();
+        assertThat(Prompts.isOverview("  ### mrr review")).isTrue();
+        assertThat(Prompts.isOverview("**[Major]** missing test")).isFalse();
+        assertThat(Prompts.isOverview(null)).isFalse();
+    }
+
     private static AgentSkill skill(String name, String body, boolean enabled) {
-        return new AgentSkill("id-" + name, "p", name, body, enabled, 0, Instant.now());
+        return skill(name, body, enabled, null);
+    }
+
+    private static AgentSkill skill(String name, String body, boolean enabled, String branchPattern) {
+        return new AgentSkill("id-" + name, "p", name, body, enabled, branchPattern, 0, Instant.now());
     }
 }

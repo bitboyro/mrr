@@ -75,9 +75,10 @@ token, and register the project in the UI.
 | `provider` | `ANTHROPIC` or `OPENAI_COMPAT` |
 | `modelBaseUrl` | Only for `OPENAI_COMPAT` — e.g. `http://ollama:11434/v1`, a vLLM or llama.cpp endpoint, or omit for OpenAI |
 | `skill` | Legacy. On create, becomes the first enabled skill named `reviewer`. Prefer the skill set below |
-| `agentMaxTurns` | Model turns per review. `1` (default) is a single shot. Raise it with `agentTools` to let the reviewer call `read_file` |
-| `agentTools` | Tool names. Currently only `read_file`. Empty (default) advertises none |
+| `agentMaxTurns` | Model turns per review. `1` (default) is a single shot. Raise it with `agentTools` to let the reviewer call tools |
+| `agentTools` | Tool names: `read_file`, `search_memory`, `read_memory`, `write_memory`. Empty (default) advertises none. The MR memory card is always written from the verdict |
 | `autoApprove` | When true, mrr Approves the GitLab MR after a review that leaves zero open findings, and Unapproves if a later commit reintroduces one. The PAT must be allowed to approve |
+| `librarianEnabled` | Optional librarian addon. Initialize / Refresh writes `project/` memory. Disable never deletes files. Default false |
 
 ## GitLab setup
 
@@ -110,8 +111,8 @@ create into *Settings → Webhooks*. Tick **Merge request events**, and **Commen
 should answer replies. Edit the existing hook when the public URL changes; two enabled hooks
 double-fire.
 
-`agentMaxTurns` defaults to `1` (no tools). `read_file` needs turns **> 1** and
-`agentTools: ["read_file"]`. First-party OpenAI `gpt-5.4` / `gpt-5.6-*` then use
+`agentMaxTurns` defaults to `1` (no tools). `read_file` and the memory tools need turns **> 1**
+and the matching names in `agentTools`. First-party OpenAI `gpt-5.4` / `gpt-5.6-*` then use
 `/v1/responses`; Ollama, vLLM, llama.cpp, and other `modelBaseUrl`s stay on chat completions.
 
 Skills and documents are a **set you enable per project**, same idea as MCP tools. Manage them
@@ -122,15 +123,42 @@ GET/POST    /api/projects/{id}/skills
 PUT/DELETE  /api/projects/{id}/skills/{skillId}
 GET/POST    /api/projects/{id}/documents
 PUT/DELETE  /api/projects/{id}/documents/{documentId}
+PUT         /api/projects/{id}/merge-requests/{iid}/context
 ```
 
-Enabled skills are concatenated into the system prompt. Enabled documents are appended to
-the review as reference material. Flip `enabled` to take one out of the next review without
-deleting it.
+Enabled skills are concatenated into the system prompt. A skill may carry a `branchPattern`
+so it only fires when the MR **source branch** matches: a plain name is exact (`hotfix`),
+`hotfix/*` is a glob, `release-\d+` is a Java regex. Blank means every branch. Enabled
+documents are appended to the review as reference material. Flip `enabled` to take one out
+of the next review without deleting it.
 
-If the model API is out of budget, rate-limited, or unreachable, mrr **does not post** to
-GitLab. The review is `FAILED` with an `errorKind`, and the UI shows a banner on the project
-and the MR.
+Each merge request can also carry **owner notes** (`userContext` on the cycle). They go into
+the next review of that MR (the next push, or a re-run) and are not a review by themselves.
+Edit them on the MR page, or `PUT /api/projects/{id}/merge-requests/{iid}/context`.
+
+## Agent memory
+
+Each project has a file tree under `/data/memory/{projectId}` (`project/overview.md`,
+`mrs/{iid}.md`). Every READY review upserts that MR's card from the verdict — librarian on
+or off. Nothing from memory is stuffed into the prompt; the reviewer reads it only if
+`search_memory` / `read_memory` are enabled.
+
+The **librarian** is an optional addon (`librarianEnabled`). When on, Initialize / Refresh
+deduces goal, domain, stack, and style into `project/` — it may read `mrs/*` but cannot
+rewrite them. Turning it off hides the button; files stay.
+
+```
+GET/POST    /api/projects/{id}/memory
+GET         /api/projects/{id}/memory/mrs/{iid}
+GET/PUT/DELETE /api/projects/{id}/memory/documents/{docId}
+GET         /api/projects/{id}/memory/runs[/{runId}]
+POST        /api/projects/{id}/memory/refresh   # librarian only; 202, poll the run
+```
+
+If the model API is out of budget, rate-limited, unreachable, **or returns something that is
+not a JSON verdict**, mrr **does not post** to GitLab. The review is `FAILED` with an
+`errorKind` (the raw response is kept when there was one), and the UI shows a banner on the
+project and the MR. Re-run that commit after you fix the skill or the provider.
 
 ## Auth model
 
@@ -168,6 +196,12 @@ The endpoints you'll actually use:
 | `GET /api/me` | who the token belongs to |
 | `GET/POST/PUT/DELETE /api/projects[/{id}]` | owner-scoped |
 | `GET /api/projects/{id}/merge-requests[/{iid}]` | live MR cycle status, timeline, findings, reply summaries |
+| `PUT /api/projects/{id}/merge-requests/{iid}/context` | owner notes included in the next review |
+| `GET/POST /api/projects/{id}/memory` | list/search or create a memory document |
+| `GET /api/projects/{id}/memory/mrs/{iid}` | this MR's card |
+| `GET/PUT/DELETE /api/projects/{id}/memory/documents/{docId}` | one document, including body |
+| `GET /api/projects/{id}/memory/runs[/{runId}]` | librarian runs; the detail view carries prompt, trail, response |
+| `POST /api/projects/{id}/memory/refresh` | initialize or refresh `project/` (librarian on; `202`) |
 | `GET /api/reviews`, `GET /api/reviews/{id}` | owner-scoped; filter with `?mrIid=`; the detail view carries the prompt, trace, and response |
 | `GET /api/replies/{id}` | full thread-reply transcript |
 | `GET/PUT /api/loggers` | admin; runtime log level (DEBUG = full agent bodies) |
@@ -180,6 +214,10 @@ Reviews are asynchronous. The webhook returns `202` immediately and the review m
 `PENDING → PROCESSING → READY | FAILED | CANCELLED`; the last three are terminal, so stop
 polling. `CANCELLED` means the MR merged or closed while the review was running, so the
 result was never posted.
+
+On startup, and when a project is registered, mrr also lists open merge requests from
+GitLab and queues a review for any head commit it has not already finished. That covers
+MRs that opened while mrr was down.
 
 ## What mrr does with each GitLab event
 
@@ -202,12 +240,16 @@ push to a draft otherwise costs a model call.
 
 A review produces **findings**, not one comment. Each gets its own GitLab thread, anchored to
 the diff line when GitLab accepts the position and falling back to an unanchored thread when
-it doesn't. A short summary thread lists them.
+it doesn't. A short **overview thread** lists them — one per MR, edited in place on later
+commits. When the MR is CLEAN, mrr resolves that overview (and any leftover stacked ones)
+so GitLab's "all threads resolved" check matches. A later commit that reopens findings
+unresolves the live overview again.
 
 On the next commit mrr hands the model the findings still open on that MR and asks it to
 judge each one against the new diff. Anything it marks addressed gets its **thread resolved**;
-anything still standing stays open; genuinely new problems get new threads. The model resolves
-the identity, so a fix still counts when the code moved or was rewritten.
+anything still standing stays open (and is **reopened** on GitLab if someone resolved it
+there); genuinely new problems get new threads. The model resolves the identity, so a fix
+still counts when the code moved or was rewritten.
 
 Only an explicit `addressed` verdict resolves a thread — leaving one open costs nothing,
 auto-resolving a live bug costs a lot.
@@ -217,13 +259,19 @@ auto-resolving a live bug costs a lot.
 without changing code, returns the existing review instead of spending tokens. A new push is
 a new head SHA and so a new review.
 
+**GitLab is source of truth for whether the MR still exists.** Open / merged / closed come
+from GitLab (webhook, plus a scan every two minutes for missed hooks). Findings stay mrr's:
+a human Resolve does not mark a finding addressed. After merge the cycle shows MERGED even
+if findings were still open.
+
 ## MCP
 
 The same instance serves MCP over streamable HTTP at `/mcp`. Authenticate with an mrr token
 in `X-API-Key`; tools are scoped to that token's owner exactly as the REST API is.
 
 `list_projects` · `list_merge_requests` · `list_merge_request_cycles` · `get_merge_request` ·
-`list_reviews` · `get_review` · `rerun_review` · `update_comment`
+`list_reviews` · `get_review` · `rerun_review` · `update_comment` · `search_memory` ·
+`list_memories` · `get_memory`
 
 `update_comment` edits the review comment in place on the MR — useful when an agent spots
 that a review was wrong.
@@ -238,6 +286,10 @@ that a review was wrong.
 | `MRR_REVIEW_WORKERS` | `2` | Concurrent reviews |
 | `MRR_MAX_DIFF_CHARS` | `200000` | Diffs longer than this are truncated |
 | `MRR_MAX_FILE_CHARS` | `80000` | Files fetched via `read_file` are truncated |
+| `MRR_MEMORY_ROOT` | `/data/memory` | Per-project OKF files |
+| `MRR_SCAN_INTERVAL_MS` | `120000` | GitLab catch-up for missed commits and merged/closed MRs |
+| `MRR_LIBRARIAN_MAX_TURNS` | `6` | Librarian agent turn cap (independent of reviews) |
+| `MRR_MAX_MEMORY_CHARS` | `8000` | Prefetched memory / file excerpts for the librarian |
 | `SERVER_PORT` | `8130` | |
 
 There are no model or GitLab credentials in the environment — those are per project.
@@ -246,12 +298,16 @@ There are no model or GitLab credentials in the environment — those are per pr
 
 - **Secrets are stored in plaintext** in the SQLite file. Fine for a private volume; treat
   `/data` accordingly. Encryption is a drop-in change with no schema migration.
-- **A review in flight does not survive a restart.** The row stays `PROCESSING`; re-run it.
+- **A review in flight is per process.** `submit` is single-flight in this JVM. After a
+  restart the startup scan will queue any still-`PENDING`/`PROCESSING` row of this instance;
+  two mrr processes on one database are unsupported. A librarian run left `RUNNING` across a
+  crash stays blocked until you refresh again (or the row is cleared).
 - **mrr comments as whoever owns the GitLab token.** For a shared project, give it a dedicated
   bot account rather than a person's PAT.
 - **Inline anchoring needs the line to be in the diff.** A finding about untouched code gets an
   unanchored thread instead — correct, just less convenient.
-- Refusals are recorded as `FAILED` with the reason, and nothing is posted to the MR.
+- Refusals and **unparseable model output** are `FAILED` with the reason. The raw response is
+  kept; nothing is posted to the MR. Re-run the review.
 
 ## Develop
 

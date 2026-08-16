@@ -14,9 +14,11 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import ro.bitboy.mrr.MrrProperties;
+import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.auth.Principal;
 import ro.bitboy.mrr.model.Project;
+import ro.bitboy.mrr.review.OpenMrScan;
 import ro.bitboy.mrr.store.Store;
 import ro.bitboy.mrr.web.ApiException;
 
@@ -43,10 +45,15 @@ public class ProjectController {
 
     private final Store store;
     private final MrrProperties properties;
+    private final MemoryService memory;
+    private final OpenMrScan openMrScan;
 
-    public ProjectController(Store store, MrrProperties properties) {
+    public ProjectController(Store store, MrrProperties properties, MemoryService memory,
+                             OpenMrScan openMrScan) {
         this.store = store;
         this.properties = properties;
+        this.memory = memory;
+        this.openMrScan = openMrScan;
     }
 
     @Operation(summary = "Register a GitLab project",
@@ -87,12 +94,15 @@ public class ProjectController {
                 request.agentMaxTurns() == null ? 1 : Math.max(1, request.agentMaxTurns()),
                 request.agentTools() == null ? List.of() : request.agentTools(),
                 Boolean.TRUE.equals(request.autoApprove()),
+                Boolean.TRUE.equals(request.librarianEnabled()),
+                null, ro.bitboy.mrr.model.MemoryStatus.NONE, null,
                 null, null, null, Instant.now());
 
         store.createProject(project);
         if (project.skill() != null && !project.skill().isBlank()) {
             store.createSkill(project.id(), "reviewer", project.skill(), true);
         }
+        openMrScan.enqueue(project);
 
         return new Registered(project.redacted(), secret,
                 properties.baseUrl() + "/webhooks/gitlab/" + project.id());
@@ -142,6 +152,9 @@ public class ProjectController {
                         : Math.max(1, request.agentMaxTurns()),
                 request.agentTools() == null ? existing.agentTools() : request.agentTools(),
                 request.autoApprove() == null ? existing.autoApprove() : request.autoApprove(),
+                request.librarianEnabled() == null ? existing.librarianEnabled()
+                        : request.librarianEnabled(),
+                existing.memoryHeadSha(), existing.memoryStatus(), existing.memoryRefreshedAt(),
                 existing.lastErrorKind(), existing.lastError(), existing.lastErrorAt(),
                 existing.createdAt());
 
@@ -160,6 +173,7 @@ public class ProjectController {
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void delete(Principal caller, @PathVariable String id) {
         store.requireVisible(caller, id);
+        memory.deleteProjectFiles(id);
         store.deleteProject(id);
     }
 
@@ -206,12 +220,16 @@ public class ProjectController {
             @Schema(description = "Maximum model turns per review. 1 (default) is a single shot. "
                     + "Raise this together with `agentTools` to let the reviewer call read_file.",
                     example = "8") Integer agentMaxTurns,
-            @Schema(description = "Tool names the reviewer may call. Currently only `read_file`. "
-                    + "Empty (default) advertises no tools.", example = "[\"read_file\"]")
+                    @Schema(description = "Tool names the reviewer may call. `read_file`, "
+                            + "`search_memory`, `read_memory`, `write_memory`. Empty (default) "
+                            + "advertises none. The MR card is always written from the verdict.",
+                            example = "[\"read_file\"]")
             List<String> agentTools,
             @Schema(description = "When true, mrr Approves the GitLab MR after a review that leaves "
                     + "zero open findings, and Unapproves if a later commit reintroduces one. Default false.")
-            Boolean autoApprove) {
+            Boolean autoApprove,
+            @Schema(description = "Enable the optional librarian addon. Disable never deletes memory.")
+            Boolean librarianEnabled) {
     }
 
     @Schema(description = "A newly registered project, plus the two values GitLab needs.")

@@ -19,10 +19,44 @@ type Project = {
   agentMaxTurns: number;
   agentTools: string[];
   autoApprove: boolean;
+  librarianEnabled: boolean;
+  memoryHeadSha: string | null;
+  memoryStatus: string | null;
+  memoryRefreshedAt: string | null;
   lastErrorKind: string | null;
   lastError: string | null;
   lastErrorAt: string | null;
 };
+type MemoryDocument = {
+  id: string;
+  projectId: string;
+  kind: string;
+  space: string;
+  title: string;
+  subject: string | null;
+  tags: string[];
+  status: string | null;
+  sourceSha: string | null;
+  mrIid: number | null;
+  path: string;
+  createdAt: string;
+  updatedAt: string;
+  body: string | null;
+};
+type MemoryRun = {
+  id: string;
+  projectId: string;
+  kind: string;
+  state: string;
+  prompt: string | null;
+  response: string | null;
+  trace: AgentTrace | null;
+  agentTurns: number;
+  error: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+};
+const AGENT_TOOLS = ["read_file", "search_memory", "read_memory", "write_memory"] as const;
 type MrStatus = {
   projectId: string;
   mrIid: number;
@@ -31,8 +65,11 @@ type MrStatus = {
   latestHeadSha: string | null;
   openFindings: number;
   mrrApproved: boolean;
+  userContext: string | null;
   updatedAt: string;
+  title: string | null;
 };
+type MrPage = { items: MrStatus[]; total: number; offset: number; limit: number };
 type Finding = {
   id: string;
   filePath: string | null;
@@ -48,7 +85,7 @@ type Review = {
   mrIid: number;
   headSha: string;
   state: string;
-  mr: { title: string | null; url: string | null };
+  mr: MrSnapshot;
   prompt: string | null;
   response: string | null;
   error: string | null;
@@ -56,6 +93,21 @@ type Review = {
   createdAt: string;
   agentTurns: number;
   trace: AgentTrace | null;
+};
+type MrSnapshot = {
+  title: string | null;
+  url: string | null;
+  sourceBranch?: string | null;
+  targetBranch?: string | null;
+  authorName?: string | null;
+  authorUsername?: string | null;
+  actorName?: string | null;
+  actorUsername?: string | null;
+  commitAuthorName?: string | null;
+  commitCount?: number | null;
+  filesChanged?: number | null;
+  assignees?: string | null;
+  reviewers?: string | null;
 };
 type AgentTrace = {
   turns: number;
@@ -92,6 +144,7 @@ type AgentSkill = {
   name: string;
   body: string;
   enabled: boolean;
+  branchPattern: string | null;
   position: number;
 };
 type AgentDocument = {
@@ -104,7 +157,7 @@ type User = { id: string; name: string; role: string };
 type TokenInfo = { id: string; name: string; prefix: string; createdAt: string; lastUsedAt: string | null };
 
 type Route =
-  | { name: "login" }
+  | { name: "howto" }
   | { name: "projects" }
   | { name: "project"; id: string }
   | { name: "edit"; id: string }
@@ -115,7 +168,7 @@ type Route =
   | { name: "logs" };
 
 function parseRoute(path: string): Route {
-  if (path === "/" || path === "/login") return { name: "login" };
+  if (path === "/" || path === "/login" || path === "/howto") return { name: "howto" };
   if (path === "/projects") return { name: "projects" };
   if (path === "/projects/new") return { name: "new" };
   if (path === "/admin") return { name: "admin" };
@@ -128,12 +181,35 @@ function parseRoute(path: string): Route {
   if (m) return { name: "project", id: m[1] };
   m = path.match(/^\/reviews\/([^/]+)$/);
   if (m) return { name: "review", id: m[1] };
-  return { name: "projects" };
+  return { name: "howto" };
 }
 
 function go(path: string) {
+  if (window.location.pathname === path) return;
   window.history.pushState({}, "", path);
   window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+const CAT_FRAMES = Array.from({ length: 21 }, (_, i) => `/cats/${String(i).padStart(2, "0")}.png`);
+const LOGO_MS = 2000;
+const CAT_MS = 2200;
+function pickCat() {
+  return CAT_FRAMES[Math.floor(Math.random() * CAT_FRAMES.length)];
+}
+function rollIntro() {
+  return !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    && Math.random() < 0.6;
+}
+
+/** 1s poll for pages whose data moves on its own (webhooks, reviews, librarian). */
+function usePoll(fn: () => void, active: boolean) {
+  const fnRef = useRef(fn);
+  fnRef.current = fn;
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => fnRef.current(), 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
 }
 
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -164,9 +240,13 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 function pill(status: string) {
   const s = status.toUpperCase();
-  const cls = s === "CLEAN" || s === "READY" || s === "ADDRESSED" ? "ok"
-    : s === "NEEDS_WORK" || s === "REVIEWING" || s === "PENDING" || s === "PROCESSING" ? "warn"
-    : s === "FAILED" || s === "CANCELLED" || s === "BLOCKER" || s === "QUOTA" || s === "PROVIDER" || s === "AUTH" || s === "MCP" || s === "GITLAB" || s === "RATE_LIMIT" || s === "REFUSAL" ? "bad"
+  const cls = s === "CLEAN" || s === "READY" || s === "ADDRESSED" || s === "ENABLED" || s === "ON" || s === "MERGED" ? "ok"
+    : s === "NEEDS_WORK" || s === "OPEN" || s === "REVIEWING" || s === "PENDING"
+      || s === "PROCESSING" || s === "RUNNING" || s === "INITIALIZE" || s === "REFRESH" ? "warn"
+    : s === "FAILED" || s === "CANCELLED" || s === "BLOCKER" || s === "QUOTA" || s === "PROVIDER"
+      || s === "AUTH" || s === "MCP" || s === "GITLAB" || s === "RATE_LIMIT" || s === "REFUSAL" ? "bad"
+    : s === "MAJOR" ? "major"
+    : s === "MINOR" ? "minor"
     : "";
   return <span className={`pill ${cls}`}>{status}</span>;
 }
@@ -184,16 +264,178 @@ function FailureBanner({ kind, message }: { kind?: string | null; message?: stri
   );
 }
 
+function Check({ on, onChange, children }: { on: boolean; onChange: () => void; children: ReactNode }) {
+  return (
+    <label className="check">
+      <input type="checkbox" checked={on} onChange={onChange} />
+      {children}
+    </label>
+  );
+}
+
+function Toggle({ on, onChange, children }: { on: boolean; onChange: (v: boolean) => void; children: ReactNode }) {
+  return (
+    <button type="button" className={`toggle${on ? " on" : ""}`} aria-pressed={on}
+      onClick={() => onChange(!on)}>
+      {children}
+    </button>
+  );
+}
+
+function Intro({ src, boot, onDone }: { src: string; boot?: boolean; onDone: () => void }) {
+  const [phase, setPhase] = useState<"logo" | "cat">(boot ? "logo" : "cat");
+  const done = useRef(onDone);
+  done.current = onDone;
+  useEffect(() => {
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduced) {
+      done.current();
+      return;
+    }
+    const ms = phase === "logo" ? LOGO_MS : CAT_MS;
+    const timer = window.setTimeout(() => {
+      if (phase === "logo") setPhase("cat");
+      else done.current();
+    }, ms);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") done.current(); };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [phase, src]);
+  return (
+    <div className={`intro ${phase}`} onClick={() => done.current()} role="presentation">
+      <img key={phase} src={phase === "logo" ? "/logo.png" : src} alt={phase === "logo" ? "mrr" : ""} />
+      <div className="intro-rule" />
+    </div>
+  );
+}
+
+function gitlabOrigin(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try { return new URL(url).origin; } catch { return null; }
+}
+
+function gitlabReplaceMr(url: string, suffix: string): string {
+  return url.replace(/\/-\/merge_requests\/\d+.*$/, suffix);
+}
+
+function parsePeople(block: string | null | undefined): { label: string; username: string | null }[] {
+  if (!block) return [];
+  return block.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => {
+    const named = line.match(/^(.*?)\s*\(@([^)]+)\)$/);
+    if (named) return { label: line, username: named[2] };
+    if (line.startsWith("@")) return { label: line, username: line.slice(1) };
+    return { label: line, username: null };
+  });
+}
+
+function GitMeta({ mr, sha }: { mr?: MrSnapshot | null; sha?: string | null }) {
+  if (!mr) return null;
+  const origin = gitlabOrigin(mr.url);
+  const branchHref = mr.url && mr.sourceBranch
+    ? gitlabReplaceMr(mr.url, "/-/tree/" + encodeURIComponent(mr.sourceBranch))
+    : null;
+  const targetHref = mr.url && mr.targetBranch
+    ? gitlabReplaceMr(mr.url, "/-/tree/" + encodeURIComponent(mr.targetBranch))
+    : null;
+  const commitsHref = mr.url ? mr.url.replace(/\/?$/, "") + "/commits" : null;
+  const commitHref = mr.url && sha ? gitlabReplaceMr(mr.url, "/-/commit/" + sha) : null;
+
+  type Chip = { role: string; label: string; href?: string; key: string };
+  const chips: Chip[] = [];
+  const seen = new Set<string>();
+  function add(role: string, name: string | null | undefined, username: string | null | undefined) {
+    if (username === "startup-scan") return;
+    if (!name && !username) return;
+    const key = (username || name || "").toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    const label = name && username && !name.includes("@" + username)
+      ? `${name} (@${username})`
+      : (name || "@" + username);
+    chips.push({
+      role,
+      label,
+      href: origin && username ? origin + "/" + encodeURIComponent(username) : undefined,
+      key: role + ":" + key,
+    });
+  }
+  add("author", mr.authorName, mr.authorUsername);
+  add("pushed", mr.actorName, mr.actorUsername);
+  add("commit", mr.commitAuthorName, null);
+  for (const p of parsePeople(mr.assignees)) add("assignee", p.label, p.username);
+  for (const p of parsePeople(mr.reviewers)) add("reviewer", p.label, p.username);
+
+  const hasGit = !!(mr.sourceBranch || mr.commitCount != null || mr.filesChanged != null || sha);
+  if (!hasGit && chips.length === 0) return null;
+
+  return (
+    <div className="git-meta">
+      {mr.sourceBranch && (
+        <span>
+          {branchHref
+            ? <a href={branchHref} target="_blank" rel="noreferrer">{mr.sourceBranch}</a>
+            : mr.sourceBranch}
+          {mr.targetBranch && (
+            <>
+              {" → "}
+              {targetHref
+                ? <a href={targetHref} target="_blank" rel="noreferrer">{mr.targetBranch}</a>
+                : mr.targetBranch}
+            </>
+          )}
+        </span>
+      )}
+      {mr.commitCount != null && (
+        commitsHref
+          ? <a href={commitsHref} target="_blank" rel="noreferrer">{mr.commitCount} {mr.commitCount === 1 ? "commit" : "commits"}</a>
+          : <span>{mr.commitCount} {mr.commitCount === 1 ? "commit" : "commits"}</span>
+      )}
+      {sha && (
+        commitHref
+          ? <a href={commitHref} target="_blank" rel="noreferrer">{sha.slice(0, 8)}</a>
+          : <span>{sha.slice(0, 8)}</span>
+      )}
+      {mr.filesChanged != null && (
+        <span>{mr.filesChanged} {mr.filesChanged === 1 ? "file" : "files"}</span>
+      )}
+      {chips.length > 0 && (
+        <span className="who">
+          {chips.map((c) => (
+            <span className="chip" key={c.key}>
+              <span className="role">{c.role}</span>
+              {c.href ? <a href={c.href} target="_blank" rel="noreferrer">{c.label}</a> : c.label}
+            </span>
+          ))}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
-  const [path, setPath] = useState("/login");
+  const [path, setPath] = useState("/");
   const [me, setMe] = useState<Me | null>(null);
   const [boot, setBoot] = useState(true);
+  const [intro, setIntro] = useState({ show: true, src: pickCat(), key: 0, boot: true });
 
   useEffect(() => {
-    const sync = () => setPath(window.location.pathname);
-    sync();
-    window.addEventListener("popstate", sync);
-    return () => window.removeEventListener("popstate", sync);
+    setPath(window.location.pathname);
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setIntro((s) => ({ ...s, show: false }));
+    }
+    const onPop = () => {
+      setPath(window.location.pathname);
+      if (rollIntro()) {
+        setIntro({ show: true, src: pickCat(), key: Date.now(), boot: false });
+      } else {
+        setIntro((s) => ({ ...s, show: false }));
+      }
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
   }, []);
 
   useEffect(() => {
@@ -203,12 +445,7 @@ export default function App() {
       return;
     }
     api<Me>("/api/me")
-      .then((user) => {
-        setMe(user);
-        if (window.location.pathname === "/" || window.location.pathname === "/login") {
-          go("/projects");
-        }
-      })
+      .then(setMe)
       .catch(() => {
         localStorage.removeItem(TOKEN_KEY);
         setMe(null);
@@ -218,43 +455,62 @@ export default function App() {
 
   const route = useMemo(() => parseRoute(path), [path]);
 
-  if (boot) return <div className="wrap muted">Loading…</div>;
-
-  if (!me || route.name === "login") {
-    return <Login onLogin={(user) => { setMe(user); go("/projects"); }} />;
+  let body: ReactNode = null;
+  if (boot) {
+    body = <div className="wrap muted">Loading…</div>;
+  } else if (!me) {
+    body = (
+      <div className="wrap">
+        <HowTo onLogin={setMe} />
+      </div>
+    );
+  } else {
+    body = (
+      <div className={route.name === "logs" ? "wrap wide" : "wrap"}>
+        <div className="top">
+          <a href="/projects" className="brand" onClick={(e) => { e.preventDefault(); go("/projects"); }}>
+            <img src="/logo.png" alt="mrr" />
+          </a>
+          <nav>
+            <a href="/" onClick={(e) => { e.preventDefault(); go("/"); }}>How to</a>
+            <a href="/projects" onClick={(e) => { e.preventDefault(); go("/projects"); }}>Projects</a>
+            {me.role === "ADMIN" && (
+              <>
+                <a href="/logs" onClick={(e) => { e.preventDefault(); go("/logs"); }}>Logs</a>
+                <a href="/admin" onClick={(e) => { e.preventDefault(); go("/admin"); }}>Admin</a>
+              </>
+            )}
+          </nav>
+          <span className="muted" style={{ marginLeft: "auto" }}>{me.name} · {me.role}</span>
+          <button onClick={() => { localStorage.removeItem(TOKEN_KEY); setMe(null); go("/"); }}>
+            Sign out
+          </button>
+        </div>
+        {(route.name === "howto") && <HowTo />}
+        {route.name === "projects" && <Projects />}
+        {route.name === "new" && <ProjectForm />}
+        {route.name === "edit" && <ProjectForm id={route.id} />}
+        {route.name === "project" && <ProjectHome id={route.id} />}
+        {route.name === "mr" && <MrCycle projectId={route.id} iid={route.iid} />}
+        {route.name === "review" && <ReviewDetail id={route.id} />}
+        {route.name === "admin" && me.role === "ADMIN" && <Admin />}
+        {route.name === "logs" && me.role === "ADMIN" && <Logs />}
+      </div>
+    );
   }
 
   return (
-    <div className={route.name === "logs" ? "wrap wide" : "wrap"}>
-      <div className="top">
-        <h1>mrr</h1>
-        <nav>
-          <a href="/projects" onClick={(e) => { e.preventDefault(); go("/projects"); }}>Projects</a>
-          {me.role === "ADMIN" && (
-            <>
-              <a href="/logs" onClick={(e) => { e.preventDefault(); go("/logs"); }}>Logs</a>
-              <a href="/admin" onClick={(e) => { e.preventDefault(); go("/admin"); }}>Admin</a>
-            </>
-          )}
-        </nav>
-        <span className="muted" style={{ marginLeft: "auto" }}>{me.name} · {me.role}</span>
-        <button onClick={() => { localStorage.removeItem(TOKEN_KEY); setMe(null); go("/login"); }}>
-          Sign out
-        </button>
-      </div>
-      {route.name === "projects" && <Projects />}
-      {route.name === "new" && <ProjectForm />}
-      {route.name === "edit" && <ProjectForm id={route.id} />}
-      {route.name === "project" && <ProjectHome id={route.id} />}
-      {route.name === "mr" && <MrCycle projectId={route.id} iid={route.iid} />}
-      {route.name === "review" && <ReviewDetail id={route.id} />}
-      {route.name === "admin" && me.role === "ADMIN" && <Admin />}
-      {route.name === "logs" && me.role === "ADMIN" && <Logs />}
-    </div>
+    <>
+      {body}
+      {intro.show && (
+        <Intro key={intro.key} src={intro.src} boot={intro.boot}
+          onDone={() => setIntro((s) => ({ ...s, show: false }))} />
+      )}
+    </>
   );
 }
 
-function Login({ onLogin }: { onLogin: (me: Me) => void }) {
+function TokenForm({ onLogin }: { onLogin: (me: Me) => void }) {
   const [token, setToken] = useState("");
   const [err, setErr] = useState<string | null>(null);
 
@@ -271,15 +527,126 @@ function Login({ onLogin }: { onLogin: (me: Me) => void }) {
   }
 
   return (
-    <div className="wrap" style={{ maxWidth: 420 }}>
-      <h1>mrr</h1>
+    <form className="token-form" onSubmit={submit}>
       <p className="muted">Paste an API token. There is no password login.</p>
-      <form onSubmit={submit}>
-        <label>Token</label>
-        <input value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" />
-        {err && <p className="err">{err}</p>}
-        <p><button className="primary" type="submit">Continue</button></p>
-      </form>
+      <label>Token</label>
+      <input value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" />
+      {err && <p className="err">{err}</p>}
+      <p><button className="primary" type="submit">Continue</button></p>
+    </form>
+  );
+}
+
+function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
+  return (
+    <div className="howto">
+      {onLogin && <img src="/logo.png" alt="mrr" className="login-mark" />}
+      <p className="tag">Is it mr. reviewer? Or merge request reviewer? Nobody knows for sure.</p>
+      <h1>How to set up mrr</h1>
+      <p className="lead">
+        The service is running. This is everything after that: a token, a GitLab project, a webhook,
+        then what a review looks like.
+      </p>
+      {onLogin && <TokenForm onLogin={onLogin} />}
+
+      <h2>1. Root token</h2>
+      <pre className="token-box">{`┌─ mrr  root admin token ────────────────────────────────────┐
+│  mrr_…                                                     │
+└────────────────────────────────────────────────────────────┘`}</pre>
+      <p>
+        Printed <strong>once</strong> on first boot. Also <code>/data/root-token.txt</code>.
+        DB stores a hash.{onLogin ? " Paste it above." : ""}
+      </p>
+
+      <h2>2. Users</h2>
+      <p>Optional. Admin → one USER token per person. Don’t share root.</p>
+
+      <h2>3. New project</h2>
+      <p>
+        <strong>Projects → New Project.</strong> GitLab URL, project id or{" "}
+        <code>group/project</code>, token.
+      </p>
+      <table>
+        <thead><tr><th>Token</th><th></th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Project access token</td>
+            <td>Preferred — bot user. Developer + <code>api</code>. gitlab.com: Premium/Ultimate. Self-hosted Free: yes.</td>
+          </tr>
+          <tr><td>Group access token</td><td>Same as project.</td></tr>
+          <tr><td>Fine-grained PAT</td><td>One project. Permissions below.</td></tr>
+          <tr><td>Classic PAT</td><td><code>api</code>. User must be Developer on the project.</td></tr>
+        </tbody>
+      </table>
+      <p className="muted">Not deploy tokens or CI job tokens. mrr sends <code>PRIVATE-TOKEN</code>.</p>
+
+      <h3>Fine-grained PAT — always</h3>
+      <table>
+        <thead><tr><th>Permission</th><th></th></tr></thead>
+        <tbody>
+          <tr><td>Merge Request: Read</td><td>List, metadata, diff</td></tr>
+          <tr><td>Merge Request: Create</td><td>Post overview and finding threads, reply</td></tr>
+          <tr><td>Merge Request: Update</td><td>Edit overview, resolve / reopen</td></tr>
+        </tbody>
+      </table>
+      <h3>If the feature is on</h3>
+      <table>
+        <thead><tr><th>Permission</th><th></th></tr></thead>
+        <tbody>
+          <tr><td>Merge Request: Approve</td><td>Auto-approve. Token identity must also be allowed to approve (rules, CODEOWNERS).</td></tr>
+          <tr><td>Repository: Read</td><td><code>read_file</code>, librarian</td></tr>
+          <tr><td>Commit: Read</td><td>Librarian tip SHA</td></tr>
+          <tr><td>Project: Read</td><td>Librarian metadata</td></tr>
+        </tbody>
+      </table>
+      <p>
+        Do not grant Merge, repo write, Code: Push, Code: Read, or webhook scopes.
+        mrr never pushes, merges, or creates the hook.
+      </p>
+      <p className="muted">
+        Provider: <code>ANTHROPIC</code> or <code>OPENAI_COMPAT</code> (set base URL for Ollama / vLLM).
+        First review: max turns 1, tools off.
+      </p>
+
+      <h2>4. Webhook</h2>
+      <p>
+        After Create, copy URL + secret <strong>once</strong> → GitLab <em>Settings → Webhooks</em>.
+      </p>
+      <ul>
+        <li>Merge request events</li>
+        <li>Comments — if mrr should answer replies on its threads</li>
+      </ul>
+      <p>
+        <code>MRR_BASE_URL</code> must be reachable from GitLab. If it changes, edit the existing
+        hook — two hooks double-fire.
+      </p>
+
+      <h2>5. Review</h2>
+      <p>Open an MR, or wait — boot scans open MRs. UI polls.</p>
+      <ul>
+        <li>One <code>### mrr review</code> overview, edited in place</li>
+        <li>One thread per finding</li>
+        <li>Later commits: addressed resolve; still-open stay (reopened if resolved by hand); new problems get new threads</li>
+      </ul>
+      <p className="muted">
+        Resolving in GitLab does not mark addressed in mrr. Title/label edits without a new SHA
+        don’t spend tokens. Drafts are reviewed unless Skip drafts is on.
+      </p>
+
+      <h2>6. Optional</h2>
+      <ul>
+        <li>Skills / documents — Reviewer tab, next review</li>
+        <li>Memory card written on READY. Reviewer reads it only with <code>search_memory</code> / <code>read_memory</code></li>
+        <li>Librarian (off) — Initialize / Refresh of <code>project/</code> only; disable never deletes files</li>
+        <li>Auto-approve — needs Merge Request: Approve</li>
+      </ul>
+
+      <h2>7. Nothing on GitLab</h2>
+      <p>
+        FAILED (quota, rate limit, unreachable, refusal) → mrr does <strong>not</strong> post. Re-run.
+        Restart leaves in-flight rows PROCESSING — re-run those too.
+        Secrets are plaintext in SQLite under <code>/data</code>.
+      </p>
     </div>
   );
 }
@@ -297,9 +664,9 @@ function Projects() {
 
   return (
     <div>
-      <div className="row">
-        <h2 style={{ margin: 0 }}>Projects</h2>
-        <button className="primary" onClick={() => go("/projects/new")}>Register</button>
+      <div className="page-head">
+        <h2>Projects</h2>
+        <button className="primary" onClick={() => go("/projects/new")}>New Project</button>
       </div>
       {rows.length === 0 && <p className="muted">None yet.</p>}
       {rows.map((p) => (
@@ -310,6 +677,7 @@ function Projects() {
             </a>
             {pill(p.enabled ? "enabled" : "disabled")}
             {p.autoApprove && <span className="pill ok">auto-approve</span>}
+            {p.librarianEnabled && <span className="pill">librarian</span>}
             {p.lastErrorKind && pill(p.lastErrorKind)}
             <span className="muted">{p.gitlabProjectId}</span>
             <span className="muted" style={{ marginLeft: "auto" }}>{p.model}</span>
@@ -322,56 +690,147 @@ function Projects() {
 
 function ProjectHome({ id }: { id: string }) {
   const [project, setProject] = useState<Project | null>(null);
-  const [mrs, setMrs] = useState<MrStatus[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [tab, setTab] = useState<"mrs" | "memory" | "reviewer">("mrs");
 
-  useEffect(() => {
-    Promise.all([
-      api<Project>(`/api/projects/${id}`),
-      api<MrStatus[]>(`/api/projects/${id}/merge-requests`),
-    ]).then(([p, list]) => { setProject(p); setMrs(list); })
-      .catch((e) => setErr(String(e.message)));
-  }, [id]);
+  function load() {
+    api<Project>(`/api/projects/${id}`).then(setProject).catch((e) => setErr(String(e.message)));
+  }
+  useEffect(load, [id]);
+  usePoll(load, true);
 
   if (err) return <p className="err">{err}</p>;
-  if (!project || !mrs) return <p className="muted">Loading…</p>;
+  if (!project) return <p className="muted">Loading…</p>;
 
   return (
     <div>
-      <div className="row">
-        <h2 style={{ margin: 0 }}>{project.name}</h2>
+      <div className="page-head">
+        <h2>{project.name}</h2>
         <button onClick={() => go(`/projects/${id}/edit`)}>Edit</button>
       </div>
       <p className="muted">
         {project.gitlabUrl}/{project.gitlabProjectId} · {project.model}
-        {project.autoApprove ? " · auto-approve on" : ""} · turns {project.agentMaxTurns}
+        {project.autoApprove ? " · auto-approve on" : ""}
+        {project.librarianEnabled ? " · librarian on" : ""}
+        {project.memoryStatus && project.memoryStatus !== "NONE" ? ` · memory ${project.memoryStatus}` : ""}
+        {project.memoryHeadSha ? ` · ${project.memoryHeadSha.slice(0, 8)}` : ""}
+        {" · "}turns {project.agentMaxTurns}
         {project.agentTools.length ? ` · tools ${project.agentTools.join(",")}` : ""}
       </p>
       <FailureBanner kind={project.lastErrorKind} message={project.lastError} />
-      <AgentContext projectId={id} tools={project.agentTools} />
-      <h2>Merge requests</h2>
-      {mrs.length === 0 && <p className="muted">No reviews yet.</p>}
-      <table>
-        <thead>
-          <tr><th>!iid</th><th>Status</th><th>Open</th><th>Approved</th><th>SHA</th></tr>
-        </thead>
-        <tbody>
-          {mrs.map((mr) => (
-            <tr key={mr.mrIid}>
-              <td>
-                <a href={`/projects/${id}/mrs/${mr.mrIid}`}
-                  onClick={(e) => { e.preventDefault(); go(`/projects/${id}/mrs/${mr.mrIid}`); }}>
-                  !{mr.mrIid}
-                </a>
-              </td>
-              <td>{pill(mr.currentStatus)}</td>
-              <td>{mr.openFindings}</td>
-              <td>{mr.mrrApproved ? "mrr" : "—"}</td>
-              <td className="muted">{mr.latestHeadSha?.slice(0, 8)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="tabs">
+        <button className={tab === "mrs" ? "on" : ""} onClick={() => setTab("mrs")}>Merge requests</button>
+        <button className={tab === "memory" ? "on" : ""} onClick={() => setTab("memory")}>Memory</button>
+        <button className={tab === "reviewer" ? "on" : ""} onClick={() => setTab("reviewer")}>Reviewer</button>
+      </div>
+      {tab === "mrs" && <MrList projectId={id} />}
+      {tab === "memory" && <MemoryPanel project={project} onRefresh={load} />}
+      {tab === "reviewer" && <AgentContext projectId={id} tools={project.agentTools} />}
+    </div>
+  );
+}
+
+const MR_STATUSES = ["REVIEWING", "NEEDS_WORK", "CLEAN", "FAILED", "CANCELLED", "MERGED", "CLOSED"];
+const MR_PAGE = 40;
+
+function MrList({ projectId }: { projectId: string }) {
+  const [status, setStatus] = useState("");
+  const [qLive, setQLive] = useState("");
+  const [q, setQ] = useState("");
+  const [items, setItems] = useState<MrStatus[]>([]);
+  const [total, setTotal] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const sentinel = useRef<HTMLDivElement>(null);
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setQ(qLive), 200);
+    return () => window.clearTimeout(timer);
+  }, [qLive]);
+
+  function query(offset: number, limit: number) {
+    const p = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+    if (status) p.set("status", status);
+    if (q.trim()) p.set("q", q.trim());
+    return `/api/projects/${projectId}/merge-requests?${p}`;
+  }
+
+  async function refresh() {
+    const n = Math.max(itemsRef.current.length, MR_PAGE);
+    const page = await api<MrPage>(query(0, n));
+    setItems(page.items);
+    setTotal(page.total);
+  }
+
+  async function loadMore() {
+    if (busy || itemsRef.current.length >= total) return;
+    setBusy(true);
+    try {
+      const page = await api<MrPage>(query(itemsRef.current.length, MR_PAGE));
+      setItems((prev) => {
+        const seen = new Set(prev.map((m) => m.mrIid));
+        return [...prev, ...page.items.filter((m) => !seen.has(m.mrIid))];
+      });
+      setTotal(page.total);
+    } finally {
+      setBusy(false);
+    }
+  }
+  const loadMoreRef = useRef(loadMore);
+  loadMoreRef.current = loadMore;
+
+  useEffect(() => {
+    setItems([]);
+    setTotal(0);
+    api<MrPage>(query(0, MR_PAGE)).then((page) => {
+      setItems(page.items);
+      setTotal(page.total);
+    });
+  }, [projectId, status, q]);
+
+  usePoll(() => { refresh().catch(() => {}); }, true);
+
+  useEffect(() => {
+    const el = sentinel.current;
+    if (!el) return;
+    const obs = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) loadMoreRef.current();
+    }, { rootMargin: "200px" });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
+  return (
+    <div>
+      <div className="mr-filters">
+        <input
+          value={qLive}
+          onChange={(e) => setQLive(e.target.value)}
+          placeholder="Filter by title or !iid"
+        />
+        <select value={status} onChange={(e) => setStatus(e.target.value)}>
+          <option value="">All statuses</option>
+          {MR_STATUSES.map((s) => <option key={s} value={s}>{s.replaceAll("_", " ")}</option>)}
+        </select>
+        <span className="muted">{total} merge request{total === 1 ? "" : "s"}</span>
+      </div>
+      {items.length === 0 && <p className="muted">{busy ? "Loading…" : "No merge requests match."}</p>}
+      {items.map((mr) => (
+        <a
+          key={mr.mrIid}
+          className={`mr-row st-${mr.currentStatus.toLowerCase()}`}
+          href={`/projects/${projectId}/mrs/${mr.mrIid}`}
+          onClick={(e) => { e.preventDefault(); go(`/projects/${projectId}/mrs/${mr.mrIid}`); }}
+        >
+          <span className="iid">!{mr.mrIid}</span>
+          <span className="title">{mr.title || "Untitled"}</span>
+          <span>{pill(mr.currentStatus)}</span>
+          <span className={mr.openFindings > 0 ? "count-open" : "muted"}>{mr.openFindings} open</span>
+        </a>
+      ))}
+      <div ref={sentinel} className="mr-sentinel" />
+      {busy && items.length > 0 && <p className="muted">Loading…</p>}
     </div>
   );
 }
@@ -380,9 +839,9 @@ function AgentContext({ projectId, tools }: { projectId: string; tools: string[]
   const [skills, setSkills] = useState<AgentSkill[] | null>(null);
   const [docs, setDocs] = useState<AgentDocument[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [draftSkill, setDraftSkill] = useState({ name: "", body: "" });
+  const [draftSkill, setDraftSkill] = useState({ name: "", body: "", branchPattern: "" });
   const [draftDoc, setDraftDoc] = useState({ name: "", body: "" });
-  const [editing, setEditing] = useState<{ type: "skill" | "doc"; id: string; body: string } | null>(null);
+  const [editing, setEditing] = useState<{ type: "skill" | "doc"; id: string; body: string; branchPattern?: string } | null>(null);
 
   function load() {
     Promise.all([
@@ -394,23 +853,33 @@ function AgentContext({ projectId, tools }: { projectId: string; tools: string[]
   useEffect(load, [projectId]);
 
   async function toggleSkill(s: AgentSkill) {
-    await api(`/api/projects/${projectId}/skills/${s.id}`, {
-      method: "PUT", body: JSON.stringify({ enabled: !s.enabled }),
-    });
-    load();
+    setSkills((list) => list?.map((x) => x.id === s.id ? { ...x, enabled: !x.enabled } : x) ?? null);
+    try {
+      await api(`/api/projects/${projectId}/skills/${s.id}`, {
+        method: "PUT", body: JSON.stringify({ enabled: !s.enabled }),
+      });
+    } catch (e) {
+      setErr(String((e as Error).message));
+      load();
+    }
   }
   async function toggleDoc(d: AgentDocument) {
-    await api(`/api/projects/${projectId}/documents/${d.id}`, {
-      method: "PUT", body: JSON.stringify({ enabled: !d.enabled }),
-    });
-    load();
+    setDocs((list) => list?.map((x) => x.id === d.id ? { ...x, enabled: !x.enabled } : x) ?? null);
+    try {
+      await api(`/api/projects/${projectId}/documents/${d.id}`, {
+        method: "PUT", body: JSON.stringify({ enabled: !d.enabled }),
+      });
+    } catch (e) {
+      setErr(String((e as Error).message));
+      load();
+    }
   }
   async function addSkill(e: FormEvent) {
     e.preventDefault();
     await api(`/api/projects/${projectId}/skills`, {
       method: "POST", body: JSON.stringify({ ...draftSkill, enabled: true }),
     });
-    setDraftSkill({ name: "", body: "" });
+    setDraftSkill({ name: "", body: "", branchPattern: "" });
     load();
   }
   async function addDoc(e: FormEvent) {
@@ -426,7 +895,10 @@ function AgentContext({ projectId, tools }: { projectId: string; tools: string[]
     const path = editing.type === "skill"
       ? `/api/projects/${projectId}/skills/${editing.id}`
       : `/api/projects/${projectId}/documents/${editing.id}`;
-    await api(path, { method: "PUT", body: JSON.stringify({ body: editing.body }) });
+    const body = editing.type === "skill"
+      ? { body: editing.body, branchPattern: editing.branchPattern ?? "" }
+      : { body: editing.body };
+    await api(path, { method: "PUT", body: JSON.stringify(body) });
     setEditing(null);
     load();
   }
@@ -439,27 +911,68 @@ function AgentContext({ projectId, tools }: { projectId: string; tools: string[]
   }
 
   if (err) return <p className="err">{err}</p>;
-  if (!skills || !docs) return <p className="muted">Loading agent context…</p>;
+  if (!skills || !docs) return <p className="muted">Loading reviewer config…</p>;
+
+  const pickedSkill = editing?.type === "skill" ? skills.find((s) => s.id === editing.id) : null;
+  const pickedDoc = editing?.type === "doc" ? docs.find((d) => d.id === editing.id) : null;
 
   return (
     <div>
-      <h2>Agent skills</h2>
       <p className="muted">
-        Enabled skills are concatenated into the system prompt, the same way tools are a set you turn on.
-        {tools.length ? ` Tools on: ${tools.join(", ")}.` : " No tools enabled — set them under Edit."}
+        For the merge-request reviewer, not the librarian. Enabled skills go into the system
+        prompt; enabled documents into the user prompt. A skill with a branch pattern only
+        fires when the MR source branch matches — blank means every branch.
+        {tools.length ? ` Tools on: ${tools.join(", ")}.` : " No tools — set them under Edit."}
       </p>
-      {skills.length === 0 && <p className="muted">None yet — the built-in reviewer prompt is used.</p>}
-      {skills.map((s) => (
-        <div className="item" key={s.id}>
-          <div className="row">
-            <label style={{ margin: 0 }}>
-              <input type="checkbox" checked={s.enabled} onChange={() => toggleSkill(s)} /> {s.name}
-            </label>
-            <button onClick={() => setEditing({ type: "skill", id: s.id, body: s.body })}>Edit</button>
-            <button className="danger" onClick={() => remove("skill", s.id)}>Delete</button>
-          </div>
-          {editing?.type === "skill" && editing.id === s.id && (
+      <div className="skill-split">
+        <div className="skill-list">
+          <h2>Skills</h2>
+          {skills.length === 0 && <p className="muted">None yet — the built-in reviewer prompt is used.</p>}
+          {skills.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              className={`pick${editing?.type === "skill" && editing.id === s.id ? " on" : ""}`}
+              onClick={() => setEditing({ type: "skill", id: s.id, body: s.body, branchPattern: s.branchPattern ?? "" })}
+            >
+              <span className="row">
+                <strong>{s.name}</strong>
+                {pill(s.enabled ? "on" : "off")}
+              </span>
+              <span className="muted">{s.branchPattern || "every branch"}</span>
+            </button>
+          ))}
+          <h2>Documents</h2>
+          {docs.length === 0 && <p className="muted">Folder is empty.</p>}
+          {docs.map((d) => (
+            <button
+              key={d.id}
+              type="button"
+              className={`pick${editing?.type === "doc" && editing.id === d.id ? " on" : ""}`}
+              onClick={() => setEditing({ type: "doc", id: d.id, body: d.body })}
+            >
+              <span className="row">
+                <strong>{d.name}</strong>
+                {pill(d.enabled ? "on" : "off")}
+              </span>
+            </button>
+          ))}
+        </div>
+        <div>
+          {pickedSkill && editing?.type === "skill" && (
             <div>
+              <div className="editor-head">
+                <h2>{pickedSkill.name}</h2>
+                <div className="editor-actions">
+                  <Check on={pickedSkill.enabled} onChange={() => toggleSkill(pickedSkill)}>Enabled</Check>
+                  <button className="danger" onClick={() => { remove("skill", pickedSkill.id); setEditing(null); }}>Delete</button>
+                </div>
+              </div>
+              <label>Branch pattern</label>
+              <input placeholder="blank = every branch; hotfix/* or release-\d+"
+                value={editing.branchPattern ?? ""}
+                onChange={(e) => setEditing({ ...editing, branchPattern: e.target.value })} />
+              <label>Instructions</label>
               <textarea value={editing.body} onChange={(e) => setEditing({ ...editing, body: e.target.value })} />
               <p className="row">
                 <button className="primary" onClick={saveEdit}>Save</button>
@@ -467,52 +980,224 @@ function AgentContext({ projectId, tools }: { projectId: string; tools: string[]
               </p>
             </div>
           )}
+          {pickedDoc && editing?.type === "doc" && (
+            <div>
+              <div className="editor-head">
+                <h2>{pickedDoc.name}</h2>
+                <div className="editor-actions">
+                  <Check on={pickedDoc.enabled} onChange={() => toggleDoc(pickedDoc)}>Enabled</Check>
+                  <button className="danger" onClick={() => { remove("doc", pickedDoc.id); setEditing(null); }}>Delete</button>
+                </div>
+              </div>
+              <label>Contents</label>
+              <textarea value={editing.body} onChange={(e) => setEditing({ ...editing, body: e.target.value })} />
+              <p className="row">
+                <button className="primary" onClick={saveEdit}>Save</button>
+                <button onClick={() => setEditing(null)}>Cancel</button>
+              </p>
+            </div>
+          )}
+          {!editing && (
+            <p className="muted">Select a skill or document, or add one below.</p>
+          )}
+          <form onSubmit={addSkill}>
+            <label>Add skill</label>
+            <div className="grid">
+              <input placeholder="name (e.g. security)" value={draftSkill.name}
+                onChange={(e) => setDraftSkill({ ...draftSkill, name: e.target.value })} required />
+              <input placeholder="branch (optional): hotfix/*"
+                value={draftSkill.branchPattern}
+                onChange={(e) => setDraftSkill({ ...draftSkill, branchPattern: e.target.value })} />
+            </div>
+            <textarea placeholder="instructions" value={draftSkill.body}
+              onChange={(e) => setDraftSkill({ ...draftSkill, body: e.target.value })} />
+            <p className="row"><button className="primary" type="submit">Add</button></p>
+          </form>
+          <form onSubmit={addDoc}>
+            <label>Add document</label>
+            <div className="grid">
+              <input placeholder="name (e.g. architecture.md)" value={draftDoc.name}
+                onChange={(e) => setDraftDoc({ ...draftDoc, name: e.target.value })} required />
+              <button className="primary" type="submit">Add</button>
+            </div>
+            <textarea placeholder="contents" value={draftDoc.body}
+              onChange={(e) => setDraftDoc({ ...draftDoc, body: e.target.value })} />
+          </form>
         </div>
-      ))}
-      <form onSubmit={addSkill}>
-        <label>Add skill</label>
-        <div className="grid">
-          <input placeholder="name (e.g. security)" value={draftSkill.name}
-            onChange={(e) => setDraftSkill({ ...draftSkill, name: e.target.value })} required />
-          <button className="primary" type="submit">Add</button>
-        </div>
-        <textarea placeholder="instructions" value={draftSkill.body}
-          onChange={(e) => setDraftSkill({ ...draftSkill, body: e.target.value })} />
-      </form>
+      </div>
+    </div>
+  );
+}
 
-      <h2>Documents</h2>
-      <p className="muted">Reference material (architecture notes, conventions). Enabled files are appended to the review prompt.</p>
-      {docs.length === 0 && <p className="muted">Folder is empty.</p>}
-      {docs.map((d) => (
-        <div className="item" key={d.id}>
-          <div className="row">
-            <label style={{ margin: 0 }}>
-              <input type="checkbox" checked={d.enabled} onChange={() => toggleDoc(d)} /> {d.name}
-            </label>
-            <button onClick={() => setEditing({ type: "doc", id: d.id, body: d.body })}>Edit</button>
-            <button className="danger" onClick={() => remove("doc", d.id)}>Delete</button>
+function MemoryPanel({ project, onRefresh }: { project: Project; onRefresh: () => void }) {
+  const [docs, setDocs] = useState<MemoryDocument[] | null>(null);
+  const [runs, setRuns] = useState<MemoryRun[] | null>(null);
+  const [current, setCurrent] = useState<MemoryRun | null>(null);
+  const [open, setOpen] = useState<MemoryDocument | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const watchId = useRef<string | null>(null);
+
+  async function loadTree() {
+    setDocs(await api<MemoryDocument[]>(`/api/projects/${project.id}/memory`));
+  }
+  async function loadRuns() {
+    const list = await api<MemoryRun[]>(`/api/projects/${project.id}/memory/runs`);
+    setRuns(list);
+    const live = list.find((r) => r.state === "RUNNING" || r.state === "PENDING");
+    const id = live?.id ?? watchId.current ?? list[0]?.id;
+    if (!id) {
+      setCurrent(null);
+      return;
+    }
+    const full = await api<MemoryRun>(`/api/projects/${project.id}/memory/runs/${id}`);
+    setCurrent(full);
+    if (full.state !== "RUNNING" && full.state !== "PENDING") {
+      watchId.current = null;
+    }
+  }
+
+  function loadAll() {
+    Promise.resolve()
+      .then(loadTree)
+      .then(loadRuns)
+      .then(loadTree)
+      .catch((e) => setErr(String(e.message)));
+  }
+  useEffect(loadAll, [project.id]);
+  usePoll(loadAll, true);
+
+  async function openDoc(doc: MemoryDocument) {
+    if (open?.id === doc.id) {
+      setOpen(null);
+      return;
+    }
+    const full = await api<MemoryDocument>(`/api/projects/${project.id}/memory/documents/${doc.id}`);
+    setOpen(full);
+  }
+
+  async function startLibrarian() {
+    setBusy(true);
+    setErr(null);
+    try {
+      const run = await api<MemoryRun>(`/api/projects/${project.id}/memory/refresh`, { method: "POST" });
+      watchId.current = run.id;
+      setCurrent(run);
+      onRefresh();
+      loadAll();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const spaces = ["project", "mrs", "notes"] as const;
+  const hasProject = (docs ?? []).some((d) => d.space === "project");
+  const since = current?.createdAt;
+  const running = project.memoryStatus === "RUNNING"
+    || current?.state === "RUNNING" || current?.state === "PENDING";
+
+  return (
+    <div>
+      <div className="page-head">
+        <h2>Memory</h2>
+        {project.memoryStatus && project.memoryStatus !== "NONE" && pill(project.memoryStatus)}
+        {project.librarianEnabled && (
+          <button className="primary" disabled={busy || running} onClick={startLibrarian}>
+            {hasProject ? "Refresh" : "Initialize"}
+          </button>
+        )}
+      </div>
+      <p className="muted">
+        Reviewer-written MR cards, plus project overview if the librarian is on.
+      </p>
+      {err && <p className="err">{err}</p>}
+      {!docs && <p className="muted">Loading memory…</p>}
+      {docs && docs.length === 0 && <p className="muted">No documents yet. A review will write the first MR card.</p>}
+      {spaces.map((space) => {
+        const rows = (docs ?? []).filter((d) => d.space === space);
+        if (rows.length === 0) return null;
+        return (
+          <div key={space}>
+            <p className="muted" style={{ marginBottom: 4 }}>{space}/</p>
+            {rows.map((d) => {
+              const fresh = since && d.updatedAt >= since;
+              return (
+                <div className={`item${fresh ? " fresh" : ""}`} key={d.id}>
+                  <div className="row">
+                    <button aria-expanded={open?.id === d.id} onClick={() => openDoc(d)}>{d.path}</button>
+                    {d.status && pill(d.status)}
+                    {fresh && <span className="pill ok">new</span>}
+                    <span className="muted">{d.title}</span>
+                    {d.tags?.length ? <span className="muted">{d.tags.join(", ")}</span> : null}
+                    {d.mrIid != null && (
+                      <a href={`/projects/${project.id}/mrs/${d.mrIid}`}
+                        onClick={(e) => { e.preventDefault(); go(`/projects/${project.id}/mrs/${d.mrIid}`); }}>
+                        !{d.mrIid}
+                      </a>
+                    )}
+                  </div>
+                  {open?.id === d.id && (
+                    <pre>{open.body || "(empty)"}</pre>
+                  )}
+                </div>
+              );
+            })}
           </div>
-          {editing?.type === "doc" && editing.id === d.id && (
-            <div>
-              <textarea value={editing.body} onChange={(e) => setEditing({ ...editing, body: e.target.value })} />
-              <p className="row">
-                <button className="primary" onClick={saveEdit}>Save</button>
-                <button onClick={() => setEditing(null)}>Cancel</button>
-              </p>
-            </div>
-          )}
+        );
+      })}
+      {current && (
+        <div className="card">
+          <div className="row">
+            {pill(current.kind)}
+            {pill(current.state)}
+            {running && <span className="log-live" title="running" />}
+            <span className="muted">{current.agentTurns} turn(s)</span>
+            {current.finishedAt && <span className="muted">{current.finishedAt}</span>}
+          </div>
+          {current.error && <FailureBanner message={current.error} />}
+          <details className="fold">
+            <summary>Run log</summary>
+            {current.prompt && (
+              <details className="fold">
+                <summary>Prompt</summary>
+                <pre>{current.prompt}</pre>
+              </details>
+            )}
+            <Trail trace={current.trace} />
+            {current.response && (
+              <details className="fold">
+                <summary>Response</summary>
+                <pre>{current.response}</pre>
+              </details>
+            )}
+          </details>
         </div>
-      ))}
-      <form onSubmit={addDoc}>
-        <label>Add document</label>
-        <div className="grid">
-          <input placeholder="name (e.g. architecture.md)" value={draftDoc.name}
-            onChange={(e) => setDraftDoc({ ...draftDoc, name: e.target.value })} required />
-          <button className="primary" type="submit">Add</button>
-        </div>
-        <textarea placeholder="contents" value={draftDoc.body}
-          onChange={(e) => setDraftDoc({ ...draftDoc, body: e.target.value })} />
-      </form>
+      )}
+      {runs && runs.length > 1 && (
+        <>
+          <h2>Librarian history</h2>
+          <table>
+            <thead><tr><th>When</th><th>Kind</th><th>Turns</th><th>State</th></tr></thead>
+            <tbody>
+              {runs.map((r) => (
+                <tr key={r.id}>
+                  <td>
+                    <button onClick={() => {
+                      watchId.current = r.id;
+                      api<MemoryRun>(`/api/projects/${project.id}/memory/runs/${r.id}`).then(setCurrent);
+                    }}>{r.createdAt}</button>
+                  </td>
+                  <td>{pill(r.kind)}</td>
+                  <td className="muted">{r.agentTurns}</td>
+                  <td>{pill(r.state)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
     </div>
   );
 }
@@ -521,7 +1206,8 @@ function ProjectForm({ id }: { id?: string }) {
   const [form, setForm] = useState({
     name: "", gitlabUrl: "https://gitlab.com", gitlabProjectId: "", gitlabToken: "",
     provider: "ANTHROPIC", modelBaseUrl: "", model: "", modelKey: "", skill: "",
-    skipDrafts: false, agentMaxTurns: 1, agentTools: "", autoApprove: false, enabled: true,
+    skipDrafts: false, agentMaxTurns: 1, agentTools: "", autoApprove: false,
+    librarianEnabled: false, enabled: true,
   });
   const [secret, setSecret] = useState<{ webhookUrl: string; webhookSecret: string } | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -541,6 +1227,7 @@ function ProjectForm({ id }: { id?: string }) {
       agentMaxTurns: p.agentMaxTurns,
       agentTools: p.agentTools.join(","),
       autoApprove: p.autoApprove,
+      librarianEnabled: p.librarianEnabled,
       enabled: p.enabled,
     }))).catch((e) => setErr(String(e.message)));
   }, [id]);
@@ -564,6 +1251,7 @@ function ProjectForm({ id }: { id?: string }) {
       agentMaxTurns: Number(form.agentMaxTurns) || 1,
       agentTools: tools,
       autoApprove: form.autoApprove,
+      librarianEnabled: form.librarianEnabled,
       enabled: form.enabled,
     };
     if (form.gitlabToken) body.gitlabToken = form.gitlabToken;
@@ -603,7 +1291,7 @@ function ProjectForm({ id }: { id?: string }) {
 
   return (
     <form onSubmit={submit}>
-      <h2>{id ? "Edit project" : "Register project"}</h2>
+      <h2>{id ? "Edit project" : "New project"}</h2>
       <div className="grid">
         <div>
           <label>Name</label>
@@ -645,40 +1333,72 @@ function ProjectForm({ id }: { id?: string }) {
       {!id && <textarea value={form.skill} onChange={(e) => set("skill", e.target.value)}
         placeholder="Optional. Becomes the first enabled skill, named reviewer." />}
       {id && <p className="muted">Add, enable, and edit the skill set on the project page — same idea as MCP tools.</p>}
-      <div className="grid">
-        <div>
-          <label>Agent max turns</label>
-          <input type="number" min={1} value={form.agentMaxTurns}
-            onChange={(e) => set("agentMaxTurns", Number(e.target.value))} />
-        </div>
-        <div>
-          <label>Agent tools</label>
-          <label style={{ marginTop: 8 }}>
-            <input type="checkbox" checked={form.agentTools.split(",").map((s) => s.trim()).includes("read_file")}
-              onChange={(e) => set("agentTools", e.target.checked ? "read_file" : "")} /> read_file
-          </label>
+      <div className="opt-block">
+        <label>Review</label>
+        <div className="toggles">
+          <Toggle on={form.skipDrafts} onChange={(v) => set("skipDrafts", v)}>Skip drafts</Toggle>
+          <Toggle on={form.autoApprove} onChange={(v) => set("autoApprove", v)}>Auto-approve when clean</Toggle>
+          {id && <Toggle on={form.enabled} onChange={(v) => set("enabled", v)}>Enabled</Toggle>}
         </div>
       </div>
-      <p className="row">
-        <label><input type="checkbox" checked={form.skipDrafts} onChange={(e) => set("skipDrafts", e.target.checked)} /> Skip drafts</label>
-        <label><input type="checkbox" checked={form.autoApprove} onChange={(e) => set("autoApprove", e.target.checked)} /> Auto-approve when clean</label>
-        {id && <label><input type="checkbox" checked={form.enabled} onChange={(e) => set("enabled", e.target.checked)} /> Enabled</label>}
-      </p>
+      <div className="opt-block">
+        <label>Agent</label>
+        <p className="muted">Needs max turns &gt; 1 for tools. The MR card is always written from the verdict.</p>
+        <label>Max turns</label>
+        <input type="number" min={1} value={form.agentMaxTurns}
+          onChange={(e) => set("agentMaxTurns", Number(e.target.value))}
+          style={{ maxWidth: 120 }} />
+        <div className="toggles">
+          {AGENT_TOOLS.map((name) => {
+            const on = form.agentTools.split(",").map((s) => s.trim()).includes(name);
+            return (
+              <Toggle key={name} on={on} onChange={(v) => {
+                const names = new Set(form.agentTools.split(",").map((s) => s.trim()).filter(Boolean));
+                if (v) names.add(name); else names.delete(name);
+                set("agentTools", [...names].join(","));
+              }}>{name}</Toggle>
+            );
+          })}
+        </div>
+      </div>
+      <div className="opt-block">
+        <label>Librarian</label>
+        <div className="toggles">
+          <Toggle on={form.librarianEnabled} onChange={(v) => set("librarianEnabled", v)}>Librarian</Toggle>
+        </div>
+        <p className="muted">Initialize / Refresh. Turning off never deletes files.</p>
+      </div>
       {err && <p className="err">{err}</p>}
-      <button className="primary" type="submit">{id ? "Save" : "Register"}</button>
+      <button className="primary" type="submit">{id ? "Save" : "Create"}</button>
     </form>
   );
 }
 
 function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
   const [cycle, setCycle] = useState<Cycle | null>(null);
+  const [card, setCard] = useState<MemoryDocument | null>(null);
+  const [latest, setLatest] = useState<Review | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   function load() {
     api<Cycle>(`/api/projects/${projectId}/merge-requests/${iid}`)
-      .then(setCycle).catch((e) => setErr(String(e.message)));
+      .then((c) => {
+        setCycle(c);
+        const id = c.status.latestReviewId;
+        if (id) {
+          api<Review>(`/api/reviews/${id}`).then(setLatest).catch(() => setLatest(null));
+        } else {
+          setLatest(null);
+        }
+      }).catch((e) => setErr(String(e.message)));
+    api<MemoryDocument>(`/api/projects/${projectId}/memory/mrs/${iid}`)
+      .then(setCard).catch(() => setCard(null));
   }
   useEffect(load, [projectId, iid]);
+  usePoll(load, true);
+
+  const reviewing = cycle?.status.currentStatus === "REVIEWING"
+    || (cycle?.reviews.some((r) => r.state === "PENDING" || r.state === "PROCESSING") ?? false);
 
   async function rerun() {
     if (!cycle?.status.latestReviewId) return;
@@ -690,33 +1410,78 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
   if (!cycle) return <p className="muted">Loading…</p>;
 
   const title = cycle.reviews[0]?.mr?.title;
+  const snapshot = cycle.reviews[0];
   return (
     <div>
       <div className="row">
+        <a href={`/projects/${projectId}`}
+          onClick={(e) => { e.preventDefault(); go(`/projects/${projectId}`); }}>
+          ← project
+        </a>
         <h2 style={{ margin: 0 }}>!{iid} {title}</h2>
         {pill(cycle.status.currentStatus)}
         {cycle.status.mrrApproved && <span className="pill ok">mrr approved</span>}
-        {cycle.reviews[0]?.mr?.url && <a href={cycle.reviews[0].mr.url} target="_blank" rel="noreferrer">GitLab</a>}
+        {snapshot?.mr?.url && <a href={snapshot.mr.url} target="_blank" rel="noreferrer">GitLab</a>}
         {cycle.status.latestReviewId && <button onClick={rerun}>Re-run latest</button>}
       </div>
+      <GitMeta mr={snapshot?.mr} sha={snapshot?.headSha ?? cycle.status.latestHeadSha} />
       <p className="muted">{cycle.status.openFindings} open finding(s)</p>
+      <MrContext projectId={projectId} iid={iid} initial={cycle.status.userContext} onSaved={load} />
       {cycle.reviews.some((r) => r.state === "FAILED") && (
         <FailureBanner
           kind={cycle.reviews.find((r) => r.state === "FAILED")?.errorKind}
           message={cycle.reviews.find((r) => r.state === "FAILED")?.error}
         />
       )}
-      <h2>Findings</h2>
-      {cycle.findings.length === 0 && <p className="muted">None.</p>}
-      {cycle.findings.map((f) => (
-        <div className="card" key={f.id}>
-          <div className="row">
-            {pill(f.severity)} {pill(f.state)}
-            <strong>{f.title}</strong>
-            <span className="muted">{f.filePath}{f.line ? `:${f.line}` : ""}</span>
-          </div>
+      <div className="split">
+        <div>
+          <h2>Findings</h2>
+          {cycle.findings.length === 0 && <p className="muted">None.</p>}
+          {cycle.findings.map((f) => (
+            <div className={`card finding ${f.state.toLowerCase()} ${f.severity.toLowerCase()}`} key={f.id}>
+              <div className="row">
+                {pill(f.severity)} {pill(f.state)}
+                <strong>{f.title}</strong>
+              </div>
+              <p className="muted" style={{ margin: "6px 0 0" }}>
+                {f.filePath}{f.line ? `:${f.line}` : ""}
+              </p>
+            </div>
+          ))}
         </div>
-      ))}
+        <div>
+          <div className="row">
+            <h2 style={{ margin: 0 }}>Trace</h2>
+            {reviewing && <span className="log-live" title="running" />}
+            {latest && (
+              <a href={`/reviews/${latest.id}`} onClick={(e) => { e.preventDefault(); go(`/reviews/${latest.id}`); }}>
+                full review
+              </a>
+            )}
+          </div>
+          <Trail trace={latest?.trace ?? null} empty="No trace yet." />
+        </div>
+      </div>
+      <details className="fold">
+        <summary>Memory card</summary>
+        {card ? (
+          <div>
+            <div className="row">
+              {card.status && pill(card.status)}
+              <strong>{card.title}</strong>
+              <a href={`/projects/${projectId}`}
+                onClick={(e) => { e.preventDefault(); go(`/projects/${projectId}`); }}>
+                project memory
+              </a>
+            </div>
+            <pre>{card.body || "(empty)"}</pre>
+          </div>
+        ) : (
+          <p className="muted">
+            {reviewing ? "Waiting for the review to write this MR's card…" : "No memory card yet."}
+          </p>
+        )}
+      </details>
       <h2>Reviews</h2>
       <table>
         <thead><tr><th>When</th><th>SHA</th><th>Turns</th><th>State</th><th>Error</th></tr></thead>
@@ -742,6 +1507,55 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
         <ReplyCard key={r.id} summary={r} />
       ))}
     </div>
+  );
+}
+
+function MrContext({ projectId, iid, initial, onSaved }: {
+  projectId: string; iid: string; initial: string | null; onSaved: () => void;
+}) {
+  const [text, setText] = useState(initial ?? "");
+  const [open, setOpen] = useState(!!initial);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    setText(initial ?? "");
+    setOpen(!!initial);
+  }, [initial]);
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    setErr(null);
+    try {
+      await api(`/api/projects/${projectId}/merge-requests/${iid}/context`, {
+        method: "PUT", body: JSON.stringify({ context: text }),
+      });
+      onSaved();
+    } catch (e) {
+      setErr(String((e as Error).message));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <details className="fold" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>Merge request context {initial ? "" : "(none)"}</summary>
+      <p className="muted">
+        Notes for the reviewer about this MR — ticket numbers, intent, what to ignore.
+        Included on the next push or re-run; saving does not start a review.
+      </p>
+      <form onSubmit={save}>
+        <textarea placeholder="e.g. Implements JIRA-4412. The feature flag is off in prod."
+          value={text} onChange={(e) => setText(e.target.value)} />
+        {err && <p className="err">{err}</p>}
+        <p className="row">
+          <button className="primary" type="submit" disabled={saving}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </p>
+      </form>
+    </details>
   );
 }
 
@@ -782,9 +1596,12 @@ function ReviewDetail({ id }: { id: string }) {
   const [review, setReview] = useState<Review | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  useEffect(() => {
+  function load() {
     api<Review>(`/api/reviews/${id}`).then(setReview).catch((e) => setErr(String(e.message)));
-  }, [id]);
+  }
+  useEffect(load, [id]);
+  const inflight = review?.state === "PENDING" || review?.state === "PROCESSING";
+  usePoll(load, !!inflight);
 
   if (err) return <p className="err">{err}</p>;
   if (!review) return <p className="muted">Loading…</p>;
@@ -792,6 +1609,10 @@ function ReviewDetail({ id }: { id: string }) {
   return (
     <div>
       <div className="row">
+        <a href={`/projects/${review.projectId}/mrs/${review.mrIid}`}
+          onClick={(e) => { e.preventDefault(); go(`/projects/${review.projectId}/mrs/${review.mrIid}`); }}>
+          ← !{review.mrIid}
+        </a>
         <h2 style={{ margin: 0 }}>{review.mr?.title ?? review.id}</h2>
         {pill(review.state)}
       </div>
@@ -799,6 +1620,7 @@ function ReviewDetail({ id }: { id: string }) {
         !{review.mrIid} · {review.headSha.slice(0, 8)} · {review.createdAt}
         {review.mr?.url && <> · <a href={review.mr.url} target="_blank" rel="noreferrer">GitLab</a></>}
       </p>
+      <GitMeta mr={review.mr} sha={review.headSha} />
       {review.error && <FailureBanner kind={review.errorKind} message={review.error} />}
       <p className="muted">{review.agentTurns ?? 0} turn(s)</p>
       <h2>Prompt</h2>
@@ -810,37 +1632,39 @@ function ReviewDetail({ id }: { id: string }) {
   );
 }
 
-function Trail({ trace }: { trace: AgentTrace | null }) {
+function Trail({ trace, empty }: { trace: AgentTrace | null; empty?: string }) {
   if (!trace || !trace.events?.length) {
-    return (
-      <>
-        <h2>Trail</h2>
-        <p className="muted">No tool turns — single shot.</p>
-      </>
-    );
+    return empty ? <p className="muted">{empty}</p> : null;
   }
   return (
-    <>
-      <h2>Trail</h2>
+    <div className="rail">
       <p className="muted">{trace.turns}/{trace.maxTurns} turns</p>
-      {trace.events.map((e, i) => (
-        <div className="card" key={i}>
-          <div className="row">
-            {pill(e.role)}
-            <span className="muted">turn {e.turn}</span>
-            {e.stopReason && <span className="muted">{e.stopReason}</span>}
-            {e.elapsedMs != null && <span className="muted">{e.elapsedMs}ms</span>}
-            {e.name && <span className="muted">{e.name}</span>}
-            {e.truncated && pill("truncated")}
+      {trace.events.map((e, i) => {
+        const tools = e.toolCalls?.map((c) => c.name).join(", ");
+        const label = [e.role, e.name, tools, e.stopReason, e.elapsedMs != null ? `${e.elapsedMs}ms` : null]
+          .filter(Boolean).join(" · ");
+        const hasBody = !!(e.text || e.result || (e.toolCalls && e.toolCalls.length));
+        return (
+          <div className="trail-line" key={i}>
+            <div className="row">
+              <span className="role">turn {e.turn}</span>
+              <span>{label}</span>
+              {e.truncated && pill("truncated")}
+            </div>
+            {hasBody && (
+              <details className="fold">
+                <summary>details</summary>
+                {e.toolCalls && e.toolCalls.length > 0 && (
+                  <pre>{e.toolCalls.map((c) => `${c.name} ${c.arguments}`).join("\n")}</pre>
+                )}
+                {e.text && <pre>{e.text}</pre>}
+                {e.result && <pre>{e.result}</pre>}
+              </details>
+            )}
           </div>
-          {e.toolCalls && e.toolCalls.length > 0 && (
-            <pre>{e.toolCalls.map((c) => `${c.name} ${c.arguments}`).join("\n")}</pre>
-          )}
-          {e.text && <pre>{e.text}</pre>}
-          {e.result && <pre>{e.result}</pre>}
-        </div>
-      ))}
-    </>
+        );
+      })}
+    </div>
   );
 }
 
@@ -858,7 +1682,9 @@ function highlightLog(message: string) {
     if (lower.startsWith("review ") || /^[a-f0-9-]{8,}$/.test(tok)) cls = "log-tok-id";
     else if (/^\d+ms$/.test(tok) || /^\d+ chars$/.test(tok) || lower.startsWith("turn ") || lower.startsWith("max_turns=")) cls = "log-tok-num";
     else if (tok.startsWith("\"") || tok.startsWith("'")) cls = "log-tok-str";
-    else if (lower.startsWith("tool") || lower === "read_file" || lower === "openai_compat" || lower === "anthropic") cls = "log-tok-tool";
+    else if (lower.startsWith("tool") || lower === "read_file" || lower === "search_memory"
+      || lower === "read_memory" || lower === "write_memory" || lower === "list_tree"
+      || lower === "openai_compat" || lower === "anthropic") cls = "log-tok-tool";
     else if (lower === "failed" || lower === "error" || lower === "warn" || lower === "truncated") cls = "log-tok-bad";
     parts.push(<span key={i++} className={cls}>{tok}</span>);
     last = match.index + tok.length;
@@ -969,9 +1795,7 @@ function Logs() {
         <button className={debugOn ? "danger" : "primary"} onClick={toggleDebug}>
           {debugOn ? "Debug off" : "Debug on"}
         </button>
-        <label style={{ margin: 0 }}>
-          <input type="checkbox" checked={mrrOnly} onChange={(e) => setMrrOnly(e.target.checked)} /> mrr only
-        </label>
+        <Toggle on={mrrOnly} onChange={setMrrOnly}>mrr only</Toggle>
         {!stick && (
           <button className="primary" onClick={() => {
             stickRef.current = true;
@@ -984,7 +1808,8 @@ function Logs() {
       </div>
       <p className="muted">
         Refreshes every second. Scroll up to pause auto-scroll. Debug on logs full agent bodies
-        (truncated at 16k here).
+        (truncated at 16k here). HTTP header and wire loggers stay at WARN so GitLab tokens
+        are not dumped.
       </p>
       {loggers.map((l) => (
         <div className="row" key={l.name} style={{ margin: "4px 0" }}>

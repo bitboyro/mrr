@@ -10,6 +10,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import ro.bitboy.mrr.auth.Principal;
 import ro.bitboy.mrr.gitlab.GitLabClient;
+import ro.bitboy.mrr.memory.MemoryDocument;
+import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.model.MrStatus;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Review;
@@ -38,11 +40,13 @@ public class McpTools {
     private final Store store;
     private final GitLabClient gitlab;
     private final Reviewer reviewer;
+    private final MemoryService memory;
 
-    public McpTools(Store store, GitLabClient gitlab, Reviewer reviewer) {
+    public McpTools(Store store, GitLabClient gitlab, Reviewer reviewer, MemoryService memory) {
         this.store = store;
         this.gitlab = gitlab;
         this.reviewer = reviewer;
+        this.memory = memory;
     }
 
     @Tool(name = "list_projects",
@@ -160,6 +164,53 @@ public class McpTools {
         store.markReady(reviewId, review.discussionId(), review.noteId());
 
         return "Updated note " + review.noteId() + " on " + project.name() + "!" + review.mrIid();
+    }
+
+    @Tool(name = "search_memory",
+            description = "Search a project's OKF memory. Returns id — kind — title — tags, "
+                    + "never full bodies. Use get_memory to read one document.")
+    public String searchMemory(
+            @ToolParam(description = "The mrr project id") String projectId,
+            @ToolParam(description = "Text to match in title, subject, or tags", required = false)
+            String query,
+            @ToolParam(description = "Maximum hits (default 20)", required = false) Integer limit,
+            ToolContext toolContext) {
+        store.requireVisible(caller(toolContext), projectId);
+        int cap = limit == null ? 20 : Math.clamp(limit, 1, 100);
+        List<MemoryDocument> hits = memory.list(projectId, null, query, cap);
+        if (hits.isEmpty()) {
+            return "No matching documents.";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (MemoryDocument d : hits) {
+            sb.append(d.id()).append(" — ").append(d.kind().slug()).append(" — ").append(d.title());
+            if (!d.tags().isEmpty()) {
+                sb.append(" — ").append(String.join(",", d.tags()));
+            }
+            sb.append('\n');
+        }
+        return sb.toString().strip();
+    }
+
+    @Tool(name = "list_memories",
+            description = "List memory documents in a project, optionally restricted to a space "
+                    + "(project, mrs, notes). Summaries without bodies.")
+    public List<MemoryDocument> listMemories(
+            @ToolParam(description = "The mrr project id") String projectId,
+            @ToolParam(description = "Space: project, mrs, or notes", required = false) String space,
+            ToolContext toolContext) {
+        store.requireVisible(caller(toolContext), projectId);
+        return memory.list(projectId, space, null, 100);
+    }
+
+    @Tool(name = "get_memory",
+            description = "Read one memory document by id, including its markdown body.")
+    public MemoryDocument getMemory(
+            @ToolParam(description = "The mrr project id") String projectId,
+            @ToolParam(description = "The document id from search_memory or list_memories") String id,
+            ToolContext toolContext) {
+        store.requireVisible(caller(toolContext), projectId);
+        return memory.get(projectId, id).orElseThrow(() -> ApiException.notFound("memory"));
     }
 
     // ── the gate ─────────────────────────────────────────────────────────────────────
