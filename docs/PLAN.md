@@ -82,6 +82,9 @@ enough to justify the class it cost.
   failed (a 403 mid-testing) was overwriting the response with the failure, discarding a
   result that was already paid for. `saveResponse` now persists the moment the model answers,
   before delivery is attempted.
+- **Startup scan.** On boot (and after a project is registered) list GitLab's open MRs and
+  queue a review for any head SHA that is not already terminal. Catches MRs that opened
+  while mrr was down. A GitLab error on one project is logged and skipped.
 
 ### REST API ✅
 
@@ -127,9 +130,10 @@ whole event model needed to be explicit rather than implicit in the dedupe key.
   schema. The parser finds the first balanced-brace object (correctly ignoring braces inside
   string values — code snippets are full of them), unwraps ` ```json ` fences, and returns
   `null` on genuine failure. `VerdictParserTest.java`, 11 cases.
-- **Fallback preserved:** unparseable output posts as a single prose comment — the exact
-  pre-findings behaviour — rather than losing the review. Verified: this is the same code path
-  that carried M1's original one-comment-per-review behaviour.
+- **Unparseable output fail-closes.** The parser still unwraps fences and surrounding prose,
+  but if there is no verdict object the review is `FAILED` (`PROVIDER`), `response` is kept,
+  and GitLab is not touched. Re-run is the recovery path — posting prose as READY left the
+  next commit with nothing to resolve.
 
 ### Per-finding threads ✅
 
@@ -294,20 +298,25 @@ MR cycle with `current_status`, review prompt/response, admin users/tokens.
 
 ---
 
-## Agent context: a set of skills + documents ✅
+## Agent context: skills, documents, and per-MR notes ✅
 
 Same idea as MCP tools: a named set you enable per project, not a single blob and not a
 code change.
 
-- `agent_skills` — name, body, enabled, position. Enabled skills are concatenated into the
-  system prompt (one skill is used as-is; several become `## Skill: name` sections). An
-  empty set falls back to the legacy `projects.skill` column, then to the built-in reviewer
-  prompt. Existing `skill` values are migrated into a skill named `reviewer` on boot.
+- `agent_skills` — name, body, enabled, branchPattern, position. Enabled skills whose
+  branch pattern matches the MR source branch are concatenated into the system prompt
+  (one skill is used as-is; several become `## Skill: name` sections). Blank pattern =
+  every branch. An empty set falls back to the legacy `projects.skill` column, then to
+  the built-in reviewer prompt. Existing `skill` values are migrated into a skill named
+  `reviewer` on boot.
 - `agent_documents` — a documents folder. Enabled files are appended to the user prompt as
   reference material (architecture notes, conventions), truncated at
   `mrr.review.max-document-chars`.
-- REST: `/api/projects/{id}/skills`, `/api/projects/{id}/documents`. UI on the project page
-  is checkboxes + add/edit/delete.
+- Per-MR `userContext` — owner-written notes on the cycle, included in the next review.
+  Saving them does not start a review. Status upserts leave the column alone.
+- REST: `/api/projects/{id}/skills`, `/api/projects/{id}/documents`,
+  `PUT /api/projects/{id}/merge-requests/{iid}/context`. UI on the project page
+  is checkboxes + add/edit/delete; the MR page has a notes field.
 
 ## Fail closed when the model cannot be called ✅
 
@@ -318,6 +327,29 @@ post** (no threads, no summary edit, no approve, no reply). The review is `FAILE
 row keeps `lastErrorKind` / `lastError` for the UI, and a banner says so. Cleared on the
 next successful model call. `MCP` is reserved: the reviewer is not an MCP client yet.
 
+## Agent memory (OKF) ✅
+
+Thin per-project store. Canonical files under `/data/memory/{projectId}` (YAML frontmatter +
+markdown, same on-disk shape as DRD OKF). SQLite `memory_documents` is the list/search index
+— no hypertree, no prompt dump.
+
+- **Reviewer always writes** `mrs/{iid}.md` after READY, from the verdict `memory` field
+  (fallback: `summary`). Librarian on or off, `project/` present or not. Later commits update
+  the same card; merge/close flips `status`.
+- **Librarian is an addon** (`librarianEnabled`, default false). Initialize / Refresh button
+  only (`POST /api/projects/{id}/memory/refresh`). Writes `project/` only; host-side space
+  lock rejects `mrs/` writes. Disable never deletes files. Prefetch (tree, README, one build
+  file, skill names, existing MR cards); `librarianMaxTurns` default 6, independent of review
+  turns. Empty repo writes a stub overview (`status: empty`), not a failure.
+- **Discovery, not injection.** Nothing from memory is concatenated into the review prompt.
+  `search_memory` / `read_memory` / `write_memory` are opt-in `agentTools` (need
+  `agentMaxTurns > 1`). MCP twins: `search_memory`, `list_memories`, `get_memory`. Hits are
+  `id — kind — title — tags`; `get_memory` reads one body.
+- REST: `GET/POST /api/projects/{id}/memory`, `GET .../memory/mrs/{iid}`,
+  `GET/PUT/DELETE .../memory/documents/{docId}`, `GET .../memory/runs[/{id}]`.
+- UI: project-page tree + librarian Trail (poll 1s while `RUNNING`); MR-page card (poll while
+  `REVIEWING`).
+
 ---
 
 ## Not built — explicitly out of scope so far
@@ -326,12 +358,13 @@ next successful model call. `MCP` is reserved: the reviewer is not an MCP client
 |---|---|---|
 | Feedback / comment threads as a first-class user feature | ⛔ | Distinct from the reply-to-finding feature, which is agent-to-thread |
 | Secret encryption at rest | ⛔ flagged, not built | Plaintext in SQLite; drop-in `SecretBox`, no migration needed |
-| Restart recovery for in-flight reviews | ⛔ | A review stuck in `PROCESSING` across a restart must be re-run manually |
+| Restart recovery for in-flight reviews | ⛔ | Same-process scan re-queues non-terminal rows after boot (`inFlight` is empty). Not a crash-safe DB lease; two instances on one file are unsupported. Librarian `RUNNING` is not reclaimed. |
 | Tag / release events | ⛔ discussed, not designed | Needs a decision on output target (no comment thread exists for a tag) before any schema work |
 | `tools/list` per-caller filtering | ⛔ blocked on the MCP SDK, not on mrr | Documented as a known limitation instead |
 | Bot-identity separation | ⛔ | mrr currently posts as whoever owns the configured PAT; no distinct service-account concept |
 | Extraction into a Spring Boot library/starter | ⛔ discussed, deliberately deferred | Real path exists (rename tables off generic names, prefix routes, `PrincipalResolver` SPI) — not worth building against one hypothetical consumer |
-| **Agent memory (OKF-style)** | 🚧 planned | The agent writes memories about reviews it has done. Queryable through MCP *and* a REST API. Example: "three MRs targeting develop — should I notify that this change hits the same area of code?" Not a prompt dump — a structured memory the next review can search. |
+| **Agent addons + pipeline agent** | 🚧 designed | Catalog you add to a project (enabled by default; disable keeps the row). Each addon has a requirements page. Pipeline: failed MR CI, comment only if the log adds something new; Job: Read probed on the addon page. Spec: `docs/pipelineagent-addon.md`. |
+| Wiki-links / graph / body search on memory | 🚧 later | v1 is LIKE on title/subject/tags plus a path prefix |
 | **Covrigi MCP** | 🚧 planned | Connect `/Users/romanbotnari/Development/covrigi` as an MCP client against the same repo. The reviewer searches the graph for files/nodes affected by this change, instead of (or as well as) `read_file`. Fail-closed if that client is down (`errorKind=MCP`). |
 | **External tool context (Jira, …)** | 🚧 planned | The agent connects to other tools (Jira first) and collects ticket data into the MR context — title, status, acceptance criteria, linked issues — so the review is not diff-only. Stored on the MR cycle (a dedicated column, shown in the UI). Same enable-set as skills/MCP: which connectors are on is configuration, not a code change. Fail-closed if a connector is down. |
 | **Review satisfaction / quality signal** | 🚧 planned | Infer whether the author liked the review: a checkmark, "100", a clearly positive reply on an mrr thread. Store it so we can tell which skills/models actually help, and so memory can learn. Distinct from the existing reply-to-finding loop. |

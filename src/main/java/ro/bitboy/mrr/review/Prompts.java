@@ -50,7 +50,12 @@ final class Prompts {
      * project's legacy {@code skill} column, then to the built-in reviewer prompt.
      */
     static String system(List<AgentSkill> skills, String fallback, boolean toolsEnabled) {
-        String instructions = composeSkills(skills, fallback);
+        return system(skills, fallback, toolsEnabled, null);
+    }
+
+    static String system(List<AgentSkill> skills, String fallback, boolean toolsEnabled,
+                         String sourceBranch) {
+        String instructions = composeSkills(skills, fallback, sourceBranch);
         if (toolsEnabled) {
             return instructions + "\n\n" + TOOLS_NOTE + "\n\n" + OUTPUT_CONTRACT;
         }
@@ -58,8 +63,20 @@ final class Prompts {
     }
 
     static String composeSkills(List<AgentSkill> skills, String fallback) {
+        return composeSkills(skills, fallback, null);
+    }
+
+    /**
+     * Enabled skills whose branch pattern matches {@code sourceBranch}. A blank pattern
+     * matches every branch. An empty set after filtering falls back to the legacy column,
+     * then to the built-in reviewer prompt.
+     */
+    static String composeSkills(List<AgentSkill> skills, String fallback, String sourceBranch) {
         List<AgentSkill> enabled = skills == null ? List.of()
-                : skills.stream().filter(AgentSkill::enabled).toList();
+                : skills.stream()
+                .filter(AgentSkill::enabled)
+                .filter(s -> s.appliesTo(sourceBranch))
+                .toList();
         if (enabled.isEmpty()) {
             return fallback == null || fallback.isBlank() ? DEFAULT_SKILL : fallback;
         }
@@ -105,7 +122,11 @@ final class Prompts {
               ],
               "prior": [
                 { "id": "the id given below", "status": "addressed | still_present", "note": "one line" }
-              ]
+              ],
+              "memory": {
+                "change": "one short paragraph: what this commit/MR actually does",
+                "impact": "how it affects the rest of the code — modules, contracts, risk"
+              }
             }
 
             Rules:
@@ -124,20 +145,36 @@ final class Prompts {
               below, using its id verbatim. Mark `addressed` only when the new code actually
               fixes it — if you are unsure, say `still_present`.
             - Do not repeat a previously-reported finding in `findings`. It belongs in `prior`.
+            - `memory` is always required. It becomes this merge request's memory card. Do not
+              copy the summary verbatim — `change` is what landed, `impact` is how the rest of
+              the code is affected. Skip it only if you genuinely cannot tell.
             """;
 
     static String user(GitLabClient.Diff diff, List<Finding> priorOpen) {
-        return user(diff, priorOpen, List.of(), 20_000);
+        return user(diff, priorOpen, List.of(), 20_000, null);
     }
 
     static String user(GitLabClient.Diff diff, List<Finding> priorOpen,
                        List<AgentDocument> documents, int maxDocumentChars) {
+        return user(diff, priorOpen, documents, maxDocumentChars, null);
+    }
+
+    static String user(GitLabClient.Diff diff, List<Finding> priorOpen,
+                       List<AgentDocument> documents, int maxDocumentChars,
+                       String userContext) {
         StringBuilder sb = new StringBuilder();
         sb.append("Merge request: ").append(diff.title()).append('\n');
         sb.append("Branch: ").append(diff.sourceBranch())
                 .append(" → ").append(diff.targetBranch()).append('\n');
         if (diff.description() != null && !diff.description().isBlank()) {
             sb.append("\nDescription:\n").append(diff.description()).append('\n');
+        }
+
+        if (userContext != null && !userContext.isBlank()) {
+            sb.append("\n## Merge request context\n\n");
+            sb.append("Notes the project owner added for this merge request. Treat them as ");
+            sb.append("facts about the change.\n\n");
+            sb.append(truncate(userContext, maxDocumentChars)).append("\n");
         }
 
         List<AgentDocument> enabled = documents == null ? List.of()
@@ -194,13 +231,19 @@ final class Prompts {
         return sb.toString();
     }
 
+    static final String OVERVIEW_PREFIX = "### mrr review";
+
+    static boolean isOverview(String body) {
+        return body != null && body.stripLeading().startsWith(OVERVIEW_PREFIX);
+    }
+
     /**
      * The overview thread. Kept short — the detail lives in the per-finding threads, and
      * repeating it here just makes the MR page long.
      */
     static String summaryComment(ReviewModel.Verdict verdict, List<Finding> opened,
                                  List<Finding> priorOpen) {
-        StringBuilder sb = new StringBuilder("### mrr review\n\n");
+        StringBuilder sb = new StringBuilder(OVERVIEW_PREFIX + "\n\n");
 
         if (verdict.summary() != null) {
             sb.append(verdict.summary()).append("\n\n");

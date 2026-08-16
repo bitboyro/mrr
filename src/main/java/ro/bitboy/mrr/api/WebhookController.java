@@ -20,6 +20,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.gitlab.WebhookPayload;
+import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Review;
 import ro.bitboy.mrr.model.MrStatus;
@@ -64,12 +65,15 @@ public class WebhookController {
     private final Store store;
     private final Reviewer reviewer;
     private final Replier replier;
+    private final MemoryService memory;
     private final ObjectMapper mapper;
 
-    public WebhookController(Store store, Reviewer reviewer, Replier replier, ObjectMapper mapper) {
+    public WebhookController(Store store, Reviewer reviewer, Replier replier,
+                             MemoryService memory, ObjectMapper mapper) {
         this.store = store;
         this.reviewer = reviewer;
         this.replier = replier;
+        this.memory = memory;
         this.mapper = mapper;
     }
 
@@ -85,8 +89,9 @@ public class WebhookController {
                     background worker, because GitLab times deliveries out and retries them — \
                     blocking here would mean re-reviewing.
 
-                    Only `open`, `reopen`, and `update` actions are reviewed; merges, closes, \
-                    and approvals are acknowledged with 200 and ignored.
+                    Only `open`, `reopen`, and `update` actions are reviewed. `merge` and \
+                    `close` cancel any in-flight review and mark the cycle MERGED or CLOSED \
+                    so the UI follows GitLab. Approvals are acknowledged and ignored.
 
                     Deduplicated on `(project, mr_iid, last_commit.id)`. A redelivery, or an \
                     `update` that changed only a label, returns the existing review with \
@@ -135,12 +140,17 @@ public class WebhookController {
 
         // A merge or a close ends the merge request. Anything still running against it must
         // not deliver — a review comment on an MR that merged ten minutes ago is noise.
+        // The cycle follows GitLab even when no review was in flight (otherwise NEEDS_WORK
+        // sticks after merge).
         if (action != null && CLOSING.contains(action) && mrIid != 0) {
             boolean cancelled = store.cancelRunning(project.id(), mrIid,
                     "merge request was " + action + "d while the review was running");
             if (cancelled) {
                 log.info("cancelled in-flight review for {}!{} on {}", project.name(), mrIid, action);
             }
+            store.closeMr(project.id(), mrIid,
+                    "merge".equals(action) ? MrStatus.Status.MERGED : MrStatus.Status.CLOSED);
+            memory.markMrClosed(project.id(), mrIid, action);
             return ignore(project, mrIid, "action_" + action
                     + (cancelled ? "_cancelled_running_review" : ""));
         }

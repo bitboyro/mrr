@@ -1,5 +1,6 @@
 package ro.bitboy.mrr.web;
 
+import ch.qos.logback.classic.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -32,5 +33,28 @@ class LogLevelsTest {
     void rejectsAnUnknownLevel() {
         assertThatThrownBy(() -> LogLevels.set(LogLevels.APP, "LOUD"))
                 .isInstanceOf(ApiException.class);
+    }
+
+    @Test
+    void rejectsDebugOnHttpHeaderLoggers() {
+        LogLevels.pinHttpSecretLoggers();
+        assertThatThrownBy(() -> LogLevels.set("org.apache.hc.client5.http.headers", "DEBUG"))
+                .isInstanceOf(ApiException.class)
+                .hasMessageContaining("PRIVATE-TOKEN");
+        assertThat(LogLevels.stateOf("org.apache.hc.client5.http.headers").effectiveLevel())
+                .isEqualTo("WARN");
+    }
+
+    @Test
+    void rootDebugDoesNotEnableHeaderLogging() {
+        LogLevels.set(Logger.ROOT_LOGGER_NAME, "DEBUG");
+        try {
+            assertThat(LogLevels.stateOf("org.apache.hc.client5.http.headers").effectiveLevel())
+                    .isEqualTo("WARN");
+            assertThat(LogLevels.stateOf("org.apache.hc.client5.http.wire").effectiveLevel())
+                    .isEqualTo("WARN");
+        } finally {
+            LogLevels.set(Logger.ROOT_LOGGER_NAME, "INFO");
+        }
     }
 }

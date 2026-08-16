@@ -5,9 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import ro.bitboy.mrr.MrrProperties;
+import ro.bitboy.mrr.memory.MemoryActor;
+import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.gitlab.GitLabClient;
 import ro.bitboy.mrr.model.AgentDocument;
@@ -25,11 +28,16 @@ import ro.bitboy.mrr.web.ApiException;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -49,27 +57,47 @@ public class Reviewer {
 
     private final Store store;
     private final GitLabClient gitlab;
-    private final RestClient.Builder restClients;
     private final MrrProperties properties;
     private final VerdictParser parser;
     private final ObjectMapper mapper;
     private final Agent agent;
+    private final MemoryService memory;
+    private final Function<Project, ReviewModel> models;
     private final ExecutorService workers;
+    private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<String, Object> mrLocks = new ConcurrentHashMap<>();
 
+    @Autowired
     public Reviewer(Store store, GitLabClient gitlab, RestClient.Builder restClients,
-                    MrrProperties properties, ObjectMapper mapper) {
+                    MrrProperties properties, ObjectMapper mapper, MemoryService memory) {
+        this(store, gitlab, properties, mapper, memory,
+                project -> defaultModel(restClients, project),
+                Executors.newFixedThreadPool(properties.review().workers()));
+    }
+
+    Reviewer(Store store, GitLabClient gitlab, MrrProperties properties, ObjectMapper mapper,
+             MemoryService memory, Function<Project, ReviewModel> models, ExecutorService workers) {
         this.store = store;
         this.gitlab = gitlab;
-        this.restClients = restClients;
         this.properties = properties;
         this.parser = new VerdictParser(mapper);
         this.mapper = mapper;
         this.agent = new Agent();
-        this.workers = Executors.newFixedThreadPool(properties.review().workers());
+        this.memory = memory;
+        this.models = models;
+        this.workers = workers;
     }
 
-    /** Hands the review to a worker and returns immediately — the webhook must not block. */
-    public void submit(String reviewId) {
+    /**
+     * Hands the review to a worker and returns immediately — the webhook must not block.
+     *
+     * @return false if this review is already queued or running in this process
+     */
+    public boolean submit(String reviewId) {
+        if (!inFlight.add(reviewId)) {
+            log.info("review {} already running — not queueing again", reviewId);
+            return false;
+        }
         store.findReview(reviewId).ifPresent(review -> {
             String sha = review.headSha() == null ? "?"
                     : review.headSha().substring(0, Math.min(8, review.headSha().length()));
@@ -77,17 +105,25 @@ public class Reviewer {
                     .map(Project::name).orElse(review.projectId());
             log.info("review {} queued for {}!{} at {}", reviewId, project, review.mrIid(), sha);
         });
-        workers.submit(() -> {
-            try {
-                run(reviewId);
-            } catch (Exception e) {
-                log.error("review {} failed", reviewId, e);
-                failClosed(reviewId, kindOf(e), safeMessage(e));
-            }
-        });
+        try {
+            workers.submit(() -> {
+                try {
+                    run(reviewId);
+                } catch (Exception e) {
+                    log.error("review {} failed", reviewId, e);
+                    failClosed(reviewId, kindOf(e), safeMessage(e));
+                } finally {
+                    inFlight.remove(reviewId);
+                }
+            });
+        } catch (RuntimeException e) {
+            inFlight.remove(reviewId);
+            throw e;
+        }
+        return true;
     }
 
-    private void run(String reviewId) {
+    void run(String reviewId) {
         Review review = store.findReview(reviewId).orElseThrow();
         Project project = store.findProject(review.projectId()).orElseThrow();
 
@@ -96,9 +132,17 @@ public class Reviewer {
         GitLabClient.Diff diff = gitlab.changes(project, review.mrIid(),
                 properties.review().maxDiffChars());
 
-        store.updateMergeRequestInfo(reviewId, review.mr().enrichedWith(
+        var info = review.mr().enrichedWith(
                 diff.title(), diff.webUrl(), diff.authorName(), diff.authorUsername(),
-                diff.sourceBranch(), diff.targetBranch(), diff.files().size()));
+                diff.sourceBranch(), diff.targetBranch(), diff.files().size());
+        try {
+            var meta = gitlab.gitMeta(project, review.mrIid());
+            info = info.withGitMeta(meta.commitCount(), meta.assigneesText(), meta.reviewersText());
+        } catch (Exception e) {
+            log.warn("git meta failed for review {} — continuing without it ({})",
+                    reviewId, e.getMessage());
+        }
+        store.updateMergeRequestInfo(reviewId, info);
 
         // Everything still standing on this MR from earlier commits. The model judges these
         // alongside the new diff, which is what lets a fix resolve the thread that reported it.
@@ -109,18 +153,22 @@ public class Reviewer {
         var tools = ReviewTools.forProject(project);
         List<AgentSkill> skills = store.listSkills(project.id());
         List<AgentDocument> documents = store.listDocuments(project.id());
-        String system = Prompts.system(skills, project.skill(), !tools.isEmpty());
-        String user = Prompts.user(diff, priorOpen, documents, properties.review().maxDocumentChars());
+        String sourceBranch = diff.sourceBranch();
+        String userContext = store.findMrStatus(project.id(), review.mrIid())
+                .map(MrStatus::userContext).orElse(null);
+        String system = Prompts.system(skills, project.skill(), !tools.isEmpty(), sourceBranch);
+        String user = Prompts.user(diff, priorOpen, documents,
+                properties.review().maxDocumentChars(), userContext);
 
         store.markProcessing(reviewId, system + "\n\n---\n\n" + user);
-        log.info("review {} calling {} / {} — {} file(s), {} chars{}, max_turns={}",
+        log.info("review {} calling {} / {} — {} file(s), {} chars{}, max_turns={}, branch={}",
                 reviewId, project.provider(), project.model(),
                 diff.files().size(), diff.text().length(),
                 diff.truncated() ? ", truncated" : "",
-                project.agentMaxTurns());
+                project.agentMaxTurns(), sourceBranch);
         long started = System.currentTimeMillis();
         Agent.Run run = agent.run(
-                modelFor(project), system, user, tools, project.agentMaxTurns(),
+                models.apply(project), system, user, tools, project.agentMaxTurns(),
                 call -> executeTool(call, project, reviewId, review.headSha()),
                 "review " + reviewId, properties.review().maxTraceChars());
         ReviewModel.Result result = run.result();
@@ -154,18 +202,21 @@ public class Reviewer {
 
         ReviewModel.Verdict verdict = parser.parse(result.markdown());
         if (verdict == null) {
-            // The model answered in prose. Post it as one comment, exactly as mrr behaved
-            // before findings existed, rather than losing a review that is probably fine.
-            log.warn("review {} could not be parsed into findings — posting as prose", reviewId);
-            postOrEditSummary(project, review, result.markdown());
-            finishCleanOrNeedsWork(project, review);
+            // Paid-for output is already on reviews.response. Posting it as prose would look
+            // READY and leave the next commit with nothing to resolve.
+            failClosed(reviewId, FailureKind.PROVIDER, FailureKind.PROVIDER.headline()
+                    + " The model did not return a JSON verdict.");
             return;
         }
 
-        resolveAddressed(project, review, verdict, priorOpen);
-        List<Finding> opened = openThreads(project, review, verdict);
-        postOrEditSummary(project, review, Prompts.summaryComment(verdict, opened, priorOpen));
-        finishCleanOrNeedsWork(project, review);
+        List<Finding> opened;
+        synchronized (lockFor(project.id(), review.mrIid())) {
+            resolveAddressed(project, review, verdict, priorOpen);
+            opened = openThreads(project, review, verdict);
+            postOrEditSummary(project, review, Prompts.summaryComment(verdict, opened, priorOpen));
+            finishCleanOrNeedsWork(project, review);
+        }
+        writeMrCard(project, review, verdict, opened, verdict.summary());
 
         log.info("review {} ready for {}!{} — {} new finding(s), {} resolved",
                 reviewId, project.name(), review.mrIid(), opened.size(),
@@ -173,10 +224,19 @@ public class Reviewer {
     }
 
     private void finishCleanOrNeedsWork(Project project, Review review) {
+        MrStatus existing = store.findMrStatus(project.id(), review.mrIid()).orElse(null);
+        if (existing != null && existing.currentStatus().isClosed()) {
+            log.info("review {} finished after {}!{} was {} — leaving cycle alone",
+                    review.id(), project.name(), review.mrIid(), existing.currentStatus());
+            return;
+        }
         int open = store.openFindings(project.id(), review.mrIid()).size();
         MrStatus.Status status = open == 0 ? MrStatus.Status.CLEAN : MrStatus.Status.NEEDS_WORK;
         store.upsertMrStatus(project.id(), review.mrIid(), status,
                 review.id(), review.headSha(), open);
+        // The in-memory review still has null discussion ids until markReady; re-read.
+        Review posted = store.findReview(review.id()).orElse(review);
+        syncGitlabThreads(project, posted, open == 0);
         if (!project.autoApprove()) {
             return;
         }
@@ -262,21 +322,154 @@ public class Reviewer {
         return opened;
     }
 
-    /** The overview thread. Edited in place on a re-review rather than stacking. */
+    /**
+     * The overview thread. One per MR, stored on {@code mr_status} so a later commit (or a
+     * sibling worker) edits the same GitLab discussion instead of posting a second one.
+     */
     private void postOrEditSummary(Project project, Review review, String markdown) {
-        String discussionId = review.discussionId();
-        String noteId = review.noteId();
+        Store.Overview live = store.findOverview(project.id(), review.mrIid()).orElse(null);
+        String discussionId = live != null ? live.discussionId() : review.discussionId();
+        String noteId = live != null ? live.noteId() : review.noteId();
 
         if (discussionId == null || noteId == null) {
+            Optional<Review> previous = store.findLatestOverview(
+                    project.id(), review.mrIid(), review.id());
+            if (previous.isPresent()) {
+                discussionId = previous.get().discussionId();
+                noteId = previous.get().noteId();
+            }
+        }
+
+        if (discussionId != null && noteId != null) {
+            gitlab.updateDiscussionNote(project, review.mrIid(), discussionId, noteId, markdown);
+        } else {
             GitLabClient.Discussion posted =
                     gitlab.postDiscussion(project, review.mrIid(), markdown);
             discussionId = posted.discussionId();
             noteId = posted.noteId();
-        } else {
-            gitlab.updateDiscussionNote(project, review.mrIid(), discussionId, noteId, markdown);
         }
+        store.saveOverview(project.id(), review.mrIid(), discussionId, noteId);
         store.markReady(review.id(), discussionId, noteId);
         store.clearProjectError(project.id());
+    }
+
+    /**
+     * GitLab's merge widget counts every resolvable discussion, including the overview.
+     * CLEAN resolves it (and any stacked leftovers); NEEDS_WORK leaves only the live
+     * overview unresolved so a later fix can still fail "all threads resolved".
+     *
+     * <p>GitLab emits "resolved all threads" on a resolve PUT even when the thread is
+     * already resolved. Only write when the listed state actually differs. An id the
+     * list did not return is left alone — that is how a first-page miss used to
+     * re-resolve the overview every two minutes.
+     */
+    private void syncGitlabThreads(Project project, Review review, boolean clean) {
+        List<GitLabClient.DiscussionView> threads = List.of();
+        try {
+            threads = gitlab.listDiscussions(project, review.mrIid());
+        } catch (Exception e) {
+            log.warn("could not list discussions on {}!{}: {}",
+                    project.name(), review.mrIid(), e.getMessage());
+        }
+        Map<String, Boolean> current = new LinkedHashMap<>();
+        for (GitLabClient.DiscussionView thread : threads) {
+            current.put(thread.discussionId(), thread.resolved());
+        }
+        syncOverviewResolved(project, review, clean, threads, current);
+        reopenOpenFindingThreads(project, review, current);
+    }
+
+    private void setResolvedIfNeeded(Project project, long mrIid, Map<String, Boolean> current,
+                                     String discussionId, boolean resolve) {
+        if (discussionId == null || discussionId.isBlank()) {
+            return;
+        }
+        Boolean now = current.get(discussionId);
+        if (now == null || now == resolve) {
+            return;
+        }
+        gitlab.setDiscussionResolved(project, mrIid, discussionId, resolve);
+        current.put(discussionId, resolve);
+    }
+
+    private void syncOverviewResolved(Project project, Review review, boolean clean,
+                                      List<GitLabClient.DiscussionView> threads,
+                                      Map<String, Boolean> current) {
+        String live = store.findOverview(project.id(), review.mrIid())
+                .map(Store.Overview::discussionId)
+                .orElse(review.discussionId());
+        Set<String> overviews = new LinkedHashSet<>(
+                store.overviewDiscussionIds(project.id(), review.mrIid()));
+        if (live != null) {
+            overviews.add(live);
+        }
+        for (GitLabClient.DiscussionView thread : threads) {
+            if (!thread.system() && thread.resolvable() && Prompts.isOverview(thread.body())) {
+                overviews.add(thread.discussionId());
+            }
+        }
+        for (String discussionId : overviews) {
+            boolean resolve = clean || (live != null && !discussionId.equals(live));
+            try {
+                setResolvedIfNeeded(project, review.mrIid(), current, discussionId, resolve);
+            } catch (Exception e) {
+                log.warn("could not {} overview thread {} on {}!{}: {}",
+                        resolve ? "resolve" : "reopen", discussionId,
+                        project.name(), review.mrIid(), e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Make GitLab's leftover overview threads match this MR's current cycle, without
+     * calling the model. Used by the scan so a boot race does not stay visible until
+     * the next push.
+     */
+    public void alignGitlab(Project project, long mrIid) {
+        MrStatus status = store.findMrStatus(project.id(), mrIid).orElse(null);
+        if (status == null || status.currentStatus().isClosed()) {
+            return;
+        }
+        Review review = status.latestReviewId() == null ? null
+                : store.findReview(status.latestReviewId()).orElse(null);
+        Store.Overview overview = store.findOverview(project.id(), mrIid).orElse(null);
+        if (review == null && overview == null) {
+            return;
+        }
+        if (review == null) {
+            review = new Review(status.latestReviewId() == null ? "" : status.latestReviewId(),
+                    project.id(), mrIid, status.latestHeadSha(), Review.State.READY,
+                    null, null, null, null, overview.noteId(), overview.discussionId(),
+                    null, null, Instant.now(), null, 0, null);
+        }
+        synchronized (lockFor(project.id(), mrIid)) {
+            syncGitlabThreads(project, review, status.openFindings() == 0);
+        }
+    }
+
+    private Object lockFor(String projectId, long mrIid) {
+        return mrLocks.computeIfAbsent(projectId + ":" + mrIid, key -> new Object());
+    }
+
+    /**
+     * mrr is source of truth for OPEN vs ADDRESSED. If GitLab was resolved by a later
+     * "resolve all" or an author "fixed in" note, reopen every finding still standing
+     * so the merge widget matches NEEDS_WORK.
+     */
+    private void reopenOpenFindingThreads(Project project, Review review,
+                                          Map<String, Boolean> current) {
+        for (Finding finding : store.openFindings(project.id(), review.mrIid())) {
+            if (finding.discussionId() == null) {
+                continue;
+            }
+            try {
+                setResolvedIfNeeded(project, review.mrIid(), current,
+                        finding.discussionId(), false);
+            } catch (Exception e) {
+                log.warn("could not reopen thread for finding {}: {}",
+                        finding.id(), e.getMessage());
+            }
+        }
     }
 
     /**
@@ -308,32 +501,48 @@ public class Reviewer {
         return kind.headline() + " " + trimmed;
     }
 
-    private String executeTool(ReviewModel.ToolCall call, Project project, String reviewId,
-                               String headSha) {
-        if (!ReviewTools.READ_FILE.equals(call.name())) {
-            log.warn("review {} tool {} — unknown tool", reviewId, call.name());
-            return "error: unknown tool " + call.name();
-        }
+    private void writeMrCard(Project project, Review review, ReviewModel.Verdict verdict,
+                             List<Finding> opened, String fallback) {
         try {
-            JsonNode args = mapper.readTree(call.argumentsJson() == null ? "{}" : call.argumentsJson());
-            String path = args.path("path").asText(null);
-            Integer start = args.path("start_line").isIntegralNumber() ? args.path("start_line").asInt() : null;
-            Integer end = args.path("end_line").isIntegralNumber() ? args.path("end_line").asInt() : null;
-            String result = gitlab.fileAt(project, path, headSha, start, end,
-                    properties.review().maxFileChars());
-            log.info("review {} tool {} {} {} chars",
-                    reviewId, call.name(), path == null ? "" : path, result.length());
-            if (result.startsWith("error:")) {
-                log.warn("review {} tool {} failed: {}", reviewId, call.name(), result);
-            }
-            return result;
+            Review fresh = store.findReview(review.id()).orElse(review);
+            memory.upsertMrCard(project.id(), review.mrIid(), fresh.mr(), review.headSha(),
+                    verdict, opened, fallback);
         } catch (Exception e) {
-            log.warn("review {} tool {} failed: {}", reviewId, call.name(), e.getMessage());
-            return "error: " + e.getMessage();
+            log.warn("review {} could not write MR memory: {}", review.id(), e.getMessage());
         }
     }
 
-    private ReviewModel modelFor(Project project) {
+    private String executeTool(ReviewModel.ToolCall call, Project project, String reviewId,
+                               String headSha) {
+        String name = call.name();
+        if (ReviewTools.READ_FILE.equals(name)) {
+            try {
+                JsonNode args = mapper.readTree(call.argumentsJson() == null ? "{}" : call.argumentsJson());
+                String path = args.path("path").asText(null);
+                Integer start = args.path("start_line").isIntegralNumber() ? args.path("start_line").asInt() : null;
+                Integer end = args.path("end_line").isIntegralNumber() ? args.path("end_line").asInt() : null;
+                String result = gitlab.fileAt(project, path, headSha, start, end,
+                        properties.review().maxFileChars());
+                log.info("review {} tool {} {} {} chars",
+                        reviewId, name, path == null ? "" : path, result.length());
+                if (result.startsWith("error:")) {
+                    log.warn("review {} tool {} failed: {}", reviewId, name, result);
+                }
+                return result;
+            } catch (Exception e) {
+                log.warn("review {} tool {} failed: {}", reviewId, name, e.getMessage());
+                return "error: " + e.getMessage();
+            }
+        }
+        Review review = store.findReview(reviewId).orElse(null);
+        Long mrIid = review == null ? null : review.mrIid();
+        String result = ReviewTools.executeMemory(mapper, memory, project.id(), MemoryActor.REVIEWER,
+                mrIid, name, call.argumentsJson());
+        log.info("review {} tool {}", reviewId, name);
+        return result;
+    }
+
+    static ReviewModel defaultModel(RestClient.Builder restClients, Project project) {
         return switch (project.provider()) {
             case ANTHROPIC -> new AnthropicModel(
                     project.modelKey(), project.modelBaseUrl(), project.model());

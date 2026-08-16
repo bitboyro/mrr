@@ -117,12 +117,21 @@ public interface ReviewModel {
      * the model the findings that are still open and asks it to say, for each, whether the
      * new commit addressed it. The model resolves the identity; mrr just acts on the answer.
      */
-    record Verdict(String summary, List<NewFinding> findings, List<PriorVerdict> priorVerdicts) {
+    record Verdict(String summary, List<NewFinding> findings, List<PriorVerdict> priorVerdicts,
+                   MemoryNote memory) {
 
         public Verdict {
             findings = findings == null ? List.of() : List.copyOf(findings);
             priorVerdicts = priorVerdicts == null ? List.of() : List.copyOf(priorVerdicts);
         }
+
+        public Verdict(String summary, List<NewFinding> findings, List<PriorVerdict> priorVerdicts) {
+            this(summary, findings, priorVerdicts, null);
+        }
+    }
+
+    /** Agent-authored MR card. Rides on the verdict because the last turn has no tools. */
+    record MemoryNote(String change, String impact) {
     }
 
     /** A problem in this diff. {@code line} is best-effort — the model may omit or miss it. */

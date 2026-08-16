@@ -24,6 +24,7 @@ import java.util.List;
 /**
  * Runtime log levels. Admin only, in-memory — a restart restores {@code logging.level}
  * from config. Flip {@code ro.bitboy.mrr} to DEBUG to see full agent message bodies.
+ * HTTP header/wire loggers stay at WARN — they print {@code PRIVATE-TOKEN}.
  */
 @RestController
 @Tag(name = "Loggers",

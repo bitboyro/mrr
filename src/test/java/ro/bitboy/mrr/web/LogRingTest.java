@@ -51,4 +51,15 @@ class LogRingTest {
         ring.clear();
         assertThat(ring.after(0, 50)).isEmpty();
     }
+
+    @Test
+    void redactsPrivateTokenBeforeItHitsTheRing() {
+        LogRing ring = new LogRing();
+        ring.record("DEBUG", "org.apache.hc.client5.http.headers",
+                "http-outgoing-0 >> PRIVATE-TOKEN: glpat-not-a-real-token.01.example",
+                null, Instant.now());
+        String message = ring.after(0, 1).getFirst().message();
+        assertThat(message).contains("[redacted]");
+        assertThat(message).doesNotContain("glpat-not-a-real-token");
+    }
 }

@@ -1,58 +1,123 @@
 # Pipeline agent — addon
 
-Designed, not built. An **addon** that turns on a **second agent**: same process, same GitLab
-PAT, same model key — a different prompt and a different webhook kind. Not a plugin SPI.
+Designed, not built. Pipeline is the second **agent addon**. Addons are a **named set you add
+to a project**, same idea as skills: add to the list (enabled by default), disable without
+removing, disable never deletes what the agent already wrote.
+
+Not a plugin SPI. The catalog is compiled in. Not a growing pile of booleans on `Project`
+(`librarianEnabled`, `pipelineEnabled`, …) — that does not scale, and it has nowhere to hang
+"what else this agent needs from GitLab."
 
 GitLab already paints the red X. Restating "job `test` failed" is noise. This agent comments
 only when the job log adds something the merge request does not already say.
 
-Default **off**. Existing projects keep today's behaviour. Either the addon or the GitLab
-**Pipeline events** tick missing → stays silent.
+---
+
+## Agent addons (the list)
+
+Compiled-in catalog plus per-project rows. Skills, not `agentTools`: `agentTools` is a
+comma-separated bag with no page and no requirements. An agent addon has a name, a toggle,
+and a **requirements page**.
+
+| | On the project | Enabled | Off / disable |
+|---|---|---|---|
+| How | `POST` the catalog name onto the project | default **true** on add | `enabled: false`; row stays |
+| Librarian | `addons` contains `librarian` | Initialize / Refresh works | 409 on refresh; `project/` files stay |
+| Pipeline | `addons` contains `pipeline` | failed-MR pipelines assessed | `200 pipeline_disabled`; assessment rows stay |
+
+Gate at runtime: **on the list and `enabled`**. On the list but disabled is silent, same as a
+disabled skill.
+
+Migrate the shipped librarian boolean: `librarian_enabled = 1` → insert
+`(name=librarian, enabled=1)`. Keep `Project.librarianEnabled` as a **derived alias**
+(`librarian` is listed and enabled) so today's UI and API keep working until they read the
+list.
+
+```
+GET  /api/addons                          # catalog (id, title, description, requires[])
+GET  /api/projects/{id}/addons            # catalog merged with installed/enabled
+POST /api/projects/{id}/addons            # { "name": "pipeline" } → enabled true
+GET  /api/projects/{id}/addons/{name}     # detail + live requirement checks
+PUT  /api/projects/{id}/addons/{name}     # { "enabled": false } — row stays
+```
+
+Unknown names 400. Delete is not required in v1 (disable is enough). Table `project_addons`
+(`project_id`, `name`, `enabled`, `created_at`), unique `(project_id, name)`.
 
 ---
 
-## Why a second agent
+## Requirements page
 
-The reviewer reacts to merge-request events (open, reopen, new commit) and posts findings.
-This agent reacts to pipeline failures on that same MR. Mixing the two in the review loop
-would spend a review on every red pipeline, and would key assessments on `head_sha` — a SHA
-can fail CI several times after the review of that commit already landed.
+Each catalog entry declares what GitLab must grant **beyond the review loop**. The project
+addon page (`/projects/{id}/addons/{name}`) is where that is shown — not a footnote in
+README. Enabling without the extras fail-closes at runtime; the page should say so before
+the first 403.
 
-| | Reviewer (today) | Pipeline agent (this addon) |
-|---|---|---|
-| Trigger | MR `open` / `reopen` / new commit | `object_kind: pipeline`, status `failed` |
-| Gate | project `enabled` | project `enabled` **and** `addons` contains `pipeline` |
-| Off | — | Silent: `200` `addon_pipeline_off`, no model call |
-| Output | Findings / threads | One comment, or nothing |
-| Storage | `reviews` keyed on `(project, mr_iid, head_sha)` | `pipeline_assessments` keyed on `(project, pipeline_id)` |
+Catalog shape:
+
+```
+name: pipeline
+title: Pipeline agent
+requires:
+  - kind: webhook_event
+    name: Pipeline events
+    why: Same webhook URL; tick this in GitLab Settings → Webhooks.
+  - kind: gitlab_permission
+    name: Job: Read
+    why: GET /projects/:id/jobs/:job_id/trace
+    probe: GET /projects/:id/jobs?per_page=1
+```
+
+Librarian declares an empty `requires` — tree and file read are already the review token.
+
+On the page:
+
+- Short description, enabled toggle (add-to-list if not installed; adding enables).
+- **Needed** list: each requirement as ok / missing / unknown.
+- `gitlab_permission` is probed live when the page loads (Job: Read → `GET …/jobs?per_page=1`;
+  200 = ok, 403 = missing, anything else = unknown). Do not treat 404-no-jobs as missing.
+- `webhook_event` cannot be probed (mrr has no webhook-API scope by design). Shown as an
+  instruction, not a green tick. If the addon is on and GitLab never delivers that kind, the
+  webhook log (`pipeline_disabled` is the other case) is how you see it.
+
+Classic PAT `api` already includes Job: Read. Fine-grained review tokens do not. Write is
+unchanged (`POST /discussions`). A 403/404 on the trace at run time is fail-closed: run
+`FAILED`, `errorKind=GITLAB`, UI banner, **do not** post from job names alone.
 
 ---
 
-## Turning it on
+## Pipeline agent (when listed and enabled)
 
-Two switches, both required:
+Two switches, both required: addon enabled on the project, and **Pipeline events** ticked on
+the existing webhook. Either missing → silent.
 
-1. Project addon `pipeline` enabled (UI checkbox / `addons: ["pipeline"]`).
-2. The existing GitLab webhook ticks **Pipeline events** as well as merge-request events.
+| | Reviewer | Librarian addon | Pipeline addon |
+|---|---|---|---|
+| Trigger | MR webhook | Initialize / Refresh | pipeline webhook, `failed` |
+| Skill | project skill set | `skills/librarian.md` | `skills/pipeline.md` |
+| Turns | `agentMaxTurns` | `librarianMaxTurns` (6) | `pipelineMaxTurns` (1) |
+| Tools | opt-in `agentTools` | tree / file / memory / librarian write | none in v1 — prefetch logs |
+| Run table | `reviews` | `memory_runs` | `pipeline_assessments` |
+| Trail | yes | yes | yes |
 
-Same webhook URL and `X-Gitlab-Token`. If GitLab delivers a pipeline event and the addon is
-off: `200` with `reason: addon_pipeline_off`, log it, spend nothing.
+Shared: same process, PAT, model key, `Agent` loop, fail-closed kinds. Reviews never wait on
+either addon.
 
 ```mermaid
 flowchart TD
   hook[GitLab pipeline webhook]
   kind{object_kind pipeline?}
-  addon{addon pipeline on?}
+  listed{pipeline listed and enabled?}
   failed{status failed and open MR?}
-  assess[Fetch failed job logs plus MR context]
+  assess[Claim run, fetch job logs, prefetch MR context]
   verdict{post true and comment nonempty?}
   post[Unanchored discussion on the MR]
-  silent[202 then nothing posted]
+  silent[READY posted false]
   hook --> kind
   kind -->|no| existing[Existing MR / note paths]
-  kind -->|yes| addon
-  addon -->|no| ignore[Ignore addon_pipeline_off]
-  addon -->|yes| failed
+  kind -->|yes| listed
+  listed -->|no| ignore[Ignore pipeline_disabled]
+  listed -->|yes| failed
   failed -->|no| ignore2[Ignore success / no MR / closed]
   failed -->|yes| assess
   assess --> verdict
@@ -60,130 +125,51 @@ flowchart TD
   verdict -->|no| silent
 ```
 
----
-
-## Addon switch (config)
-
-Named enable-set, same idea as `agentTools`. Empty means none. Handlers stay compiled in.
-
-- Column `projects.addons` (TEXT, comma-separated). `SchemaPatch` adds it on existing DBs,
-  like `agent_tools`.
-- `Project` grows `List<String> addons` plus `addonEnabled("pipeline")`.
-- `ProjectController.Upsert` accepts `addons`; omitted on update keeps current.
-- UI: an **Addons** row next to skip-drafts / auto-approve — checkbox `pipeline`. Pill on the
-  project list when on.
-- Known name: `pipeline`. Unknown names stored, ignored at runtime (same as unknown tool
-  names).
-
----
-
-## Event rules (only when the addon is on)
+### Event rules
 
 | Delivery | Action |
 |---|---|
-| `pipeline` / `failed`, payload has an open MR | Assess |
-| `pipeline` / `success`, `running`, `canceled`, `skipped` | Ignore |
-| `pipeline` with no `merge_request` | Ignore (nowhere to talk — same reason tag events are out of scope) |
-| `build` (per-job) | Ignore — wait for the pipeline to finish |
+| `pipeline` / `failed`, open MR | Assess |
+| success / running / canceled / skipped | Ignore |
+| no `merge_request` | Ignore |
+| `build` (per-job) | Ignore |
 
-Dedupe on `(project_id, pipeline_id)`. A redelivered hook is free. A retry is a new pipeline
-id, so a new assessment — the log may differ.
+Dedupe `(project_id, pipeline_id)`. Retry = new pipeline id = new assessment.
 
-Parse in `WebhookPayload`: `object_kind`, `object_attributes.status`, `object_attributes.id`,
-`object_attributes.sha`, `merge_request.iid` / `state`, failed `builds[]` (id, name, stage,
-`allow_failure`, `failure_reason`). Skip `allow_failure` jobs.
+### Loop
 
-The webhook has job *names* and `failure_reason`, not the log. Assessment without the trace
-would only restate GitLab's red X, so the agent fetches `GET /jobs/{id}/trace`.
+`PipelineAgent` next to `Librarian`. Classpath skill, worker pool size 1, `202` + `Location`
+to the run. Prefetch: truncated traces (last 12_000 chars, 3 jobs), open findings, prior
+assessments, latest summary.
 
----
-
-## GitLab permissions
-
-**Write side is unchanged.** Posting still uses `Merge request: Update` / `Create`
-(`POST /discussions`). No new write scope.
-
-**Read side needs job logs**, which today's review PAT does not cover.
-
-| Token | Extra for this addon |
-|---|---|
-| Classic PAT, scope `api` | No. Job traces are under `api`. Token owner still needs Reporter+ on the project (Guest cannot see CI logs on a private repo). |
-| Fine-grained PAT | **Yes — Job: Read** (`read_job`). That is `GET /projects/:id/jobs/:job_id/trace`. `read_code` + MR read/update/create 403 this endpoint. |
-
-A 403/404 on the trace is fail-closed: record `errorKind=GITLAB`, UI banner, **do not** post
-"job `test` failed" from names alone.
-
-Addon-only row in the README GitLab-setup table, same pattern as Approve for `autoApprove`.
-The live test PAT must be reissued (or given Job: Read) before live verification.
-
----
-
-## Assessment loop
-
-`PipelineAssessor`, next to `Replier`. Webhook returns `202` immediately; the model call runs
-on a background thread. Nothing that calls an LLM may block a GitLab delivery.
-
-New table `pipeline_assessments` — not `reviews`. A review is one commit; one SHA can fail CI
-several times after that review landed.
-
-- `project_id`, `mr_iid`, `pipeline_id` (unique), `sha`
-- `posted` (0/1), `reason`, `prompt`, `response`, `discussion_id`
-- `error` / `error_kind`, `created_at`
-
-`GitLabClient` gains job-trace fetch: last N chars of each failed job
-(`mrr.review.max-job-log-chars`, default 12_000), cap at 3 failed jobs.
-
-Context sent to the model:
-
-- Failed job names, stages, `failure_reason`, truncated traces
-- Open findings on that MR
-- Previous pipeline comments on that MR
-- Latest review summary, if any
-
-### The "necessary" gate
-
-Same asymmetry as thread resolution: **leaving it unsaid costs nothing; a useless comment
-costs a lot.**
-
-Structured verdict:
+`pipeline_assessments` = `memory_runs` columns plus `mr_iid`, `pipeline_id`, `sha`, `posted`,
+`reason`, `discussion_id`, `error_kind`. READY + `posted=0` is successful silence.
 
 ```json
 { "post": false, "reason": "already_covered" }
 ```
 
-or
+or `{ "post": true, "comment": "...", "reason": "new" }`. Anything else stays off the MR.
 
-```json
-{ "post": true, "comment": "...", "reason": "new" }
-```
-
-Anything other than an explicit `post: true` with a non-empty `comment` stays off the MR.
-Unparseable, refused, quota, GitLab down: fail closed, nothing posted.
-
-**Stay silent when** the failure is already an open finding thread, the log is empty or
-canceled-because-pipeline-failed, or the assessment would only repeat GitLab's own UI.
-
-**Comment when** the log shows a real defect the review missed, or an actionable
-CI / config / test-update the author would not get from the red X plus existing threads.
-
-Post as one unanchored discussion (logs are not a diff line).
+REST: `GET /api/projects/{id}/pipeline-assessments[/{runId}]`; MR cycle lists them. UI Trail
+on the run.
 
 ---
 
 ## Out of scope for v1
 
-- Congratulating on green
-- Auto-resolving the pipeline thread when a later pipeline succeeds
-- Answering replies on that thread
-- Per-job (`build`) events
-- Branch / tag pipelines with no merge request
+- Congratulating on green, auto-resolve, replies on the pipeline thread
+- Per-job events, branch pipelines with no MR
+- Tools on this agent
+- Deleting an addon row (disable is enough)
+- Probing whether GitLab actually ticked Pipeline events
 
 ---
 
 ## Implementation notes (when built)
 
-- `SchemaPatch` + `schema.sql` for `projects.addons` and `pipeline_assessments`
-- Tests: payload parsing, addon-off short-circuit, silence unless `post: true`, unique
-  `(project, pipeline_id)`, 403 on trace fails closed
-- README event table + GitLab-setup **Job: Read** row; CHANGELOG unreleased entry
-- `docs/PLAN.md` event-matrix row, marked built only after a live GitLab pipeline failure
+- Catalog class + `project_addons` + librarian migration + derived `librarianEnabled`
+- Addons UI: list on the project, detail page with live Job: Read probe
+- `PipelineAgent`, `skills/pipeline.md`, assessments table
+- Tests: add-enables, disable-stays, unknown name 400, probe 403, silence unless `post: true`
+- README GitLab-setup: point at the addon page rather than a static Job: Read footnote

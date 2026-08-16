@@ -29,7 +29,8 @@ import java.util.List;
 @Tag(name = "Agent context",
         description = """
                 Skills and documents the reviewer may use for a project. Enable or disable \
-                each one without a code change — the next review picks the set up.""")
+                each one without a code change — the next review picks the set up. A skill \
+                may also be scoped to source branches by glob or regex.""")
 public class AgentContextController {
 
     private final Store store;
@@ -53,7 +54,7 @@ public class AgentContextController {
                                   @RequestBody SkillUpsert request) {
         store.requireVisible(caller, id);
         return store.createSkill(id, request.name(), request.body(),
-                request.enabled() == null || request.enabled());
+                request.enabled() == null || request.enabled(), request.branchPattern());
     }
 
     @Operation(summary = "Update a skill",
@@ -66,7 +67,7 @@ public class AgentContextController {
         store.requireVisible(caller, id);
         store.findSkill(id, skillId).orElseThrow(() -> ApiException.notFound("skill"));
         return store.updateSkill(skillId, request.name(), request.body(),
-                request.enabled(), request.position());
+                request.enabled(), request.position(), request.branchPattern());
     }
 
     @Operation(summary = "Delete a skill")
@@ -118,11 +119,15 @@ public class AgentContextController {
         }
     }
 
-    @Schema(description = "Create or update a skill. On update, omitted fields are kept.")
+    @Schema(description = "Create or update a skill. On update, omitted fields are kept. "
+            + "Send an empty `branchPattern` to clear a branch restriction.")
     public record SkillUpsert(
             @Schema(example = "security") String name,
             String body,
             Boolean enabled,
+            @Schema(description = "Glob or Java regex against the MR source branch. Blank = "
+                    + "every branch. `hotfix` exact, `hotfix/*` prefix, `release-\\d+` regex.",
+                    example = "hotfix/*", nullable = true) String branchPattern,
             Integer position) {
     }
 

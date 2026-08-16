@@ -50,12 +50,19 @@ public record MergeRequestInfo(
         @Schema(description = "Label names as a JSON array.", example = "[\"backend\"]", nullable = true)
         String labels,
         @Schema(description = "Files in the diff. Filled in from the API.", nullable = true)
-        Integer filesChanged
+        Integer filesChanged,
+        @Schema(description = "Commits on the MR when this review ran.", nullable = true)
+        Integer commitCount,
+        @Schema(description = "Assignees, one `Name (@user)` per line.", nullable = true)
+        String assignees,
+        @Schema(description = "Reviewers GitLab lists on the MR, same shape as assignees.",
+                nullable = true)
+        String reviewers
 ) {
 
     public static MergeRequestInfo empty() {
         return new MergeRequestInfo(null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null, null);
     }
 
     /**
@@ -84,7 +91,22 @@ public record MergeRequestInfo(
                 commitAuthorEmail,
                 commitAt,
                 labels,
-                apiFilesChanged == null ? filesChanged : apiFilesChanged);
+                apiFilesChanged == null ? filesChanged : apiFilesChanged,
+                commitCount,
+                assignees,
+                reviewers);
+    }
+
+    public MergeRequestInfo withGitMeta(Integer apiCommitCount, String apiAssignees,
+                                        String apiReviewers) {
+        return new MergeRequestInfo(
+                title, url, state, action, draft, sourceBranch, targetBranch,
+                authorName, authorUsername, actorName, actorUsername,
+                commitMessage, commitAuthorName, commitAuthorEmail, commitAt, labels,
+                filesChanged,
+                apiCommitCount == null ? commitCount : apiCommitCount,
+                pick(apiAssignees, assignees),
+                pick(apiReviewers, reviewers));
     }
 
     private static String pick(String preferred, String fallback) {

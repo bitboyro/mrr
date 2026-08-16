@@ -8,9 +8,8 @@ import ro.bitboy.mrr.model.ReviewModel;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Models wrap JSON in prose, fence it, and sometimes ignore the schema outright. None of that
- * may lose a review that was already paid for, so the parser is forgiving and the caller falls
- * back to posting raw text when it returns null.
+ * Models wrap JSON in prose, fence it, and sometimes ignore the schema outright. The parser
+ * is forgiving; genuine failure returns null and the reviewer fail-closes.
  */
 class VerdictParserTest {
 
@@ -140,6 +139,23 @@ class VerdictParserTest {
 
         assertThat(v.findings()).singleElement()
                 .satisfies(f -> assertThat(f.title()).isEqualTo("First line."));
+    }
+
+    @Test
+    void readsMemoryChangeAndImpact() {
+        ReviewModel.Verdict v = parser.parse("""
+                {"summary":"s","findings":[],"prior":[],
+                 "memory":{"change":"Adds a gate.","impact":"Callers of Foo now must pass a token."}}
+                """);
+        assertThat(v.memory()).isNotNull();
+        assertThat(v.memory().change()).isEqualTo("Adds a gate.");
+        assertThat(v.memory().impact()).contains("Callers of Foo");
+    }
+
+    @Test
+    void memoryIsOptionalSoOldVerdictsStillParse() {
+        ReviewModel.Verdict v = parser.parse("{\"summary\":\"s\",\"findings\":[],\"prior\":[]}");
+        assertThat(v.memory()).isNull();
     }
 
     @Test
