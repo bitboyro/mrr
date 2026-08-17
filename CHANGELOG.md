@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Logs page columns.** An exception on a line (`ApiException: GitLab GET … 401`)
+  stretched the log grid, so every row's time/level/logger sat on the left of a
+  too-wide pane. Time/level/logger/message stay on a shrinkable grid; the thrown
+  text is outside that grid, wraps, and scrolls if it still overflows.
+
 - **HTTP DEBUG printed GitLab PATs.** ROOT DEBUG (Logs page) turned on Apache
   header logging, which dumps `PRIVATE-TOKEN` on every GitLab call. Header and
   wire loggers stay at WARN even when ROOT is DEBUG; the log ring redacts those
