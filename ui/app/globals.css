@@ -356,20 +356,25 @@ th { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text
   padding: 6px 0;
   height: calc(100vh - 300px);
   min-height: 280px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  min-width: 0;
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
 }
 .log-line {
-  display: grid;
-  grid-template-columns: 96px 56px 110px 1fr;
-  gap: 8px;
   margin: 0;
   padding: 3px 12px;
   border-left: 3px solid transparent;
-  white-space: pre-wrap;
-  word-break: break-word;
+  min-width: 0;
+  max-width: 100%;
+}
+.log-row {
+  display: grid;
+  grid-template-columns: 96px 56px 110px minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
 }
 .log-line:hover { background: #121212; }
 .log-line.info { border-left-color: var(--silver); }
@@ -384,15 +389,23 @@ th { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text
 .log-line.error .log-lvl { color: var(--danger); }
 .log-line.debug .log-lvl { color: var(--muted); }
 .log-line.trace .log-lvl { color: #6e6a62; }
-.log-logger { color: #d4c4a0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.log-msg { color: var(--fg); min-width: 0; }
+.log-logger { color: #d4c4a0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.log-msg { color: var(--fg); min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .log-tok-id { color: var(--gold); }
 .log-tok-num { color: var(--warn); }
 .log-tok-str { color: #d8d4cc; }
 .log-tok-key { color: var(--silver); }
 .log-tok-tool { color: #e0d0a8; }
 .log-tok-bad { color: var(--danger); font-weight: 600; }
-.log-thrown { color: var(--danger); grid-column: 2 / -1; margin: 0 0 4px; padding-left: 12px; }
+.log-thrown {
+  color: var(--danger);
+  min-width: 0;
+  margin: 2px 0 4px;
+  padding-left: 12px;
+  overflow-x: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .log-live {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--gold); box-shadow: 0 0 0 0 rgba(198, 163, 90, 0.7);
@@ -405,7 +418,7 @@ th { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text
   100% { box-shadow: 0 0 0 0 rgba(198, 163, 90, 0); }
 }
 @media (max-width: 720px) {
-  .log-line { grid-template-columns: 72px 48px 1fr; }
+  .log-row { grid-template-columns: 72px 48px minmax(0, 1fr); }
   .log-logger { grid-column: 1 / -1; }
 }
 @media (prefers-reduced-motion: reduce) {

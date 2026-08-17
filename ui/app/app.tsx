@@ -1837,11 +1837,13 @@ function Logs() {
         {shown.length === 0 && <p className="muted" style={{ padding: "8px 12px" }}>No lines yet. Trigger a review, or turn Debug on.</p>}
         {shown.map((l) => (
           <div key={l.seq} className={`log-line ${l.level.toLowerCase()}`}>
-            <span className="log-time">{fmt(l.at)}</span>
-            <span className="log-lvl">{l.level}</span>
-            <span className="log-logger" title={l.logger}>{shortLogger(l.logger)}</span>
-            <span className="log-msg">{highlightLog(l.message)}</span>
-            {l.thrown && <span className="log-thrown">{l.thrown}</span>}
+            <div className="log-row">
+              <span className="log-time">{fmt(l.at)}</span>
+              <span className="log-lvl">{l.level}</span>
+              <span className="log-logger" title={l.logger}>{shortLogger(l.logger)}</span>
+              <span className="log-msg">{highlightLog(l.message)}</span>
+            </div>
+            {l.thrown && <div className="log-thrown">{l.thrown}</div>}
           </div>
         ))}
       </div>
