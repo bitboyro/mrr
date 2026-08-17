@@ -38,8 +38,9 @@ mrr:
   scan-interval-ms: ${MRR_SCAN_INTERVAL_MS:120000}
   review:
     workers: ${MRR_REVIEW_WORKERS:2}
-    # Diffs larger than this are truncated before the model sees them.
+    # Per-turn diff window. Larger MRs are reviewed in slices, then merged.
     max-diff-chars: ${MRR_MAX_DIFF_CHARS:200000}
+    max-diff-chunks: ${MRR_MAX_DIFF_CHUNKS:8}
     timeout-seconds: ${MRR_REVIEW_TIMEOUT:300}
     # Files fetched via read_file are truncated at this many characters.
     max-file-chars: ${MRR_MAX_FILE_CHARS:80000}

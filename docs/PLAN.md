@@ -8,6 +8,19 @@ out of scope for now.
 
 ---
 
+## Priority
+
+### Diff windows (max context) ✅
+
+`mrr.review.max-diff-chars` is the **per-turn window**, not a silent chop of the MR.
+If the incoming diff is larger, pack whole files (then `@@` hunks) into at most
+`max-diff-chunks` slices. Each slice is its own review (tools still allowed). A
+synthesis turn merges the slice JSON into one coherent verdict — summary, all
+findings, every `prior` id, `memory`. Fail closed if that merge cannot parse.
+Replies still see one truncated blob.
+
+---
+
 ## Context
 
 GitLab Free has webhooks and the full REST API but no AI review — that's Duo, a paid add-on.

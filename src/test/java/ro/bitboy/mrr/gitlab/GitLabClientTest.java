@@ -100,6 +100,8 @@ class GitLabClientTest {
 
         assertThat(diff.truncated()).isTrue();
         assertThat(diff.text()).endsWith("[diff truncated by mrr]");
+        assertThat(diff.patches()).hasSize(1);
+        assertThat(diff.patches().getFirst().diff()).hasSize(5_000);
     }
 
     /**

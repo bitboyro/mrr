@@ -284,7 +284,8 @@ that a review was wrong.
 | `MRR_DB_PATH` | `/data/mrr.db` | SQLite file |
 | `MRR_ROOT_TOKEN_FILE` | `/data/root-token.txt` | Where the bootstrap token is written |
 | `MRR_REVIEW_WORKERS` | `2` | Concurrent reviews |
-| `MRR_MAX_DIFF_CHARS` | `200000` | Diffs longer than this are truncated |
+| `MRR_MAX_DIFF_CHARS` | `200000` | Per-turn diff window; larger MRs are sliced |
+| `MRR_MAX_DIFF_CHUNKS` | `8` | Cap on review slices for one MR |
 | `MRR_MAX_FILE_CHARS` | `80000` | Files fetched via `read_file` are truncated |
 | `MRR_MEMORY_ROOT` | `/data/memory` | Per-project OKF files |
 | `MRR_SCAN_INTERVAL_MS` | `120000` | GitLab catch-up for missed commits and merged/closed MRs |

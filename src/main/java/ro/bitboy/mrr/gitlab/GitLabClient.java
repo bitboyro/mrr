@@ -38,23 +38,36 @@ public class GitLabClient {
         this.http = builder.build();
     }
 
-    /** The unified diff for an MR, plus its paths, assembled into one reviewable blob. */
+    /** The unified diff for an MR. Never truncates — the reviewer packs slices itself. */
+    public Diff changes(Project project, long mrIid) {
+        return changes(project, mrIid, Integer.MAX_VALUE);
+    }
+
+    /**
+     * The unified diff for an MR, plus its paths.
+     *
+     * <p>{@code maxChars} caps {@link Diff#text()} for callers that still want one blob
+     * (replies). {@link Diff#patches()} is the full per-file list either way.
+     */
     public Diff changes(Project project, long mrIid, int maxChars) {
         JsonNode body = exchange(project, HttpMethod.GET, "/merge_requests/" + mrIid + "/changes", null);
 
-        StringBuilder diff = new StringBuilder();
+        StringBuilder assembled = new StringBuilder();
         List<String> files = new ArrayList<>();
+        List<FilePatch> patches = new ArrayList<>();
         for (JsonNode change : body.path("changes")) {
             String path = change.path("new_path").asText(change.path("old_path").asText());
+            String patch = change.path("diff").asText();
             files.add(path);
-            diff.append("--- ").append(path).append('\n')
-                    .append(change.path("diff").asText()).append('\n');
+            FilePatch file = new FilePatch(path, patch);
+            patches.add(file);
+            assembled.append(file.asText());
         }
 
-        boolean truncated = diff.length() > maxChars;
+        boolean truncated = maxChars < Integer.MAX_VALUE && assembled.length() > maxChars;
         String text = truncated
-                ? diff.substring(0, maxChars) + "\n\n[diff truncated by mrr]"
-                : diff.toString();
+                ? assembled.substring(0, maxChars) + "\n\n[diff truncated by mrr]"
+                : assembled.toString();
 
         // The MR author, which the webhook gives only as a numeric author_id.
         JsonNode author = body.path("author");
@@ -67,7 +80,7 @@ public class GitLabClient {
                 body.path("web_url").asText(null),
                 author.path("name").asText(null),
                 author.path("username").asText(null),
-                files, text, truncated);
+                files, text, truncated, patches);
     }
 
     public List<MergeRequest> openMergeRequests(Project project) {
@@ -565,9 +578,69 @@ public class GitLabClient {
         return base + "/api/v4/projects/" + id;
     }
 
+    /** One file's patch as GitLab returned it. */
+    public record FilePatch(String path, String diff) {
+
+        public String asText() {
+            String body = diff == null ? "" : diff;
+            if (!body.isEmpty() && !body.endsWith("\n")) {
+                body += "\n";
+            }
+            return "--- " + (path == null ? "" : path) + "\n" + body;
+        }
+
+        /**
+         * Rebuilds patches from an assembled blob ({@code --- path} separators). Used when
+         * a test constructs a {@link Diff} without an explicit patch list.
+         */
+        public static List<FilePatch> parseAssembled(List<String> files, String text) {
+            if (text == null || text.isBlank()) {
+                return List.of();
+            }
+            String[] parts = text.split("(?m)^--- ", -1);
+            List<FilePatch> out = new ArrayList<>();
+            int i = 0;
+            for (String part : parts) {
+                if (part.isBlank()) {
+                    continue;
+                }
+                int nl = part.indexOf('\n');
+                String path = nl < 0 ? part.trim() : part.substring(0, nl).trim();
+                String body = nl < 0 ? "" : part.substring(nl + 1);
+                if (path.isEmpty() && files != null && i < files.size()) {
+                    path = files.get(i);
+                }
+                out.add(new FilePatch(path, body));
+                i++;
+            }
+            return List.copyOf(out);
+        }
+    }
+
     public record Diff(String title, String description, String sourceBranch, String targetBranch,
                        String webUrl, String authorName, String authorUsername,
-                       List<String> files, String text, boolean truncated) {
+                       List<String> files, String text, boolean truncated,
+                       List<FilePatch> patches) {
+
+        public Diff {
+            files = files == null ? List.of() : List.copyOf(files);
+            patches = patches == null ? List.of() : List.copyOf(patches);
+            if (patches.isEmpty() && text != null && !text.isBlank()) {
+                patches = FilePatch.parseAssembled(files, text);
+            }
+        }
+
+        public Diff(String title, String description, String sourceBranch, String targetBranch,
+                    String webUrl, String authorName, String authorUsername,
+                    List<String> files, String text, boolean truncated) {
+            this(title, description, sourceBranch, targetBranch, webUrl, authorName, authorUsername,
+                    files, text, truncated, List.of());
+        }
+
+        public Diff forSlice(List<String> sliceFiles, String sliceText, boolean clipped) {
+            return new Diff(title, description, sourceBranch, targetBranch, webUrl,
+                    authorName, authorUsername, sliceFiles, sliceText, clipped, patches);
+        }
     }
 
     public record MergeRequest(long iid, String title, String state, String sha, String webUrl,

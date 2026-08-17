@@ -105,6 +105,21 @@ final class Agent {
         return new Run(result, new AgentTrace(used, cap, events));
     }
 
+    static AgentTrace concat(List<Run> runs) {
+        List<Event> events = new ArrayList<>();
+        int turns = 0;
+        int maxTurns = 0;
+        for (Run run : runs) {
+            if (run == null || run.trace() == null) {
+                continue;
+            }
+            events.addAll(run.trace().events());
+            turns += run.turns();
+            maxTurns += run.trace().maxTurns();
+        }
+        return new AgentTrace(turns, Math.max(1, maxTurns), events);
+    }
+
     private static String describeTools(Result result) {
         if (result.toolCalls().isEmpty()) {
             return "";
