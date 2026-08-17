@@ -42,6 +42,15 @@ SQLite, the root token, and memory files. Swap the image/tag as you like; keep t
 directory. Do not `docker compose down -v` if you still use a named volume from an
 older compose file.
 
+The image starts as root only long enough to `chown` `/data` to uid **10001**, then
+drops to `mrr`. Compose often creates `./data` as `root:root`, which the non-root
+process cannot write. If you run with `--user 10001` (or a securityContext that
+forbids root), prepare the host dir first:
+
+```bash
+mkdir -p data && sudo chown -R 10001:10001 data
+```
+
 ### Move an existing database (laptop → Hetzner)
 
 Stop mrr first so SQLite is idle. Copy these three, not the log files:

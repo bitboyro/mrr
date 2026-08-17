@@ -249,6 +249,27 @@ class ReviewerTest {
         assertThat(gitlab.posted).isEmpty();
     }
 
+    @Test
+    void aGitlabOutageWhilePostingFindingsFailsClosed() {
+        gitlab.postFailure = new ro.bitboy.mrr.web.ApiException(
+                org.springframework.http.HttpStatus.BAD_GATEWAY, "gitlab_error",
+                "GitLab POST /discussions failed with 502");
+        model = new RecordingModel(List.of(
+                Result.of("{\"summary\":\"bug\",\"findings\":[{\"file\":\"A.java\",\"line\":1,"
+                        + "\"severity\":\"major\",\"title\":\"leak\",\"body\":\"close it\"}],"
+                        + "\"prior\":[]}", "end_turn")));
+        String id = claim("sha-post-fail");
+
+        reviewer().run(id);
+
+        Review review = store.findReview(id).orElseThrow();
+        assertThat(review.state()).isEqualTo(Review.State.FAILED);
+        assertThat(review.errorKind()).isEqualTo(FailureKind.GITLAB);
+        assertThat(review.response()).contains("leak");
+        assertThat(store.findingsOfMr(project.id(), 7)).isEmpty();
+        assertThat(gitlab.posted).isEmpty();
+    }
+
     private String claim(String sha) {
         return store.claimReview(project.id(), 7, sha, "{}", TestStores.mrInfo()).review().id();
     }

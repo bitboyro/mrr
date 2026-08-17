@@ -216,9 +216,8 @@ public class Reviewer {
         // failure to post must not throw its result away.
         store.saveResponse(reviewId, result.markdown());
 
-        // The MR may have merged or closed while the model was thinking. Posting now would put
-        // a review on a merge request nobody is looking at any more.
         if (store.stateOf(reviewId) == Review.State.CANCELLED) {
+            // The MR may have merged or closed while the model was thinking.
             log.info("review {} finished after its MR closed — not posting", reviewId);
             return;
         }
@@ -233,11 +232,16 @@ public class Reviewer {
         }
 
         List<Finding> opened;
-        synchronized (lockFor(project.id(), review.mrIid())) {
-            resolveAddressed(project, review, verdict, priorOpen);
-            opened = openThreads(project, review, verdict);
-            postOrEditSummary(project, review, Prompts.summaryComment(verdict, opened, priorOpen));
-            finishCleanOrNeedsWork(project, review);
+        try {
+            synchronized (lockFor(project.id(), review.mrIid())) {
+                resolveAddressed(project, review, verdict, priorOpen);
+                opened = openThreads(project, review, verdict);
+                postOrEditSummary(project, review, Prompts.summaryComment(verdict, opened, priorOpen));
+                finishCleanOrNeedsWork(project, review);
+            }
+        } catch (Exception e) {
+            failClosed(reviewId, kindOf(e), safeMessage(e));
+            return;
         }
         writeMrCard(project, review, verdict, opened, verdict.summary());
 
@@ -323,29 +327,25 @@ public class Reviewer {
         List<Finding> opened = new ArrayList<>();
 
         for (ReviewModel.NewFinding found : verdict.findings()) {
-            try {
-                String body = Prompts.findingComment(found);
+            String body = Prompts.findingComment(found);
 
-                Optional<GitLabClient.Discussion> inline = Optional.empty();
-                if (refs.isPresent() && found.file() != null && found.line() != null) {
-                    inline = gitlab.postInlineDiscussion(project, review.mrIid(), refs.get(),
-                            found.file(), found.line(), body);
-                }
-
-                // A position GitLab rejects — an unchanged line, a path the model invented — is a
-                // routine outcome. The finding still gets a thread, just not an anchored one.
-                GitLabClient.Discussion discussion = inline.orElseGet(
-                        () -> gitlab.postDiscussion(project, review.mrIid(), body));
-
-                opened.add(store.createFinding(new Finding(
-                        Ids.newId(), review.id(), project.id(), review.mrIid(),
-                        found.file(), found.line(), found.severity(), found.title(), body,
-                        discussion.discussionId(), discussion.noteId(), inline.isPresent(),
-                        Finding.State.OPEN, Instant.now(), null)));
-            } catch (Exception e) {
-                log.warn("could not open thread for {} {}:{} — {}",
-                        review.id(), found.file(), found.line(), e.getMessage());
+            Optional<GitLabClient.Discussion> inline = Optional.empty();
+            if (refs.isPresent() && found.file() != null && found.line() != null) {
+                // Position reject is routine (unchanged line, invented path) and returns empty.
+                // A GitLab outage or 5xx still throws — that must fail the review, not drop
+                // the finding.
+                inline = gitlab.postInlineDiscussion(project, review.mrIid(), refs.get(),
+                        found.file(), found.line(), body);
             }
+
+            GitLabClient.Discussion discussion = inline.orElseGet(
+                    () -> gitlab.postDiscussion(project, review.mrIid(), body));
+
+            opened.add(store.createFinding(new Finding(
+                    Ids.newId(), review.id(), project.id(), review.mrIid(),
+                    found.file(), found.line(), found.severity(), found.title(), body,
+                    discussion.discussionId(), discussion.noteId(), inline.isPresent(),
+                    Finding.State.OPEN, Instant.now(), null)));
         }
         return opened;
     }

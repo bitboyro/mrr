@@ -99,6 +99,20 @@ class ReplierTest {
         assertThat(model.turns).hasSize(1);
     }
 
+    @Test
+    void aFailedGitlabPostDoesNotRecordTheSourceNote() {
+        gitlab.replyFailure = new RuntimeException("GitLab 502");
+        model = new RecordingModel(List.of(Result.of("Because the caller ignores the return.", "end_turn")));
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                replier().reply(project.id(), 7, "disc-1", "note-99", "nobody reads it", "ada"))
+                .hasMessageContaining("502");
+
+        assertThat(store.listReplies(project.id(), 7)).isEmpty();
+        assertThat(store.findReplyBySourceNote(project.id(), "disc-1", "note-99")).isEmpty();
+        assertThat(gitlab.replies).isEmpty();
+    }
+
     private Replier replier() {
         return new Replier(store, gitlab, TestStores.properties(), p -> model, workers);
     }

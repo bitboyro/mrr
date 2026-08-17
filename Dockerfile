@@ -31,8 +31,13 @@ RUN useradd --system --uid 10001 --create-home mrr \
 VOLUME /data
 
 COPY --from=build /src/target/mrr.jar /app/mrr.jar
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod 755 /app/docker-entrypoint.sh
 
-USER mrr
+# Start as root so a fresh bind-mount at /data can be chowned to uid 10001,
+# then the entrypoint drops to mrr. Override USER in compose if you already
+# chown the host dir and want to start unprivileged.
+USER root
 EXPOSE 8130
 ENV MRR_DB_PATH=/data/mrr.db \
     MRR_ROOT_TOKEN_FILE=/data/root-token.txt \
@@ -41,4 +46,4 @@ ENV MRR_DB_PATH=/data/mrr.db \
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s \
   CMD ["sh", "-c", "wget -qO- http://localhost:8130/health || exit 1"]
 
-ENTRYPOINT ["java", "-jar", "/app/mrr.jar"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

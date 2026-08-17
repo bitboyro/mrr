@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Live timeout now reaches GitLab and OpenAI.** Configure `timeoutSeconds` is read per
+  HTTP request instead of once when the RestClient bean is built. Anthropic already rebuilt
+  the client; GitLab and OpenAI-compat did not.
+- **Finding threads no longer vanish on GitLab errors.** A failed overview or finding post
+  fails the review (retry via re-run). Inline position reject still falls back to an
+  unanchored thread.
+- **Reply webhook retry.** `sourceNoteId` is stored only after GitLab accepts the reply, so
+  a 502 cannot mark the note answered forever.
+- **Bind-mount `/data`.** The image entrypoint chowns `/data` to uid 10001 before dropping
+  privileges, so a Compose-created `./data` as root is writable.
+
 - **Logs page columns.** An exception on a line (`ApiException: GitLab GET … 401`)
   stretched the log grid, so every row's time/level/logger sat on the left of a
   too-wide pane. Time/level/logger/message stay on a shrinkable grid; the thrown

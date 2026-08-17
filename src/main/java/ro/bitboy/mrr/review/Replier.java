@@ -168,12 +168,14 @@ public class Replier {
         }
 
         String posted = answer.markdown().trim();
+        // GitLab first. Recording sourceNoteId before the post would make a failed delivery
+        // look answered forever — the next webhook skips the note.
+        gitlab.replyToDiscussion(project, mrIid, discussionId, posted);
         Reply reply = store.createReply(new Reply(
                 Ids.newId(), projectId, mrIid, discussionId,
                 finding == null ? null : finding.id(), sourceNoteId,
                 SYSTEM + "\n\n---\n\n" + user, posted, run.trace(), Instant.now()));
         store.saveReplyUsage(reply.id(), answer.usage());
-        gitlab.replyToDiscussion(project, mrIid, discussionId, posted);
         store.clearProjectError(project.id());
         log.info("replied on thread {} of {}!{}", discussionId, project.name(), mrIid);
     }

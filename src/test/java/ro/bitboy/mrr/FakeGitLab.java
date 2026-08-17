@@ -25,6 +25,9 @@ public final class FakeGitLab extends GitLabClient {
     public final List<String> resolved = new ArrayList<>();
     public final List<DiscussionView> discussions = new ArrayList<>();
 
+    public RuntimeException postFailure;
+    public RuntimeException replyFailure;
+
     public FakeGitLab() {
         super(RestClient.builder());
     }
@@ -46,6 +49,9 @@ public final class FakeGitLab extends GitLabClient {
 
     @Override
     public Discussion postDiscussion(Project project, long mrIid, String markdown) {
+        if (postFailure != null) {
+            throw postFailure;
+        }
         posted.add(markdown);
         discussions.add(new DiscussionView(
                 nextDiscussion.discussionId(), nextDiscussion.noteId(), markdown,
@@ -68,6 +74,9 @@ public final class FakeGitLab extends GitLabClient {
 
     @Override
     public void replyToDiscussion(Project project, long mrIid, String discussionId, String markdown) {
+        if (replyFailure != null) {
+            throw replyFailure;
+        }
         replies.add(discussionId + ":" + markdown);
     }
 
