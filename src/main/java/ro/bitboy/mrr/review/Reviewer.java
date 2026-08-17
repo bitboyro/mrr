@@ -15,6 +15,7 @@ import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.gitlab.GitLabClient;
 import ro.bitboy.mrr.model.AgentDocument;
 import ro.bitboy.mrr.model.AgentSkill;
+import ro.bitboy.mrr.model.AgentTrace;
 import ro.bitboy.mrr.model.AnthropicModel;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.Finding;
@@ -129,8 +130,7 @@ public class Reviewer {
 
         log.info("review {} processing {}!{} — fetching diff",
                 reviewId, project.name(), review.mrIid());
-        GitLabClient.Diff diff = gitlab.changes(project, review.mrIid(),
-                properties.review().maxDiffChars());
+        GitLabClient.Diff diff = gitlab.changes(project, review.mrIid());
 
         var info = review.mr().enrichedWith(
                 diff.title(), diff.webUrl(), diff.authorName(), diff.authorUsername(),
@@ -157,25 +157,18 @@ public class Reviewer {
         String userContext = store.findMrStatus(project.id(), review.mrIid())
                 .map(MrStatus::userContext).orElse(null);
         String system = Prompts.system(skills, project.skill(), !tools.isEmpty(), sourceBranch);
-        String user = Prompts.user(diff, priorOpen, documents,
-                properties.review().maxDocumentChars(), userContext);
 
-        store.markProcessing(reviewId, system + "\n\n---\n\n" + user);
-        log.info("review {} calling {} / {} — {} file(s), {} chars{}, max_turns={}, branch={}",
-                reviewId, project.provider(), project.model(),
-                diff.files().size(), diff.text().length(),
-                diff.truncated() ? ", truncated" : "",
-                project.agentMaxTurns(), sourceBranch);
+        int window = properties.review().maxDiffChars();
+        List<DiffWindows.Slice> slices = DiffWindows.pack(
+                diff.patches(), window, properties.review().maxDiffChunks());
         long started = System.currentTimeMillis();
-        Agent.Run run = agent.run(
-                models.apply(project), system, user, tools, project.agentMaxTurns(),
-                call -> executeTool(call, project, reviewId, review.headSha()),
-                "review " + reviewId, properties.review().maxTraceChars());
-        ReviewModel.Result result = run.result();
-        store.saveTrace(reviewId, run.trace());
-        log.info("review {} model returned in {}ms turns={}/{} stop_reason={}",
+        Ask ask = askModel(review, project, diff, priorOpen, documents, userContext,
+                system, tools, slices, window);
+        ReviewModel.Result result = ask.result();
+        store.saveTrace(reviewId, ask.trace());
+        log.info("review {} model returned in {}ms turns={} slices={} stop_reason={}",
                 reviewId, System.currentTimeMillis() - started,
-                run.turns(), project.agentMaxTurns(), result.stopReason());
+                ask.turns(), ask.slices(), result.stopReason());
 
         if (result.refused()) {
             failClosed(reviewId, FailureKind.REFUSAL,
@@ -201,7 +194,7 @@ public class Reviewer {
         }
 
         ReviewModel.Verdict verdict = parser.parse(result.markdown());
-        if (verdict == null) {
+        if (verdict == null || verdict.summary() == null || verdict.summary().isBlank()) {
             // Paid-for output is already on reviews.response. Posting it as prose would look
             // READY and leave the next commit with nothing to resolve.
             failClosed(reviewId, FailureKind.PROVIDER, FailureKind.PROVIDER.headline()
@@ -510,6 +503,72 @@ public class Reviewer {
         } catch (Exception e) {
             log.warn("review {} could not write MR memory: {}", review.id(), e.getMessage());
         }
+    }
+
+    private record Ask(ReviewModel.Result result, AgentTrace trace, int turns, int slices) {
+    }
+
+    private Ask askModel(Review review, Project project, GitLabClient.Diff diff,
+                         List<Finding> priorOpen, List<AgentDocument> documents,
+                         String userContext, String system,
+                         List<ReviewModel.ToolSpec> tools,
+                         List<DiffWindows.Slice> slices, int window) {
+        String reviewId = review.id();
+        int maxDoc = properties.review().maxDocumentChars();
+        int maxTrace = properties.review().maxTraceChars();
+        ReviewModel model = models.apply(project);
+
+        if (slices.size() <= 1) {
+            DiffWindows.Slice slice = slices.getFirst();
+            GitLabClient.Diff view = diff.forSlice(slice.paths(), slice.text(), slice.clipped());
+            String user = Prompts.user(view, priorOpen, documents, maxDoc, userContext);
+            store.markProcessing(reviewId, system + "\n\n---\n\n" + user);
+            log.info("review {} calling {} / {} — {} file(s), {} chars{}, max_turns={}, branch={}",
+                    reviewId, project.provider(), project.model(),
+                    view.files().size(), view.text().length(),
+                    view.truncated() ? ", truncated" : "",
+                    project.agentMaxTurns(), diff.sourceBranch());
+            Agent.Run run = agent.run(model, system, user, tools, project.agentMaxTurns(),
+                    call -> executeTool(call, project, reviewId, review.headSha()),
+                    "review " + reviewId, maxTrace);
+            return new Ask(run.result(), run.trace(), run.turns(), 1);
+        }
+
+        String first = Prompts.userSlice(diff, slices.getFirst(), documents, maxDoc, userContext);
+        store.markProcessing(reviewId,
+                "Reviewed in " + slices.size() + " slices (window=" + window
+                        + " chars). First slice follows; later slices and the merge are on reviews.trace.\n\n"
+                        + system + "\n\n---\n\n" + first);
+        log.info("review {} calling {} / {} — {} file(s) in {} slices, window={}, max_turns={}, branch={}",
+                reviewId, project.provider(), project.model(),
+                diff.files().size(), slices.size(), window,
+                project.agentMaxTurns(), diff.sourceBranch());
+
+        List<Agent.Run> runs = new ArrayList<>();
+        List<String> partials = new ArrayList<>();
+        for (DiffWindows.Slice slice : slices) {
+            String user = Prompts.userSlice(diff, slice, documents, maxDoc, userContext);
+            Agent.Run sliceRun = agent.run(model, system, user, tools, project.agentMaxTurns(),
+                    call -> executeTool(call, project, reviewId, review.headSha()),
+                    "review " + reviewId + " slice " + slice.index() + "/" + slice.of(),
+                    maxTrace);
+            runs.add(sliceRun);
+            if (sliceRun.result().refused()
+                    || sliceRun.result().markdown() == null
+                    || sliceRun.result().markdown().isBlank()) {
+                AgentTrace trace = Agent.concat(runs);
+                return new Ask(sliceRun.result(), trace, trace.turns(), slices.size());
+            }
+            partials.add(sliceRun.result().markdown());
+        }
+        int partialCap = Math.max(2_000, window / (slices.size() + 1));
+        String synthUser = Prompts.synthesize(diff, priorOpen, documents, maxDoc, userContext,
+                slices, partials, partialCap);
+        Agent.Run synth = agent.run(model, system, synthUser, List.of(), 1,
+                call -> "unused", "review " + reviewId + " merge", maxTrace);
+        runs.add(synth);
+        AgentTrace trace = Agent.concat(runs);
+        return new Ask(synth.result(), trace, trace.turns(), slices.size());
     }
 
     private String executeTool(ReviewModel.ToolCall call, Project project, String reviewId,

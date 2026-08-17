@@ -27,7 +27,7 @@ public final class TestStores {
 
     public static MrrProperties properties() {
         return new MrrProperties("/tmp/root-token.txt", "http://localhost:8130", "/tmp/memory",
-                new MrrProperties.Review(1, 20_000, 30, 8_000, 8_000, 8_000, 2, 8_000));
+                new MrrProperties.Review(1, 20_000, 30, 8_000, 8_000, 8_000, 2, 8_000, 8));
     }
 
     public static Project project(String ownerId, String name, String webhookSecret) {

@@ -72,6 +72,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Diff windows.** `max-diff-chars` is the per-turn window, not a silent chop of
+  the MR. Oversized diffs are packed into at most `max-diff-chunks` slices (whole
+  files, then hunks); a merge turn produces one coherent verdict. Replies still
+  see one truncated blob.
+
 - **MR git facts.** The cycle page shows source → target (GitLab tree links), commit
   count, head SHA, files changed, and the people on the review (author, who pushed,
   commit author, assignees, reviewers). Existing MRs backfill from GitLab the first

@@ -99,6 +99,18 @@ class PromptsTest {
     }
 
     @Test
+    void aSlicePromptOmitsPriorAndNamesTheWindow() {
+        GitLabClient.Diff diff = new GitLabClient.Diff(
+                "Fix npe", "desc", "fix", "main", "https://gl/mr/1",
+                "Ada", "ada", List.of("A.java", "B.java"),
+                "--- A.java\n+a\n--- B.java\n+b\n", false);
+        DiffWindows.Slice slice = new DiffWindows.Slice(1, 2, List.of("A.java"), "--- A.java\n+a\n", false);
+        String user = Prompts.userSlice(diff, slice, List.of(), 20_000, null);
+        assertThat(user).contains("slice 1 of 2", "ONLY the files", "--- A.java");
+        assertThat(user).doesNotContain("--- B.java", "Previously reported");
+    }
+
+    @Test
     void overviewPrefixIsHowGitLabLeftoversAreRecognised() {
         assertThat(Prompts.isOverview("### mrr review\n\nNo findings.\n")).isTrue();
         assertThat(Prompts.isOverview("  ### mrr review")).isTrue();

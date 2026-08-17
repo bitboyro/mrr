@@ -180,12 +180,85 @@ class ReviewerTest {
         assertThat(store.findReview(id).orElseThrow().state()).isEqualTo(Review.State.READY);
     }
 
+    @Test
+    void aDiffLargerThanTheWindowIsReviewedInSlicesThenMerged() {
+        String a = "--- A.java\n+" + "a".repeat(200) + "\n";
+        String b = "--- B.java\n+" + "b".repeat(200) + "\n";
+        gitlab.diff = new ro.bitboy.mrr.gitlab.GitLabClient.Diff(
+                "title", "desc", "fix/x", "main", "https://gitlab/mr/7",
+                "Ada", "ada", List.of("A.java", "B.java"), a + b, false);
+        model = new RecordingModel(List.of(
+                Result.of("{\"summary\":\"A ok\",\"findings\":[],\"prior\":[]}", "end_turn"),
+                Result.of("{\"summary\":\"B ok\",\"findings\":[{\"file\":\"B.java\",\"line\":1,"
+                        + "\"severity\":\"minor\",\"title\":\"noise\",\"body\":\"n\"}],\"prior\":[]}",
+                        "end_turn"),
+                Result.of("{\"summary\":\"Both files reviewed\",\"findings\":[{\"file\":\"B.java\","
+                        + "\"line\":1,\"severity\":\"minor\",\"title\":\"noise\",\"body\":\"n\"}],"
+                        + "\"prior\":[]}", "end_turn")));
+        String id = claim("sha-slices");
+
+        reviewer(new ro.bitboy.mrr.MrrProperties("/tmp/root-token.txt", "http://localhost:8130",
+                "/tmp/memory", new ro.bitboy.mrr.MrrProperties.Review(
+                        1, 256, 30, 8_000, 8_000, 8_000, 2, 8_000, 8))).run(id);
+
+        assertThat(model.turns).hasSize(3);
+        assertThat(model.turns.get(0).getFirst().text()).contains("slice 1 of 2", "A.java")
+                .doesNotContain("--- B.java");
+        assertThat(model.turns.get(1).getFirst().text()).contains("slice 2 of 2", "B.java")
+                .doesNotContain("--- A.java");
+        assertThat(model.turns.get(2).getFirst().text()).contains("Merge the partial", "A ok", "B ok");
+        Review review = store.findReview(id).orElseThrow();
+        assertThat(review.state()).isEqualTo(Review.State.READY);
+        assertThat(review.prompt()).contains("Reviewed in 2 slices");
+        assertThat(gitlab.posted).anyMatch(s -> s.contains("Both files reviewed"));
+    }
+
+    @Test
+    void aMalformedSynthesisFailsClosed() {
+        String a = "--- A.java\n+" + "a".repeat(200) + "\n";
+        String b = "--- B.java\n+" + "b".repeat(200) + "\n";
+        gitlab.diff = new ro.bitboy.mrr.gitlab.GitLabClient.Diff(
+                "title", "desc", "fix/x", "main", "https://gitlab/mr/7",
+                "Ada", "ada", List.of("A.java", "B.java"), a + b, false);
+        model = new RecordingModel(List.of(
+                Result.of("{\"summary\":\"A ok\",\"findings\":[],\"prior\":[]}", "end_turn"),
+                Result.of("{\"summary\":\"B ok\",\"findings\":[],\"prior\":[]}", "end_turn"),
+                Result.of("not json", "end_turn")));
+        String id = claim("sha-bad-merge");
+
+        reviewer(new ro.bitboy.mrr.MrrProperties("/tmp/root-token.txt", "http://localhost:8130",
+                "/tmp/memory", new ro.bitboy.mrr.MrrProperties.Review(
+                        1, 256, 30, 8_000, 8_000, 8_000, 2, 8_000, 8))).run(id);
+
+        Review review = store.findReview(id).orElseThrow();
+        assertThat(review.state()).isEqualTo(Review.State.FAILED);
+        assertThat(review.response()).isEqualTo("not json");
+        assertThat(gitlab.posted).isEmpty();
+    }
+
+    @Test
+    void emptyJsonWithoutASummaryFailsClosed() {
+        model = new RecordingModel(List.of(Result.of("{}", "end_turn")));
+        String id = claim("sha-empty-json");
+
+        reviewer().run(id);
+
+        Review review = store.findReview(id).orElseThrow();
+        assertThat(review.state()).isEqualTo(Review.State.FAILED);
+        assertThat(review.response()).isEqualTo("{}");
+        assertThat(gitlab.posted).isEmpty();
+    }
+
     private String claim(String sha) {
         return store.claimReview(project.id(), 7, sha, "{}", TestStores.mrInfo()).review().id();
     }
 
     private Reviewer reviewer() {
-        return new Reviewer(store, gitlab, TestStores.properties(), new ObjectMapper(),
+        return reviewer(TestStores.properties());
+    }
+
+    private Reviewer reviewer(ro.bitboy.mrr.MrrProperties properties) {
+        return new Reviewer(store, gitlab, properties, new ObjectMapper(),
                 memory, p -> model, workers);
     }
 }

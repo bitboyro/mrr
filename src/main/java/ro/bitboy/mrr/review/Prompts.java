@@ -220,6 +220,91 @@ final class Prompts {
         return sb.toString();
     }
 
+    /**
+     * One window of a large MR. No {@code prior} — the merge turn judges those once,
+     * with every slice in hand.
+     */
+    static String userSlice(GitLabClient.Diff diff, DiffWindows.Slice slice,
+                            List<AgentDocument> documents, int maxDocumentChars,
+                            String userContext) {
+        GitLabClient.Diff view = diff.forSlice(slice.paths(), slice.text(), slice.clipped());
+        return "This is slice " + slice.index() + " of " + slice.of()
+                + ". Review ONLY the files in this slice. Return the JSON object for this "
+                + "slice. Set `prior` to []. Findings must be about these files only. "
+                + "`summary` may cover only this slice — a later merge turn writes the "
+                + "merge-request-wide summary, judges previously reported findings, and "
+                + "writes `memory`.\n\n"
+                + user(view, List.of(), documents, maxDocumentChars, userContext);
+    }
+
+    /**
+     * Merge N slice verdicts into one MR-wide JSON object. The diffs themselves are
+     * omitted so this prompt stays inside the same window.
+     */
+    static String synthesize(GitLabClient.Diff diff, List<Finding> priorOpen,
+                             List<AgentDocument> documents, int maxDocumentChars,
+                             String userContext, List<DiffWindows.Slice> slices,
+                             List<String> partials, int maxPartialChars) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Merge the partial reviews below into ONE JSON verdict for the whole ");
+        sb.append("merge request. Deduplicate findings. `file` must match a path in the ");
+        sb.append("merge request. Write one coherent `summary` and `memory` covering the ");
+        sb.append("entire change. `prior` must contain exactly one entry per ");
+        sb.append("previously-reported finding listed, using its id verbatim.\n\n");
+        sb.append("Merge request: ").append(diff.title()).append('\n');
+        sb.append("Branch: ").append(diff.sourceBranch())
+                .append(" → ").append(diff.targetBranch()).append('\n');
+        if (diff.description() != null && !diff.description().isBlank()) {
+            sb.append("\nDescription:\n").append(diff.description()).append('\n');
+        }
+        if (userContext != null && !userContext.isBlank()) {
+            sb.append("\n## Merge request context\n\n");
+            sb.append(truncate(userContext, maxDocumentChars)).append("\n");
+        }
+        List<AgentDocument> enabled = documents == null ? List.of()
+                : documents.stream().filter(AgentDocument::enabled).toList();
+        if (!enabled.isEmpty()) {
+            sb.append("\n## Project documents\n\n");
+            for (AgentDocument doc : enabled) {
+                sb.append("### ").append(doc.name()).append("\n\n");
+                sb.append(truncate(doc.body() == null ? "" : doc.body(), maxDocumentChars));
+                sb.append("\n\n");
+            }
+        }
+        if (!priorOpen.isEmpty()) {
+            sb.append("""
+
+                    ## Previously reported, still open
+
+                    Judge each against the partial reviews and return a verdict for every \
+                    one of them in `prior`. Mark `addressed` only where the new code \
+                    genuinely fixes it.
+
+                    """);
+            for (Finding f : priorOpen) {
+                sb.append("- id: ").append(f.id()).append('\n')
+                        .append("  severity: ").append(f.severity()).append('\n');
+                if (f.filePath() != null) {
+                    sb.append("  location: ").append(f.filePath());
+                    if (f.line() != null) sb.append(':').append(f.line());
+                    sb.append('\n');
+                }
+                sb.append("  finding: ").append(f.title()).append('\n');
+            }
+        }
+        sb.append("\nFiles changed (").append(diff.files().size()).append("):\n");
+        diff.files().forEach(f -> sb.append("- ").append(f).append('\n'));
+        int n = Math.min(slices.size(), partials.size());
+        for (int i = 0; i < n; i++) {
+            DiffWindows.Slice slice = slices.get(i);
+            sb.append("\n## Slice ").append(slice.index()).append(" of ").append(slice.of());
+            sb.append(" (").append(String.join(", ", slice.paths())).append(")\n\n");
+            sb.append(truncate(partials.get(i) == null ? "" : partials.get(i), maxPartialChars));
+            sb.append("\n");
+        }
+        return sb.toString();
+    }
+
     /** One finding, as it appears in its own thread on the MR. */
     static String findingComment(ReviewModel.NewFinding finding) {
         StringBuilder sb = new StringBuilder();

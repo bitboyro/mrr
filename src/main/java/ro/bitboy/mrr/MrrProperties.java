@@ -15,13 +15,13 @@ public record MrrProperties(
             memoryRoot = "/data/memory";
         }
         if (review == null) {
-            review = new Review(2, 200_000, 300, 80_000, 20_000, 8_000, 6, 8_000);
+            review = new Review(2, 200_000, 300, 80_000, 20_000, 8_000, 6, 8_000, 8);
         }
     }
 
     public record Review(int workers, int maxDiffChars, int timeoutSeconds, int maxFileChars,
                          int maxDocumentChars, int maxTraceChars, int librarianMaxTurns,
-                         int maxMemoryChars) {
+                         int maxMemoryChars, int maxDiffChunks) {
         public Review {
             if (workers <= 0) workers = 2;
             if (maxDiffChars <= 0) maxDiffChars = 200_000;
@@ -31,6 +31,7 @@ public record MrrProperties(
             if (maxTraceChars <= 0) maxTraceChars = 8_000;
             if (librarianMaxTurns <= 0) librarianMaxTurns = 6;
             if (maxMemoryChars <= 0) maxMemoryChars = 8_000;
+            if (maxDiffChunks <= 0) maxDiffChunks = 8;
         }
     }
 }
