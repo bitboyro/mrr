@@ -28,8 +28,15 @@ public record AgentSkill(
                 + "branch. `hotfix` is exact, `hotfix/*` is a prefix, `release-\\d+` is a regex.",
                 example = "hotfix/*", nullable = true) String branchPattern,
         int position,
-        Instant createdAt
+        Instant createdAt,
+        @Schema(description = "Library row this attachment points at.", nullable = true)
+        String libraryId
 ) {
+
+    public AgentSkill(String id, String projectId, String name, String body, boolean enabled,
+                      String branchPattern, int position, Instant createdAt) {
+        this(id, projectId, name, body, enabled, branchPattern, position, createdAt, null);
+    }
 
     static final int MAX_PATTERN_CHARS = 200;
 

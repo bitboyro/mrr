@@ -10,12 +10,17 @@ import ro.bitboy.mrr.model.AgentSkill;
 import ro.bitboy.mrr.model.AgentTrace;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.Finding;
+import ro.bitboy.mrr.model.GitlabInstance;
+import ro.bitboy.mrr.model.InstanceStats;
+import ro.bitboy.mrr.model.LibrarySkill;
+import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.MemoryStatus;
 import ro.bitboy.mrr.model.MergeRequestInfo;
 import ro.bitboy.mrr.model.MrStatus;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Reply;
 import ro.bitboy.mrr.model.Review;
+import ro.bitboy.mrr.model.ReviewModel;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.User;
 import ro.bitboy.mrr.web.ApiException;
@@ -23,8 +28,11 @@ import ro.bitboy.mrr.web.ApiException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -387,6 +395,24 @@ public class Store {
                 .params(turns, trace == null ? null : trace.toJson(), reviewId).update();
     }
 
+    public void saveReviewUsage(String reviewId, ReviewModel.Usage usage) {
+        ReviewModel.Usage u = usage == null ? ReviewModel.Usage.NONE : usage;
+        db.sql("""
+                UPDATE reviews SET input_tokens = ?, output_tokens = ?, cache_read_tokens = ?
+                WHERE id = ?
+                """)
+                .params(u.input(), u.output(), u.cacheRead(), reviewId).update();
+    }
+
+    public void saveReplyUsage(String replyId, ReviewModel.Usage usage) {
+        ReviewModel.Usage u = usage == null ? ReviewModel.Usage.NONE : usage;
+        db.sql("""
+                UPDATE replies SET input_tokens = ?, output_tokens = ?, cache_read_tokens = ?
+                WHERE id = ?
+                """)
+                .params(u.input(), u.output(), u.cacheRead(), replyId).update();
+    }
+
     /**
      * Persists the model's output the moment it exists, before we try to deliver it. The
      * model call is the expensive, non-repeatable part; a failure to post must not throw its
@@ -546,16 +572,30 @@ public class Store {
 
     public Reply createReply(Reply reply) {
         db.sql("""
-                INSERT INTO replies (id, project_id, mr_iid, discussion_id, finding_id,
+                INSERT INTO replies (id, project_id, mr_iid, discussion_id, finding_id, source_note_id,
                                      prompt, response, trace, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)
                 .params(reply.id(), reply.projectId(), reply.mrIid(), reply.discussionId(),
-                        reply.findingId(), reply.prompt(), reply.response(),
+                        reply.findingId(), reply.sourceNoteId(), reply.prompt(), reply.response(),
                         reply.trace() == null ? null : reply.trace().toJson(),
                         reply.createdAt().toString())
                 .update();
         return reply;
+    }
+
+    public Optional<Reply> findReplyBySourceNote(String projectId, String discussionId,
+                                                String sourceNoteId) {
+        if (sourceNoteId == null || sourceNoteId.isBlank()) {
+            return Optional.empty();
+        }
+        return db.sql("""
+                SELECT * FROM replies
+                WHERE project_id = ? AND discussion_id = ? AND source_note_id = ?
+                LIMIT 1
+                """)
+                .params(projectId, discussionId, sourceNoteId)
+                .query(Store::toReply).optional();
     }
 
     public Optional<Reply> findReply(String id) {
@@ -741,10 +781,324 @@ public class Store {
         return "%" + escaped + "%";
     }
 
+    // ── instance settings / stats ────────────────────────────────────────────────────
+
+    public Map<String, String> listSettings() {
+        Map<String, String> out = new LinkedHashMap<>();
+        db.sql("SELECT key, value FROM settings").query((rs, n) -> {
+            out.put(rs.getString("key"), rs.getString("value"));
+            return 0;
+        }).list();
+        return out;
+    }
+
+    public void putSetting(String key, String value) {
+        db.sql("""
+                INSERT INTO settings (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """).params(key, value).update();
+    }
+
+    public void clearSettings() {
+        db.sql("DELETE FROM settings").update();
+    }
+
+    // ── GitLab / LLM catalogs ────────────────────────────────────────────────────────
+
+    public List<GitlabInstance> listGitlabInstances() {
+        return db.sql("SELECT * FROM gitlab_instances ORDER BY name")
+                .query(Store::toGitlabInstance).list();
+    }
+
+    public Optional<GitlabInstance> findGitlabInstance(String id) {
+        return db.sql("SELECT * FROM gitlab_instances WHERE id = ?")
+                .param(id).query(Store::toGitlabInstance).optional();
+    }
+
+    public GitlabInstance createGitlabInstance(String name, String url) {
+        String trimmed = requireName(name);
+        String host = requireHttpUrl(url, "url");
+        GitlabInstance row = new GitlabInstance(Ids.newId(), trimmed, host, Instant.now());
+        try {
+            db.sql("INSERT INTO gitlab_instances (id, name, url, created_at) VALUES (?, ?, ?, ?)")
+                    .params(row.id(), row.name(), row.url(), row.createdAt().toString()).update();
+        } catch (DataAccessException e) {
+            throw ApiException.conflict("a GitLab instance named '" + trimmed + "' already exists");
+        }
+        return row;
+    }
+
+    public GitlabInstance updateGitlabInstance(String id, String name, String url) {
+        GitlabInstance current = findGitlabInstance(id)
+                .orElseThrow(() -> ApiException.notFound("gitlab instance"));
+        String nextName = name == null || name.isBlank() ? current.name() : requireName(name);
+        String nextUrl = url == null || url.isBlank() ? current.url() : requireHttpUrl(url, "url");
+        try {
+            db.sql("UPDATE gitlab_instances SET name = ?, url = ? WHERE id = ?")
+                    .params(nextName, nextUrl, id).update();
+        } catch (DataAccessException e) {
+            throw ApiException.conflict("a GitLab instance named '" + nextName + "' already exists");
+        }
+        return findGitlabInstance(id).orElseThrow();
+    }
+
+    public void deleteGitlabInstance(String id) {
+        if (db.sql("DELETE FROM gitlab_instances WHERE id = ?").param(id).update() == 0) {
+            throw ApiException.notFound("gitlab instance");
+        }
+    }
+
+    public List<LlmProvider> listLlmProviders() {
+        return db.sql("SELECT * FROM llm_providers ORDER BY name")
+                .query(Store::toLlmProvider).list();
+    }
+
+    public Optional<LlmProvider> findLlmProvider(String id) {
+        return db.sql("SELECT * FROM llm_providers WHERE id = ?")
+                .param(id).query(Store::toLlmProvider).optional();
+    }
+
+    public LlmProvider createLlmProvider(String name, Project.Provider provider, String model,
+                                         String modelBaseUrl) {
+        String trimmed = requireName(name);
+        Project.Provider kind = requireProvider(provider);
+        String modelId = requireModel(model);
+        String base = optionalHttpUrl(modelBaseUrl, "modelBaseUrl");
+        LlmProvider row = new LlmProvider(Ids.newId(), trimmed, kind, modelId, base, Instant.now());
+        try {
+            db.sql("""
+                    INSERT INTO llm_providers (id, name, provider, model, model_base_url, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """).params(row.id(), row.name(), row.provider().name(), row.model(),
+                    row.modelBaseUrl(), row.createdAt().toString()).update();
+        } catch (DataAccessException e) {
+            throw ApiException.conflict("an LLM provider named '" + trimmed + "' already exists");
+        }
+        return row;
+    }
+
+    public LlmProvider updateLlmProvider(String id, String name, Project.Provider provider,
+                                         String model, String modelBaseUrl) {
+        LlmProvider current = findLlmProvider(id)
+                .orElseThrow(() -> ApiException.notFound("llm provider"));
+        String nextName = name == null || name.isBlank() ? current.name() : requireName(name);
+        Project.Provider nextKind = provider == null ? current.provider() : requireProvider(provider);
+        String nextModel = model == null || model.isBlank() ? current.model() : requireModel(model);
+        String nextBase = modelBaseUrl == null ? current.modelBaseUrl()
+                : optionalHttpUrl(modelBaseUrl, "modelBaseUrl");
+        try {
+            db.sql("""
+                    UPDATE llm_providers SET name = ?, provider = ?, model = ?, model_base_url = ?
+                    WHERE id = ?
+                    """).params(nextName, nextKind.name(), nextModel, nextBase, id).update();
+        } catch (DataAccessException e) {
+            throw ApiException.conflict("an LLM provider named '" + nextName + "' already exists");
+        }
+        return findLlmProvider(id).orElseThrow();
+    }
+
+    public void deleteLlmProvider(String id) {
+        if (db.sql("DELETE FROM llm_providers WHERE id = ?").param(id).update() == 0) {
+            throw ApiException.notFound("llm provider");
+        }
+    }
+
+    public InstanceStats instanceStats(long inFlight) {
+        long mrsProcessed = db.sql("""
+                SELECT COUNT(*) FROM (SELECT DISTINCT project_id, mr_iid FROM reviews)
+                """).query(Long.class).optional().orElse(0L);
+        long reviewsTotal = db.sql("SELECT COUNT(*) FROM reviews").query(Long.class).optional().orElse(0L);
+        Map<String, Long> byState = new LinkedHashMap<>();
+        db.sql("SELECT state, COUNT(*) AS n FROM reviews GROUP BY state").query((rs, n) -> {
+            byState.put(rs.getString("state"), rs.getLong("n"));
+            return 0;
+        }).list();
+        long pendingOrProcessing = db.sql("""
+                SELECT COUNT(*) FROM reviews WHERE state IN (?, ?)
+                """).params(Review.State.PENDING.name(), Review.State.PROCESSING.name())
+                .query(Long.class).optional().orElse(0L);
+        InstanceStats.TokenTotals tokens = tokenTotals(null);
+        InstanceStats.TokenTotals last7 = tokenTotals(Instant.now().minus(7, ChronoUnit.DAYS).toString());
+        long findingsOpen = db.sql("SELECT COUNT(*) FROM findings WHERE state = ?")
+                .param(Finding.State.OPEN.name()).query(Long.class).optional().orElse(0L);
+        long findingsAddressed = db.sql("SELECT COUNT(*) FROM findings WHERE state = ?")
+                .param(Finding.State.ADDRESSED.name()).query(Long.class).optional().orElse(0L);
+        Double meanReady = meanReadyDurationSeconds();
+        Map<String, Long> failures = new LinkedHashMap<>();
+        db.sql("""
+                SELECT COALESCE(error_kind, 'UNKNOWN') AS kind, COUNT(*) AS n
+                FROM reviews WHERE state = ? GROUP BY error_kind
+                """).param(Review.State.FAILED.name()).query((rs, n) -> {
+            failures.put(rs.getString("kind"), rs.getLong("n"));
+            return 0;
+        }).list();
+        List<InstanceStats.ProjectRow> projects = db.sql("""
+                SELECT p.id, p.name,
+                       COUNT(DISTINCT r.mr_iid) AS mrs,
+                       COUNT(r.id) AS reviews,
+                       COALESCE(SUM(r.input_tokens), 0) AS input_tokens,
+                       COALESCE(SUM(r.output_tokens), 0) AS output_tokens
+                FROM projects p
+                LEFT JOIN reviews r ON r.project_id = p.id
+                GROUP BY p.id
+                ORDER BY reviews DESC, p.name
+                """).query((rs, n) -> new InstanceStats.ProjectRow(
+                rs.getString("id"), rs.getString("name"), rs.getLong("mrs"),
+                rs.getLong("reviews"), rs.getLong("input_tokens"), rs.getLong("output_tokens")))
+                .list();
+        return new InstanceStats(mrsProcessed, reviewsTotal, byState, inFlight, pendingOrProcessing,
+                tokens, last7, findingsOpen, findingsAddressed, meanReady, failures, projects);
+    }
+
+    private InstanceStats.TokenTotals tokenTotals(String sinceIso) {
+        String where = sinceIso == null ? "" : " WHERE created_at >= ?";
+        String sql = """
+                SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                       COALESCE(SUM(cache_read_tokens), 0)
+                FROM (
+                    SELECT input_tokens, output_tokens, cache_read_tokens, created_at FROM reviews
+                    UNION ALL
+                    SELECT input_tokens, output_tokens, cache_read_tokens, created_at FROM replies
+                    UNION ALL
+                    SELECT input_tokens, output_tokens, cache_read_tokens, created_at FROM memory_runs
+                )
+                """ + where;
+        var spec = sinceIso == null ? db.sql(sql) : db.sql(sql).param(sinceIso);
+        return spec.query((rs, n) -> new InstanceStats.TokenTotals(
+                rs.getLong(1), rs.getLong(2), rs.getLong(3))).optional()
+                .orElse(new InstanceStats.TokenTotals(0, 0, 0));
+    }
+
+    private Double meanReadyDurationSeconds() {
+        List<String[]> rows = db.sql("""
+                SELECT created_at, finished_at FROM reviews
+                WHERE state = ? AND finished_at IS NOT NULL AND created_at IS NOT NULL
+                """).param(Review.State.READY.name())
+                .query((rs, n) -> new String[]{rs.getString(1), rs.getString(2)}).list();
+        if (rows.isEmpty()) {
+            return null;
+        }
+        double sum = 0;
+        int n = 0;
+        for (String[] row : rows) {
+            try {
+                Instant start = Instant.parse(row[0]);
+                Instant end = Instant.parse(row[1]);
+                if (!end.isBefore(start)) {
+                    sum += (end.toEpochMilli() - start.toEpochMilli()) / 1000.0;
+                    n++;
+                }
+            } catch (RuntimeException ignored) {
+            }
+        }
+        return n == 0 ? null : sum / n;
+    }
+
+    // ── skill library ────────────────────────────────────────────────────────────────
+
+    private static final String SKILL_SELECT = """
+            SELECT s.id, s.project_id, s.name, COALESCE(l.body, s.body) AS body,
+                   s.enabled, s.branch_pattern, s.position, s.created_at, s.library_id
+            FROM agent_skills s
+            LEFT JOIN skill_library l ON l.id = s.library_id
+            """;
+
+    public List<LibrarySkill> listLibrary(Principal caller) {
+        if (caller.isAdmin()) {
+            return db.sql("""
+                    SELECT l.*, u.name AS owner_name
+                    FROM skill_library l JOIN users u ON u.id = l.owner_id
+                    ORDER BY u.name, l.name
+                    """).query(Store::toLibrarySkill).list();
+        }
+        return db.sql("""
+                SELECT l.*, u.name AS owner_name
+                FROM skill_library l JOIN users u ON u.id = l.owner_id
+                WHERE l.owner_id = ?
+                ORDER BY l.name
+                """).param(caller.userId()).query(Store::toLibrarySkill).list();
+    }
+
+    public Optional<LibrarySkill> findLibrary(String id) {
+        return db.sql("""
+                SELECT l.*, u.name AS owner_name
+                FROM skill_library l JOIN users u ON u.id = l.owner_id
+                WHERE l.id = ?
+                """).param(id).query(Store::toLibrarySkill).optional();
+    }
+
+    public LibrarySkill requireLibraryVisible(Principal caller, String id) {
+        LibrarySkill skill = findLibrary(id).orElseThrow(() -> ApiException.notFound("skill"));
+        if (!caller.isAdmin() && !caller.userId().equals(skill.ownerId())) {
+            throw ApiException.forbidden("That skill is not in your library.");
+        }
+        return skill;
+    }
+
+    public LibrarySkill createLibrary(String ownerId, String name, String body) {
+        String trimmed = requireName(name);
+        Instant now = Instant.now();
+        LibrarySkill skill = new LibrarySkill(Ids.newId(), ownerId, null, trimmed,
+                body == null ? "" : body, now, now);
+        try {
+            db.sql("""
+                    INSERT INTO skill_library (id, owner_id, name, body, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """).params(skill.id(), ownerId, skill.name(), skill.body(),
+                    now.toString(), now.toString()).update();
+        } catch (DataAccessException e) {
+            throw ApiException.conflict("a library skill named '" + trimmed + "' already exists");
+        }
+        return findLibrary(skill.id()).orElse(skill);
+    }
+
+    public LibrarySkill updateLibrary(String id, String name, String body) {
+        LibrarySkill current = findLibrary(id).orElseThrow(() -> ApiException.notFound("skill"));
+        String nextName = name == null || name.isBlank() ? current.name() : requireName(name);
+        String nextBody = body == null ? current.body() : body;
+        Instant now = Instant.now();
+        try {
+            db.sql("UPDATE skill_library SET name = ?, body = ?, updated_at = ? WHERE id = ?")
+                    .params(nextName, nextBody, now.toString(), id).update();
+        } catch (DataAccessException e) {
+            throw ApiException.conflict("a library skill named '" + nextName + "' already exists");
+        }
+        db.sql("UPDATE agent_skills SET name = ?, body = ? WHERE library_id = ?")
+                .params(nextName, nextBody, id).update();
+        return findLibrary(id).orElseThrow();
+    }
+
+    public void deleteLibrary(String id) {
+        long attached = db.sql("SELECT COUNT(*) FROM agent_skills WHERE library_id = ?")
+                .param(id).query(Long.class).optional().orElse(0L);
+        if (attached > 0) {
+            throw ApiException.conflict("Detach this skill from " + attached
+                    + " project(s) before deleting it from the library.");
+        }
+        if (db.sql("DELETE FROM skill_library WHERE id = ?").param(id).update() == 0) {
+            throw ApiException.notFound("skill");
+        }
+    }
+
+    private String upsertLibrary(String ownerId, String name, String body) {
+        Optional<LibrarySkill> existing = db.sql("""
+                SELECT l.*, u.name AS owner_name
+                FROM skill_library l JOIN users u ON u.id = l.owner_id
+                WHERE l.owner_id = ? AND l.name = ?
+                """).params(ownerId, name).query(Store::toLibrarySkill).optional();
+        if (existing.isPresent()) {
+            if (body != null) {
+                updateLibrary(existing.get().id(), existing.get().name(), body);
+            }
+            return existing.get().id();
+        }
+        return createLibrary(ownerId, name, body).id();
+    }
+
     // ── agent skills / documents ─────────────────────────────────────────────────────
 
     public List<AgentSkill> listSkills(String projectId) {
-        return db.sql("SELECT * FROM agent_skills WHERE project_id = ? ORDER BY position, name")
+        return db.sql(SKILL_SELECT + " WHERE s.project_id = ? ORDER BY s.position, s.name")
                 .param(projectId).query(Store::toSkill).list();
     }
 
@@ -754,24 +1108,36 @@ public class Store {
 
     public AgentSkill createSkill(String projectId, String name, String body, boolean enabled,
                                   String branchPattern) {
+        Project project = findProject(projectId).orElseThrow(() -> ApiException.notFound("project"));
         String trimmed = requireName(name);
+        if (db.sql("SELECT 1 FROM agent_skills WHERE project_id = ? AND name = ? LIMIT 1")
+                .params(projectId, trimmed).query(Integer.class).optional().isPresent()) {
+            throw ApiException.conflict("a skill named '" + trimmed + "' already exists");
+        }
+        String libraryId = upsertLibrary(project.ownerId(), trimmed, body == null ? "" : body);
+        return attachSkill(projectId, libraryId, enabled, branchPattern);
+    }
+
+    public AgentSkill attachSkill(String projectId, String libraryId, boolean enabled,
+                                  String branchPattern) {
+        LibrarySkill lib = findLibrary(libraryId).orElseThrow(() -> ApiException.notFound("skill"));
         int position = db.sql("SELECT COALESCE(MAX(position), -1) + 1 FROM agent_skills WHERE project_id = ?")
                 .param(projectId).query(Integer.class).optional().orElse(0);
-        AgentSkill skill = new AgentSkill(Ids.newId(), projectId, trimmed,
-                body == null ? "" : body, enabled, AgentSkill.validatePattern(branchPattern),
-                position, Instant.now());
+        AgentSkill skill = new AgentSkill(Ids.newId(), projectId, lib.name(),
+                lib.body(), enabled, AgentSkill.validatePattern(branchPattern),
+                position, Instant.now(), lib.id());
         try {
             db.sql("""
-                    INSERT INTO agent_skills (id, project_id, name, body, enabled, branch_pattern,
-                                              position, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO agent_skills (id, project_id, library_id, name, body, enabled,
+                                              branch_pattern, position, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """)
-                    .params(skill.id(), projectId, skill.name(), skill.body(),
+                    .params(skill.id(), projectId, lib.id(), skill.name(), skill.body(),
                             skill.enabled() ? 1 : 0, skill.branchPattern(),
                             skill.position(), skill.createdAt().toString())
                     .update();
         } catch (DataAccessException e) {
-            throw ApiException.conflict("a skill named '" + trimmed + "' already exists");
+            throw ApiException.conflict("a skill named '" + lib.name() + "' already exists");
         }
         return skill;
     }
@@ -795,13 +1161,13 @@ public class Store {
     }
 
     public Optional<AgentSkill> findSkill(String projectId, String skillId) {
-        return db.sql("SELECT * FROM agent_skills WHERE project_id = ? AND id = ?")
+        return db.sql(SKILL_SELECT + " WHERE s.project_id = ? AND s.id = ?")
                 .params(projectId, skillId).query(Store::toSkill).optional();
     }
 
     public AgentSkill updateSkill(String skillId, String name, String body, Boolean enabled,
                                   Integer position, String branchPattern) {
-        AgentSkill current = db.sql("SELECT * FROM agent_skills WHERE id = ?").param(skillId)
+        AgentSkill current = db.sql(SKILL_SELECT + " WHERE s.id = ?").param(skillId)
                 .query(Store::toSkill).optional()
                 .orElseThrow(() -> ApiException.notFound("skill"));
         String nextName = name == null || name.isBlank() ? current.name() : requireName(name);
@@ -811,6 +1177,9 @@ public class Store {
         String nextPattern = branchPattern == null
                 ? current.branchPattern()
                 : AgentSkill.validatePattern(branchPattern);
+        if (current.libraryId() != null && (name != null || body != null)) {
+            updateLibrary(current.libraryId(), nextName, nextBody);
+        }
         try {
             db.sql("""
                     UPDATE agent_skills SET name = ?, body = ?, enabled = ?, branch_pattern = ?,
@@ -823,7 +1192,7 @@ public class Store {
             throw ApiException.conflict("a skill named '" + nextName + "' already exists");
         }
         return new AgentSkill(current.id(), current.projectId(), nextName, nextBody,
-                nextEnabled, nextPattern, nextPosition, current.createdAt());
+                nextEnabled, nextPattern, nextPosition, current.createdAt(), current.libraryId());
     }
 
     public boolean deleteSkill(String projectId, String skillId) {
@@ -893,6 +1262,39 @@ public class Store {
         return trimmed;
     }
 
+    private static String requireModel(String model) {
+        if (model == null || model.isBlank()) {
+            throw ApiException.badRequest("model is required");
+        }
+        return model.trim();
+    }
+
+    private static Project.Provider requireProvider(Project.Provider provider) {
+        if (provider == null) {
+            throw ApiException.badRequest("provider must be ANTHROPIC or OPENAI_COMPAT");
+        }
+        return provider;
+    }
+
+    private static String requireHttpUrl(String url, String field) {
+        if (url == null || url.isBlank()) {
+            throw ApiException.badRequest(field + " is required");
+        }
+        String trimmed = url.trim().replaceAll("/+$", "");
+        String lower = trimmed.toLowerCase();
+        if (!lower.startsWith("http://") && !lower.startsWith("https://")) {
+            throw ApiException.badRequest(field + " must start with http:// or https://");
+        }
+        return trimmed;
+    }
+
+    private static String optionalHttpUrl(String url, String field) {
+        if (url == null || url.isBlank()) {
+            return null;
+        }
+        return requireHttpUrl(url, field);
+    }
+
     // ── row mapping ──────────────────────────────────────────────────────────────────
 
     private static User toUser(ResultSet rs, int n) throws SQLException {
@@ -959,6 +1361,7 @@ public class Store {
         return new Reply(
                 rs.getString("id"), rs.getString("project_id"), rs.getLong("mr_iid"),
                 rs.getString("discussion_id"), rs.getString("finding_id"),
+                rs.getString("source_note_id"),
                 rs.getString("prompt"), rs.getString("response"),
                 AgentTrace.parse(rs.getString("trace")),
                 instant(rs.getString("created_at")));
@@ -978,7 +1381,28 @@ public class Store {
         return new AgentSkill(
                 rs.getString("id"), rs.getString("project_id"), rs.getString("name"),
                 rs.getString("body"), rs.getInt("enabled") == 1, rs.getString("branch_pattern"),
-                rs.getInt("position"), instant(rs.getString("created_at")));
+                rs.getInt("position"), instant(rs.getString("created_at")),
+                rs.getString("library_id"));
+    }
+
+    private static LibrarySkill toLibrarySkill(ResultSet rs, int n) throws SQLException {
+        return new LibrarySkill(
+                rs.getString("id"), rs.getString("owner_id"), rs.getString("owner_name"),
+                rs.getString("name"), rs.getString("body"),
+                instant(rs.getString("created_at")), instant(rs.getString("updated_at")));
+    }
+
+    private static GitlabInstance toGitlabInstance(ResultSet rs, int n) throws SQLException {
+        return new GitlabInstance(rs.getString("id"), rs.getString("name"),
+                rs.getString("url"), instant(rs.getString("created_at")));
+    }
+
+    private static LlmProvider toLlmProvider(ResultSet rs, int n) throws SQLException {
+        return new LlmProvider(
+                rs.getString("id"), rs.getString("name"),
+                Project.Provider.valueOf(rs.getString("provider")),
+                rs.getString("model"), rs.getString("model_base_url"),
+                instant(rs.getString("created_at")));
     }
 
     private static AgentDocument toDocument(ResultSet rs, int n) throws SQLException {

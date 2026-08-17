@@ -17,6 +17,9 @@ public record Reply(
         long mrIid,
         String discussionId,
         @Schema(nullable = true) String findingId,
+        @Schema(description = "GitLab note id this reply answered. Used to ignore webhook redeliveries.",
+                nullable = true)
+        String sourceNoteId,
         @Schema(description = "What was sent to the model. Null in list responses.", nullable = true)
         String prompt,
         @Schema(description = "The answer that was posted.", nullable = true) String response,
@@ -25,7 +28,7 @@ public record Reply(
 ) {
 
     public Reply summary() {
-        return new Reply(id, projectId, mrIid, discussionId, findingId,
+        return new Reply(id, projectId, mrIid, discussionId, findingId, sourceNoteId,
                 null, response, null, createdAt);
     }
 }

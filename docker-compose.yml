@@ -14,7 +14,6 @@ services:
       MRR_MAX_DIFF_CHARS: ${MRR_MAX_DIFF_CHARS:-200000}
       MRR_MAX_TRACE_CHARS: ${MRR_MAX_TRACE_CHARS:-8000}
     volumes:
-      - mrr-data:/data
-
-volumes:
-  mrr-data:
+      # Host dir, not a named volume, so you can scp mrr.db in and swap image tags
+      # without losing it. Container user is uid 10001.
+      - ${MRR_DATA:-./data}:/data

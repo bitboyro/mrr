@@ -24,7 +24,7 @@ RUN mvn -B -DskipTests package
 FROM eclipse-temurin:21-jre-noble AS runtime
 WORKDIR /app
 
-# /data holds the SQLite database, the root token, and nothing else. Mount it.
+# /data holds SQLite, the root token, and memory files. Bind-mount it on the host.
 RUN useradd --system --uid 10001 --create-home mrr \
  && mkdir -p /data \
  && chown -R mrr:mrr /data /app
@@ -35,7 +35,8 @@ COPY --from=build /src/target/mrr.jar /app/mrr.jar
 USER mrr
 EXPOSE 8130
 ENV MRR_DB_PATH=/data/mrr.db \
-    MRR_ROOT_TOKEN_FILE=/data/root-token.txt
+    MRR_ROOT_TOKEN_FILE=/data/root-token.txt \
+    MRR_MEMORY_ROOT=/data/memory
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s \
   CMD ["sh", "-c", "wget -qO- http://localhost:8130/health || exit 1"]

@@ -124,6 +124,35 @@ class OpenAiModelTest {
         assertThat(body.has("reasoning_effort")).isFalse();
     }
 
+    @Test
+    void chatCompletionsParsesUsageIncludingCachedTokens() {
+        openai.enqueue(json("""
+                {"choices":[{"finish_reason":"stop","message":{"content":"ok"}}],
+                 "usage":{"prompt_tokens":11,"completion_tokens":4,
+                          "prompt_tokens_details":{"cached_tokens":3}}}
+                """));
+
+        Result result = model.completeChat("sys", List.of(Turn.user("diff")), List.of());
+        assertThat(result.usage().input()).isEqualTo(11);
+        assertThat(result.usage().output()).isEqualTo(4);
+        assertThat(result.usage().cacheRead()).isEqualTo(3);
+    }
+
+    @Test
+    void responsesParsesInputAndOutputTokens() {
+        openai.enqueue(json("""
+                {"status":"completed","output":[
+                  {"type":"message","content":[{"type":"output_text","text":"{}"}]}
+                ],"usage":{"input_tokens":20,"output_tokens":5,
+                           "input_tokens_details":{"cached_tokens":8}}}
+                """));
+
+        Result result = model.completeResponses("sys", List.of(Turn.user("diff")), List.of());
+        assertThat(result.usage().input()).isEqualTo(20);
+        assertThat(result.usage().output()).isEqualTo(5);
+        assertThat(result.usage().cacheRead()).isEqualTo(8);
+    }
+
     private static MockResponse json(String body) {
         return new MockResponse()
                 .setHeader("Content-Type", "application/json")

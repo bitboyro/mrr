@@ -37,6 +37,28 @@ On first boot `mrr` creates an admin user and prints its token:
 It's shown **once** and also written to `/data/root-token.txt`. The database stores only its
 hash — if you lose it, you add another admin by hand or start over.
 
+Durable state is the host directory mounted at `/data` (`MRR_DATA`, default `./data`):
+SQLite, the root token, and memory files. Swap the image/tag as you like; keep that
+directory. Do not `docker compose down -v` if you still use a named volume from an
+older compose file.
+
+### Move an existing database (laptop → Hetzner)
+
+Stop mrr first so SQLite is idle. Copy these three, not the log files:
+
+```bash
+# on the VM: directory Compose/scaffold mounts at /data
+sudo mkdir -p /var/lib/mrr
+scp data/mrr.db data/root-token.txt user@host:/tmp/
+scp -r data/memory user@host:/tmp/memory
+ssh user@host 'sudo mv /tmp/mrr.db /tmp/root-token.txt /var/lib/mrr/ && sudo mv /tmp/memory /var/lib/mrr/memory && sudo chown -R 10001:10001 /var/lib/mrr'
+```
+
+Then start the container with `MRR_DATA=/var/lib/mrr` and `MRR_BASE_URL=https://your.public.host`.
+Edit the GitLab webhook URL to that host — the project id and secret stay the same. The
+SQLite file holds PATs and model keys; copy it over SSH, not a public channel.
+
+
 ## Register a project
 
 ```bash
@@ -66,13 +88,25 @@ The response carries `webhookUrl` and `webhookSecret` — **the only time the se
 readable.** Paste both in GitLab (*Settings → Webhooks*); see [GitLab setup](#gitlab-setup).
 
 Open an MR. The review lands as a comment. Or open **http://localhost:8130**, paste the
-token, and register the project in the UI.
+token, and register the project in the UI. Admins get **Configure** (`/configure`) for live
+instance settings (including the public base URL used for webhook URLs), GitLab instances
+and LLM providers (no secrets — those stay per project), stats, and the skill library.
+**Admin** is still users and tokens.
+
+`GET /api/instance` (any authenticated user) returns the live `baseUrl` and
+`webhookUrlTemplate`. `POST /api/projects` can send `gitlabInstanceId` / `llmProviderId`
+instead of typing the GitLab URL and model fields; the project stores its own copy, so
+later catalog edits do not rewrite existing projects. The PAT and model key are still
+required on create.
 
 | Field | Notes |
 |---|---|
+| `gitlabInstanceId` | Optional. Copy URL from a Configure catalog row; `gitlabUrl` is then ignored |
+| `gitlabUrl` | Required on create unless `gitlabInstanceId` is set |
 | `gitlabProjectId` | Numeric id or `group/project` path — both work |
 | `gitlabToken` | GitLab PAT for this project. See [GitLab setup](#gitlab-setup) |
-| `provider` | `ANTHROPIC` or `OPENAI_COMPAT` |
+| `llmProviderId` | Optional. Copy provider, model, and `modelBaseUrl` from a Configure catalog row |
+| `provider` | `ANTHROPIC` or `OPENAI_COMPAT`. Required on create unless `llmProviderId` is set |
 | `modelBaseUrl` | Only for `OPENAI_COMPAT` — e.g. `http://ollama:11434/v1`, a vLLM or llama.cpp endpoint, or omit for OpenAI |
 | `skill` | Legacy. On create, becomes the first enabled skill named `reviewer`. Prefer the skill set below |
 | `agentMaxTurns` | Model turns per review. `1` (default) is a single shot. Raise it with `agentTools` to let the reviewer call tools |
@@ -115,10 +149,15 @@ double-fire.
 and the matching names in `agentTools`. First-party OpenAI `gpt-5.4` / `gpt-5.6-*` then use
 `/v1/responses`; Ollama, vLLM, llama.cpp, and other `modelBaseUrl`s stay on chat completions.
 
-Skills and documents are a **set you enable per project**, same idea as MCP tools. Manage them
-in the UI on the project page, or:
+Skills and documents are a **set you enable per project**, same idea as MCP tools. Skill
+*bodies* live in a **per-user library** (two tokens for one user share it). Creating a skill
+on a project writes the library then attaches it; **From library** attaches an existing
+row. Editing the body updates every attached project. Detach does not delete the library
+row. Manage them in the UI on the project page or `/configure`, or:
 
 ```
+GET/POST    /api/skills
+PUT/DELETE  /api/skills/{id}
 GET/POST    /api/projects/{id}/skills
 PUT/DELETE  /api/projects/{id}/skills/{skillId}
 GET/POST    /api/projects/{id}/documents
@@ -206,6 +245,9 @@ The endpoints you'll actually use:
 | `GET /api/replies/{id}` | full thread-reply transcript |
 | `GET/PUT /api/loggers` | admin; runtime log level (DEBUG = full agent bodies) |
 | `GET/DELETE /api/logs` | admin; in-memory log tail for the Logs page |
+| `GET/PUT /api/settings`, `POST /api/settings/reset` | admin; live instance settings (no secrets) |
+| `GET /api/stats` | admin; MRs, tokens, findings, per-project |
+| `GET/POST /api/skills`, `PUT/DELETE /api/skills/{id}` | skill library; USER sees own, ADMIN sees all |
 | `POST /api/reviews/{id}/rerun` | re-review the same commit — **edits the existing comment** rather than adding another |
 | `POST /webhooks/gitlab/{projectId}` | GitLab's target; `202` + a `Location` to poll |
 | `GET /health` | |
@@ -291,7 +333,13 @@ that a review was wrong.
 | `MRR_SCAN_INTERVAL_MS` | `120000` | GitLab catch-up for missed commits and merged/closed MRs |
 | `MRR_LIBRARIAN_MAX_TURNS` | `6` | Librarian agent turn cap (independent of reviews) |
 | `MRR_MAX_MEMORY_CHARS` | `8000` | Prefetched memory / file excerpts for the librarian |
+| `MRR_MAX_MODEL_TOKENS` | `16000` | `max_tokens` / Anthropic max output (covers thinking) |
+| `MRR_ANTHROPIC_EFFORT` | `high` | Anthropic `effort`: `low` or `high` |
 | `SERVER_PORT` | `8130` | |
+
+Boot values above are defaults. Admins can change the live ones on `/configure` without a
+restart (`MRR_BASE_URL`, scan interval, workers, caps, model tokens, effort). `SERVER_PORT`,
+`MRR_DB_PATH`, `MRR_ROOT_TOKEN_FILE`, `MRR_MEMORY_ROOT`, and the MCP endpoint need a restart.
 
 There are no model or GitLab credentials in the environment — those are per project.
 

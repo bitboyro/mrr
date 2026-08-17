@@ -77,6 +77,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Configure page.** Admin `/configure` live-edits instance settings (SQLite overlay on
+  env / `application.yml`) and shows stats: distinct MRs, token in/out/cache-read (from
+  this version forward), review states, findings, mean READY duration, failures by kind,
+  and a per-project table. Workers and scan interval apply without a restart. Restart-only
+  values (`SERVER_PORT`, db path, memory root, MCP, log ring) are listed read-only. No
+  secrets on this page. GitLab instances (URL only) and LLM providers (provider, model,
+  optional base URL — no key) are catalogs any authenticated user can pick when creating
+  a project; PATs and model keys stay on the project. The public base URL is shown with
+  the webhook pattern `{baseUrl}/webhooks/gitlab/<project-id>`, and New Project previews
+  that URL from the live setting.
+
+- **Skill library.** Skill bodies are owned by the user behind the API token. A project
+  skill is an attachment; New writes the library then attaches, From library attaches an
+  existing row. Editing the body updates every attached project. Detach does not delete
+  the library. Delete is 409 while attached. Existing project skills are backfilled.
+
 - **Diff windows.** `max-diff-chars` is the per-turn window, not a silent chop of
   the MR. Oversized diffs are packed into at most `max-diff-chunks` slices (whole
   files, then hunks); a merge turn produces one coherent verdict. Replies still

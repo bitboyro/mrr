@@ -186,7 +186,38 @@ class GitLabClientTest {
         assertThat(mrs.get(0).draft()).isFalse();
         assertThat(mrs.get(1).sha()).isEqualTo("def456");
         assertThat(mrs.get(1).draft()).isTrue();
-        assertThat(gitlab.takeRequest().getPath()).contains("/merge_requests?state=opened");
+        assertThat(gitlab.takeRequest().getPath())
+                .isEqualTo("/api/v4/projects/g%2Fp/merge_requests?state=opened&per_page=100&page=1");
+    }
+
+    @Test
+    void followsOpenMergeRequestPages() throws Exception {
+        gitlab.enqueue(json("""
+                [{"iid":1,"title":"a","state":"opened","sha":"aaa","web_url":"http://x/1","draft":false}]
+                """).setHeader("X-Next-Page", "2"));
+        gitlab.enqueue(json("""
+                [{"iid":2,"title":"b","state":"opened","sha":"bbb","web_url":"http://x/2","draft":false}]
+                """));
+
+        var mrs = client.openMergeRequests(project("g/p"));
+
+        assertThat(mrs).extracting(GitLabClient.MergeRequest::iid).containsExactly(1L, 2L);
+        assertThat(gitlab.takeRequest().getPath()).endsWith("page=1");
+        assertThat(gitlab.takeRequest().getPath()).endsWith("page=2");
+    }
+
+    @Test
+    void overflowedChangesCountAsTruncated() throws Exception {
+        gitlab.enqueue(json("""
+                {"title":"t","description":"","source_branch":"a","target_branch":"main",
+                 "overflow":true,
+                 "changes":[{"new_path":"A.java","diff":"@@ a @@"}]}
+                """));
+
+        GitLabClient.Diff diff = client.changes(project("g/p"), 1);
+
+        assertThat(diff.truncated()).isTrue();
+        assertThat(diff.text()).contains("[diff truncated by GitLab]");
     }
 
     @Test

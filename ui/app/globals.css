@@ -60,6 +60,7 @@ input[type="checkbox"] {
 textarea { min-height: 90px; font-family: var(--font-mono); font-size: 13px; }
 h1 { font-size: 22px; font-weight: 550; margin: 0; letter-spacing: -0.03em; }
 h2 { font-size: 15px; font-weight: 550; margin: 24px 0 8px; letter-spacing: -0.02em; }
+h3 { font-size: 13px; font-weight: 550; margin: 20px 0 6px; letter-spacing: -0.01em; color: var(--muted); }
 .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 24px 64px; min-width: 0; }
 .wrap.wide { max-width: 1280px; }
 
@@ -252,6 +253,50 @@ th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line
 th { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+  margin: 12px 0 20px;
+}
+.stat {
+  background: var(--fill);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.stat strong { font-size: 20px; letter-spacing: -0.03em; }
+.stat span { font-size: 11px; color: var(--muted); font-family: var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; }
+.source {
+  margin-left: 8px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.source.env { color: var(--muted); }
+.source.saved { color: var(--gold); }
+.mono { font-family: var(--font-mono); font-size: 13px; }
+.callout {
+  margin: 8px 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--fill);
+  color: var(--muted);
+  font-size: 14px;
+}
+.callout code { color: var(--fg); }
+.setting { margin: 0 0 18px; max-width: 640px; }
+.setting > .muted {
+  margin: 0 0 8px;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  letter-spacing: 0;
+  text-transform: none;
+}
 
 /* intro */
 .intro {

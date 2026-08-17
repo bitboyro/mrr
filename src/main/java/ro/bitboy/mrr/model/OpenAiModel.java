@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
+import ro.bitboy.mrr.RuntimeSettings;
 
 import java.net.URI;
 import java.util.ArrayList;
@@ -34,14 +35,21 @@ public class OpenAiModel implements ReviewModel {
     private final String apiKey;
     private final String model;
     private final ObjectMapper mapper;
+    private final RuntimeSettings settings;
 
     public OpenAiModel(RestClient.Builder builder, String apiKey, String baseUrl, String model) {
+        this(builder, apiKey, baseUrl, model, null);
+    }
+
+    public OpenAiModel(RestClient.Builder builder, String apiKey, String baseUrl, String model,
+                       RuntimeSettings settings) {
         this.http = builder.build();
         this.apiKey = apiKey;
         this.baseUrl = (baseUrl == null || baseUrl.isBlank() ? OpenAiCompat.DEFAULT_BASE_URL : baseUrl)
                 .replaceAll("/+$", "");
         this.model = model;
         this.mapper = new ObjectMapper();
+        this.settings = settings;
     }
 
     @Override
@@ -81,11 +89,13 @@ public class OpenAiModel implements ReviewModel {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", model);
         body.put("messages", messages);
+        applyMaxTokens(body, "max_tokens");
         if (!tools.isEmpty()) {
             body.put("tools", tools.stream().map(OpenAiModel::toChatTool).toList());
         }
 
         JsonNode response = post("/chat/completions", body);
+        Usage usage = parseUsage(response);
         JsonNode choice = response.path("choices").path(0);
         String stopReason = choice.path("finish_reason").asText(null);
         JsonNode message = choice.path("message");
@@ -108,9 +118,9 @@ public class OpenAiModel implements ReviewModel {
             return Result.refusal(stopReason);
         }
         if (!calls.isEmpty()) {
-            return Result.tools(text.isBlank() ? null : text, calls, stopReason);
+            return Result.tools(text.isBlank() ? null : text, calls, stopReason, null, usage);
         }
-        return Result.of(text, stopReason);
+        return Result.of(text, stopReason, usage);
     }
 
     Result completeResponses(String systemPrompt, List<Turn> turns, List<ToolSpec> tools) {
@@ -118,12 +128,14 @@ public class OpenAiModel implements ReviewModel {
         body.put("model", model);
         body.put("instructions", systemPrompt);
         body.put("store", false);
+        applyMaxTokens(body, "max_output_tokens");
         body.put("input", responsesInput(turns));
         if (!tools.isEmpty()) {
             body.put("tools", tools.stream().map(OpenAiModel::toResponsesTool).toList());
         }
 
         JsonNode response = post("/responses", body);
+        Usage usage = parseUsage(response);
         String stopReason = response.path("status").asText(null);
         if ("failed".equals(stopReason)) {
             return Result.refusal(stopReason);
@@ -166,9 +178,46 @@ public class OpenAiModel implements ReviewModel {
             return Result.refusal(stopReason);
         }
         if (!calls.isEmpty()) {
-            return Result.tools(text.isEmpty() ? null : text.toString(), calls, stopReason, echo);
+            return Result.tools(text.isEmpty() ? null : text.toString(), calls, stopReason, echo, usage);
         }
-        return Result.of(text.toString(), stopReason);
+        return Result.of(text.toString(), stopReason, usage);
+    }
+
+    private void applyMaxTokens(Map<String, Object> body, String field) {
+        if (settings == null) {
+            return;
+        }
+        body.put(field, settings.review().maxModelTokens());
+    }
+
+    static Usage parseUsage(JsonNode response) {
+        if (response == null) {
+            return Usage.NONE;
+        }
+        JsonNode usage = response.path("usage");
+        if (usage.isMissingNode() || usage.isNull()) {
+            return Usage.NONE;
+        }
+        long input = firstLong(usage, "prompt_tokens", "input_tokens");
+        long output = firstLong(usage, "completion_tokens", "output_tokens");
+        long cache = firstLong(usage.path("prompt_tokens_details"), "cached_tokens");
+        if (cache == 0) {
+            cache = firstLong(usage.path("input_tokens_details"), "cached_tokens");
+        }
+        return new Usage(input, output, cache);
+    }
+
+    private static long firstLong(JsonNode node, String... names) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return 0;
+        }
+        for (String name : names) {
+            JsonNode value = node.path(name);
+            if (value.isNumber()) {
+                return value.asLong();
+            }
+        }
+        return 0;
     }
 
     private JsonNode post(String path, Map<String, Object> body) {

@@ -61,6 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id);
 CREATE TABLE IF NOT EXISTS agent_skills (
     id             TEXT PRIMARY KEY,
     project_id     TEXT NOT NULL REFERENCES projects(id),
+    library_id     TEXT,
     name           TEXT NOT NULL,
     body           TEXT NOT NULL,
     enabled        INTEGER NOT NULL DEFAULT 1,
@@ -95,6 +96,9 @@ CREATE TABLE IF NOT EXISTS reviews (
     discussion_id TEXT,                              -- owning thread; both needed to edit
     error       TEXT,
     error_kind  TEXT,                                -- FailureKind; set on fail-closed reviews
+    input_tokens      INTEGER NOT NULL DEFAULT 0,
+    output_tokens     INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL,
     finished_at TEXT,
 
@@ -176,14 +180,21 @@ CREATE TABLE IF NOT EXISTS replies (
     mr_iid         INTEGER NOT NULL,
     discussion_id  TEXT NOT NULL,
     finding_id     TEXT,
+    source_note_id TEXT,                             -- GitLab note id; unique per thread so redeliveries are free
     prompt         TEXT,
     response       TEXT,
     trace          TEXT,                             -- JSON AgentTrace
+    input_tokens      INTEGER NOT NULL DEFAULT 0,
+    output_tokens     INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_replies_mr ON replies(project_id, mr_iid, created_at);
 CREATE INDEX IF NOT EXISTS idx_replies_discussion ON replies(project_id, discussion_id);
+-- idx_replies_source_note is created in SchemaPatch after source_note_id is added
+-- on databases that predate that column. CREATE TABLE IF NOT EXISTS does not
+-- alter an older replies table, so putting the unique index here would fail boot.
 
 -- Live status of one merge request across every review of it. The reviews table is a
 -- snapshot per commit; this row is "where the MR stands right now".
@@ -238,9 +249,50 @@ CREATE TABLE IF NOT EXISTS memory_runs (
     trace        TEXT,
     agent_turns  INTEGER NOT NULL DEFAULT 0,
     error        TEXT,
+    input_tokens      INTEGER NOT NULL DEFAULT 0,
+    output_tokens     INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
     created_at   TEXT NOT NULL,
     finished_at  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_runs_project ON memory_runs(project_id, created_at DESC);
+
+-- Instance-wide live settings. Missing key = use env / application.yml.
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- Reusable skill bodies, owned by the user behind the API token. Project
+-- agent_skills attach to a row here.
+CREATE TABLE IF NOT EXISTS skill_library (
+    id         TEXT PRIMARY KEY,
+    owner_id   TEXT NOT NULL REFERENCES users(id),
+    name       TEXT NOT NULL,
+    body       TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (owner_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_library_owner ON skill_library(owner_id, name);
+
+-- Named GitLab hosts (URL only — PATs stay on the project).
+CREATE TABLE IF NOT EXISTS gitlab_instances (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    url        TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- Named LLM endpoints (no API key — keys stay on the project).
+CREATE TABLE IF NOT EXISTS llm_providers (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL UNIQUE,
+    provider       TEXT NOT NULL,
+    model          TEXT NOT NULL,
+    model_base_url TEXT,
+    created_at     TEXT NOT NULL
+);
 

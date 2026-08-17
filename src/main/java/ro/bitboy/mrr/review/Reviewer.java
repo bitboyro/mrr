@@ -7,8 +7,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestClient;
 import ro.bitboy.mrr.MrrProperties;
+import ro.bitboy.mrr.RuntimeSettings;
 import ro.bitboy.mrr.memory.MemoryActor;
 import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.auth.Ids;
@@ -16,14 +16,13 @@ import ro.bitboy.mrr.gitlab.GitLabClient;
 import ro.bitboy.mrr.model.AgentDocument;
 import ro.bitboy.mrr.model.AgentSkill;
 import ro.bitboy.mrr.model.AgentTrace;
-import ro.bitboy.mrr.model.AnthropicModel;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.Finding;
 import ro.bitboy.mrr.model.MrStatus;
-import ro.bitboy.mrr.model.OpenAiModel;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Review;
 import ro.bitboy.mrr.model.ReviewModel;
+import ro.bitboy.mrr.model.ReviewModelFactory;
 import ro.bitboy.mrr.store.Store;
 import ro.bitboy.mrr.web.ApiException;
 
@@ -37,7 +36,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -58,7 +59,7 @@ public class Reviewer {
 
     private final Store store;
     private final GitLabClient gitlab;
-    private final MrrProperties properties;
+    private final RuntimeSettings settings;
     private final VerdictParser parser;
     private final ObjectMapper mapper;
     private final Agent agent;
@@ -69,18 +70,22 @@ public class Reviewer {
     private final ConcurrentHashMap<String, Object> mrLocks = new ConcurrentHashMap<>();
 
     @Autowired
-    public Reviewer(Store store, GitLabClient gitlab, RestClient.Builder restClients,
-                    MrrProperties properties, ObjectMapper mapper, MemoryService memory) {
-        this(store, gitlab, properties, mapper, memory,
-                project -> defaultModel(restClients, project),
-                Executors.newFixedThreadPool(properties.review().workers()));
+    public Reviewer(Store store, GitLabClient gitlab, ReviewModelFactory models,
+                    RuntimeSettings settings, ObjectMapper mapper, MemoryService memory) {
+        this(store, gitlab, settings, mapper, memory, models::forProject,
+                newPool(settings.review().workers()));
     }
 
-    Reviewer(Store store, GitLabClient gitlab, MrrProperties properties, ObjectMapper mapper,
+    public Reviewer(Store store, GitLabClient gitlab, MrrProperties properties, ObjectMapper mapper,
+             MemoryService memory, Function<Project, ReviewModel> models, ExecutorService workers) {
+        this(store, gitlab, RuntimeSettings.frozen(properties), mapper, memory, models, workers);
+    }
+
+    public Reviewer(Store store, GitLabClient gitlab, RuntimeSettings settings, ObjectMapper mapper,
              MemoryService memory, Function<Project, ReviewModel> models, ExecutorService workers) {
         this.store = store;
         this.gitlab = gitlab;
-        this.properties = properties;
+        this.settings = settings;
         this.parser = new VerdictParser(mapper);
         this.mapper = mapper;
         this.agent = new Agent();
@@ -89,12 +94,36 @@ public class Reviewer {
         this.workers = workers;
     }
 
+    private static ThreadPoolExecutor newPool(int workers) {
+        int size = Math.max(1, workers);
+        return new ThreadPoolExecutor(size, size, 60, TimeUnit.SECONDS, new LinkedBlockingQueue<>());
+    }
+
+    public int inFlightCount() {
+        return inFlight.size();
+    }
+
+    private void ensurePoolSize() {
+        if (!(workers instanceof ThreadPoolExecutor pool)) {
+            return;
+        }
+        int n = Math.max(1, settings.review().workers());
+        if (n > pool.getMaximumPoolSize()) {
+            pool.setMaximumPoolSize(n);
+            pool.setCorePoolSize(n);
+        } else if (n < pool.getCorePoolSize()) {
+            pool.setCorePoolSize(n);
+            pool.setMaximumPoolSize(n);
+        }
+    }
+
     /**
      * Hands the review to a worker and returns immediately — the webhook must not block.
      *
      * @return false if this review is already queued or running in this process
      */
     public boolean submit(String reviewId) {
+        ensurePoolSize();
         if (!inFlight.add(reviewId)) {
             log.info("review {} already running — not queueing again", reviewId);
             return false;
@@ -158,14 +187,15 @@ public class Reviewer {
                 .map(MrStatus::userContext).orElse(null);
         String system = Prompts.system(skills, project.skill(), !tools.isEmpty(), sourceBranch);
 
-        int window = properties.review().maxDiffChars();
+        int window = settings.review().maxDiffChars();
         List<DiffWindows.Slice> slices = DiffWindows.pack(
-                diff.patches(), window, properties.review().maxDiffChunks());
+                diff.patches(), window, settings.review().maxDiffChunks());
         long started = System.currentTimeMillis();
         Ask ask = askModel(review, project, diff, priorOpen, documents, userContext,
                 system, tools, slices, window);
         ReviewModel.Result result = ask.result();
         store.saveTrace(reviewId, ask.trace());
+        store.saveReviewUsage(reviewId, result.usage());
         log.info("review {} model returned in {}ms turns={} slices={} stop_reason={}",
                 reviewId, System.currentTimeMillis() - started,
                 ask.turns(), ask.slices(), result.stopReason());
@@ -293,24 +323,29 @@ public class Reviewer {
         List<Finding> opened = new ArrayList<>();
 
         for (ReviewModel.NewFinding found : verdict.findings()) {
-            String body = Prompts.findingComment(found);
+            try {
+                String body = Prompts.findingComment(found);
 
-            Optional<GitLabClient.Discussion> inline = Optional.empty();
-            if (refs.isPresent() && found.file() != null && found.line() != null) {
-                inline = gitlab.postInlineDiscussion(project, review.mrIid(), refs.get(),
-                        found.file(), found.line(), body);
+                Optional<GitLabClient.Discussion> inline = Optional.empty();
+                if (refs.isPresent() && found.file() != null && found.line() != null) {
+                    inline = gitlab.postInlineDiscussion(project, review.mrIid(), refs.get(),
+                            found.file(), found.line(), body);
+                }
+
+                // A position GitLab rejects — an unchanged line, a path the model invented — is a
+                // routine outcome. The finding still gets a thread, just not an anchored one.
+                GitLabClient.Discussion discussion = inline.orElseGet(
+                        () -> gitlab.postDiscussion(project, review.mrIid(), body));
+
+                opened.add(store.createFinding(new Finding(
+                        Ids.newId(), review.id(), project.id(), review.mrIid(),
+                        found.file(), found.line(), found.severity(), found.title(), body,
+                        discussion.discussionId(), discussion.noteId(), inline.isPresent(),
+                        Finding.State.OPEN, Instant.now(), null)));
+            } catch (Exception e) {
+                log.warn("could not open thread for {} {}:{} — {}",
+                        review.id(), found.file(), found.line(), e.getMessage());
             }
-
-            // A position GitLab rejects — an unchanged line, a path the model invented — is a
-            // routine outcome. The finding still gets a thread, just not an anchored one.
-            GitLabClient.Discussion discussion = inline.orElseGet(
-                    () -> gitlab.postDiscussion(project, review.mrIid(), body));
-
-            opened.add(store.createFinding(new Finding(
-                    Ids.newId(), review.id(), project.id(), review.mrIid(),
-                    found.file(), found.line(), found.severity(), found.title(), body,
-                    discussion.discussionId(), discussion.noteId(), inline.isPresent(),
-                    Finding.State.OPEN, Instant.now(), null)));
         }
         return opened;
     }
@@ -514,8 +549,8 @@ public class Reviewer {
                          List<ReviewModel.ToolSpec> tools,
                          List<DiffWindows.Slice> slices, int window) {
         String reviewId = review.id();
-        int maxDoc = properties.review().maxDocumentChars();
-        int maxTrace = properties.review().maxTraceChars();
+        int maxDoc = settings.review().maxDocumentChars();
+        int maxTrace = settings.review().maxTraceChars();
         ReviewModel model = models.apply(project);
 
         if (slices.size() <= 1) {
@@ -557,7 +592,8 @@ public class Reviewer {
                     || sliceRun.result().markdown() == null
                     || sliceRun.result().markdown().isBlank()) {
                 AgentTrace trace = Agent.concat(runs);
-                return new Ask(sliceRun.result(), trace, trace.turns(), slices.size());
+                return new Ask(withUsage(sliceRun.result(), usageOf(runs)), trace, trace.turns(),
+                        slices.size());
             }
             partials.add(sliceRun.result().markdown());
         }
@@ -568,7 +604,25 @@ public class Reviewer {
                 call -> "unused", "review " + reviewId + " merge", maxTrace);
         runs.add(synth);
         AgentTrace trace = Agent.concat(runs);
-        return new Ask(synth.result(), trace, trace.turns(), slices.size());
+        return new Ask(withUsage(synth.result(), usageOf(runs)), trace, trace.turns(), slices.size());
+    }
+
+    private static ReviewModel.Usage usageOf(List<Agent.Run> runs) {
+        ReviewModel.Usage total = ReviewModel.Usage.NONE;
+        for (Agent.Run run : runs) {
+            if (run != null && run.result() != null) {
+                total = total.plus(run.result().usage());
+            }
+        }
+        return total;
+    }
+
+    private static ReviewModel.Result withUsage(ReviewModel.Result result, ReviewModel.Usage usage) {
+        if (result == null) {
+            return null;
+        }
+        return new ReviewModel.Result(result.markdown(), result.toolCalls(), result.refused(),
+                result.stopReason(), result.echo(), usage);
     }
 
     private String executeTool(ReviewModel.ToolCall call, Project project, String reviewId,
@@ -581,7 +635,7 @@ public class Reviewer {
                 Integer start = args.path("start_line").isIntegralNumber() ? args.path("start_line").asInt() : null;
                 Integer end = args.path("end_line").isIntegralNumber() ? args.path("end_line").asInt() : null;
                 String result = gitlab.fileAt(project, path, headSha, start, end,
-                        properties.review().maxFileChars());
+                        settings.review().maxFileChars());
                 log.info("review {} tool {} {} {} chars",
                         reviewId, name, path == null ? "" : path, result.length());
                 if (result.startsWith("error:")) {
@@ -599,15 +653,6 @@ public class Reviewer {
                 mrIid, name, call.argumentsJson());
         log.info("review {} tool {}", reviewId, name);
         return result;
-    }
-
-    static ReviewModel defaultModel(RestClient.Builder restClients, Project project) {
-        return switch (project.provider()) {
-            case ANTHROPIC -> new AnthropicModel(
-                    project.modelKey(), project.modelBaseUrl(), project.model());
-            case OPENAI_COMPAT -> new OpenAiModel(
-                    restClients, project.modelKey(), project.modelBaseUrl(), project.model());
-        };
     }
 
     @PreDestroy

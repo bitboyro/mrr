@@ -16,7 +16,9 @@ import com.anthropic.models.messages.ToolResultBlockParam;
 import com.anthropic.models.messages.ToolUseBlock;
 import com.anthropic.models.messages.ToolUseBlockParam;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import ro.bitboy.mrr.RuntimeSettings;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -54,15 +56,36 @@ public class AnthropicModel implements ReviewModel {
     private final AnthropicClient client;
     private final String model;
     private final ObjectMapper mapper;
+    private final RuntimeSettings settings;
 
     public AnthropicModel(String apiKey, String baseUrl, String model) {
-        var builder = AnthropicOkHttpClient.builder().apiKey(apiKey);
+        this(apiKey, baseUrl, model, 300, null);
+    }
+
+    public AnthropicModel(String apiKey, String baseUrl, String model, int timeoutSeconds) {
+        this(apiKey, baseUrl, model, timeoutSeconds, null);
+    }
+
+    public AnthropicModel(String apiKey, String baseUrl, String model, int timeoutSeconds,
+                          RuntimeSettings settings) {
+        var builder = AnthropicOkHttpClient.builder()
+                .apiKey(apiKey)
+                .timeout(Duration.ofSeconds(Math.max(1, timeoutSeconds)));
         if (baseUrl != null && !baseUrl.isBlank()) {
             builder.baseUrl(baseUrl);
         }
         this.client = builder.build();
         this.model = model;
         this.mapper = new ObjectMapper();
+        this.settings = settings;
+    }
+
+    public void close() {
+        try {
+            client.close();
+        } catch (Exception ignored) {
+            // Shutdown path; a stuck dispatcher is worse than a swallowed close.
+        }
     }
 
     @Override
@@ -74,9 +97,9 @@ public class AnthropicModel implements ReviewModel {
     public Result complete(String systemPrompt, List<Turn> turns, List<ToolSpec> tools) {
         MessageCreateParams.Builder params = MessageCreateParams.builder()
                 .model(model)
-                .maxTokens(MAX_TOKENS)
+                .maxTokens(maxTokens())
                 .outputConfig(OutputConfig.builder()
-                        .effort(OutputConfig.Effort.HIGH)
+                        .effort(effort())
                         .build())
                 .systemOfTextBlockParams(List.of(TextBlockParam.builder()
                         .text(systemPrompt)
@@ -119,13 +142,36 @@ public class AnthropicModel implements ReviewModel {
             block.toolUse().ifPresent(use -> calls.add(toCall(use)));
         }
 
+        Usage usage = usageOf(response);
         if (text.isEmpty() && calls.isEmpty()) {
             return Result.refusal(stopReason);
         }
         if (!calls.isEmpty()) {
-            return Result.tools(text.isEmpty() ? null : text.toString(), calls, stopReason, echo);
+            return Result.tools(text.isEmpty() ? null : text.toString(), calls, stopReason, echo, usage);
         }
-        return Result.of(text.toString(), stopReason);
+        return Result.of(text.toString(), stopReason, usage);
+    }
+
+    private long maxTokens() {
+        return settings == null ? MAX_TOKENS : settings.review().maxModelTokens();
+    }
+
+    private OutputConfig.Effort effort() {
+        String value = settings == null ? "high" : settings.review().anthropicEffort();
+        return "low".equalsIgnoreCase(value) ? OutputConfig.Effort.LOW : OutputConfig.Effort.HIGH;
+    }
+
+    private static Usage usageOf(Message response) {
+        try {
+            var usage = response.usage();
+            if (usage == null) {
+                return Usage.NONE;
+            }
+            long cache = usage.cacheReadInputTokens().orElse(0L);
+            return new Usage(usage.inputTokens(), usage.outputTokens(), cache);
+        } catch (RuntimeException e) {
+            return Usage.NONE;
+        }
     }
 
     static List<ContentBlockParam> assistantBlocks(Turn turn) {

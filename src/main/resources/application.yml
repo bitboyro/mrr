@@ -41,6 +41,7 @@ mrr:
     # Per-turn diff window. Larger MRs are reviewed in slices, then merged.
     max-diff-chars: ${MRR_MAX_DIFF_CHARS:200000}
     max-diff-chunks: ${MRR_MAX_DIFF_CHUNKS:8}
+    # Per HTTP request to GitLab or the model. A sliced review can exceed this overall.
     timeout-seconds: ${MRR_REVIEW_TIMEOUT:300}
     # Files fetched via read_file are truncated at this many characters.
     max-file-chars: ${MRR_MAX_FILE_CHARS:80000}
@@ -51,6 +52,8 @@ mrr:
     max-trace-chars: ${MRR_MAX_TRACE_CHARS:8000}
     librarian-max-turns: ${MRR_LIBRARIAN_MAX_TURNS:6}
     max-memory-chars: ${MRR_MAX_MEMORY_CHARS:8000}
+    max-model-tokens: ${MRR_MAX_MODEL_TOKENS:16000}
+    anthropic-effort: ${MRR_ANTHROPIC_EFFORT:high}
 
 springdoc:
   swagger-ui:

@@ -56,7 +56,7 @@ class ReplierTest {
     void postsAReplyOnAnOwnedThread() {
         model = new RecordingModel(List.of(Result.of("Because the caller ignores the return.", "end_turn")));
 
-        replier().reply(project.id(), 7, "disc-1", "nobody reads it", "ada");
+        replier().reply(project.id(), 7, "disc-1", null, "nobody reads it", "ada");
 
         assertThat(store.listReplies(project.id(), 7)).singleElement()
                 .extracting(r -> r.response())
@@ -68,7 +68,7 @@ class ReplierTest {
     void aRefusalDoesNotTouchGitLab() {
         model = new RecordingModel(List.of(Result.refusal("refusal")));
 
-        replier().reply(project.id(), 7, "disc-1", "why?", "ada");
+        replier().reply(project.id(), 7, "disc-1", null, "why?", "ada");
 
         assertThat(store.listReplies(project.id(), 7)).isEmpty();
         assertThat(gitlab.replies).isEmpty();
@@ -78,10 +78,25 @@ class ReplierTest {
     void aBlankModelAnswerDoesNotTouchGitLab() {
         model = new RecordingModel(List.of(Result.of("   ", "end_turn")));
 
-        replier().reply(project.id(), 7, "disc-1", "why?", "ada");
+        replier().reply(project.id(), 7, "disc-1", null, "why?", "ada");
 
         assertThat(store.listReplies(project.id(), 7)).isEmpty();
         assertThat(gitlab.replies).isEmpty();
+    }
+
+    @Test
+    void aSecondDeliveryOfTheSameNoteDoesNotCallTheModelAgain() {
+        model = new RecordingModel(List.of(
+                Result.of("Because the caller ignores the return.", "end_turn"),
+                Result.of("should not run", "end_turn")));
+        Replier replier = replier();
+
+        replier.reply(project.id(), 7, "disc-1", "note-99", "nobody reads it", "ada");
+        replier.reply(project.id(), 7, "disc-1", "note-99", "nobody reads it", "ada");
+
+        assertThat(store.listReplies(project.id(), 7)).hasSize(1);
+        assertThat(gitlab.replies).hasSize(1);
+        assertThat(model.turns).hasSize(1);
     }
 
     private Replier replier() {

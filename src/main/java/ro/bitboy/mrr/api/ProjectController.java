@@ -13,7 +13,7 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
-import ro.bitboy.mrr.MrrProperties;
+import ro.bitboy.mrr.RuntimeSettings;
 import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.auth.Principal;
@@ -44,14 +44,14 @@ import java.util.List;
 public class ProjectController {
 
     private final Store store;
-    private final MrrProperties properties;
+    private final RuntimeSettings settings;
     private final MemoryService memory;
     private final OpenMrScan openMrScan;
 
-    public ProjectController(Store store, MrrProperties properties, MemoryService memory,
+    public ProjectController(Store store, RuntimeSettings settings, MemoryService memory,
                              OpenMrScan openMrScan) {
         this.store = store;
-        this.properties = properties;
+        this.settings = settings;
         this.memory = memory;
         this.openMrScan = openMrScan;
     }
@@ -70,14 +70,11 @@ public class ProjectController {
     @ResponseStatus(HttpStatus.CREATED)
     public Registered create(Principal caller, @RequestBody Upsert request) {
         require(request.name(), "name");
-        require(request.gitlabUrl(), "gitlabUrl");
         require(request.gitlabProjectId(), "gitlabProjectId");
         require(request.gitlabToken(), "gitlabToken");
-        require(request.model(), "model");
         require(request.modelKey(), "modelKey");
-        if (request.provider() == null) {
-            throw ApiException.badRequest("provider must be ANTHROPIC or OPENAI_COMPAT");
-        }
+        String gitlabUrl = resolveGitlabUrl(request, null);
+        ResolvedLlm llm = resolveLlm(request, null);
 
         // Generated unless supplied, so registering a project never silently ends up with a
         // guessable webhook secret.
@@ -87,9 +84,9 @@ public class ProjectController {
 
         Project project = new Project(
                 Ids.newId(), caller.userId(), request.name().trim(), true,
-                request.gitlabUrl().replaceAll("/+$", ""), request.gitlabProjectId(),
-                request.gitlabToken(), secret, request.provider(), request.modelBaseUrl(),
-                request.model(), request.modelKey(), request.skill(),
+                gitlabUrl, request.gitlabProjectId(),
+                request.gitlabToken(), secret, llm.provider(), llm.modelBaseUrl(),
+                llm.model(), request.modelKey(), request.skill(),
                 Boolean.TRUE.equals(request.skipDrafts()),
                 request.agentMaxTurns() == null ? 1 : Math.max(1, request.agentMaxTurns()),
                 request.agentTools() == null ? List.of() : request.agentTools(),
@@ -104,8 +101,7 @@ public class ProjectController {
         }
         openMrScan.enqueue(project);
 
-        return new Registered(project.redacted(), secret,
-                properties.baseUrl() + "/webhooks/gitlab/" + project.id());
+        return new Registered(project.redacted(), secret, settings.webhookUrl(project.id()));
     }
 
     @Operation(summary = "List projects you can see",
@@ -133,18 +129,20 @@ public class ProjectController {
     @PutMapping("/api/projects/{id}")
     public Project update(Principal caller, @PathVariable String id, @RequestBody Upsert request) {
         Project existing = store.requireVisible(caller, id);
+        String gitlabUrl = resolveGitlabUrl(request, existing.gitlabUrl());
+        ResolvedLlm llm = resolveLlm(request, existing);
 
         Project updated = new Project(
                 existing.id(), existing.ownerId(),
                 orKeep(request.name(), existing.name()),
                 request.enabled() == null ? existing.enabled() : request.enabled(),
-                orKeep(request.gitlabUrl(), existing.gitlabUrl()),
+                gitlabUrl,
                 orKeep(request.gitlabProjectId(), existing.gitlabProjectId()),
                 orKeep(request.gitlabToken(), existing.gitlabToken()),
                 orKeep(request.webhookSecret(), existing.webhookSecret()),
-                request.provider() == null ? existing.provider() : request.provider(),
-                orKeep(request.modelBaseUrl(), existing.modelBaseUrl()),
-                orKeep(request.model(), existing.model()),
+                llm.provider(),
+                llm.modelBaseUrl(),
+                llm.model(),
                 orKeep(request.modelKey(), existing.modelKey()),
                 request.skill() == null ? existing.skill() : request.skill(),
                 request.skipDrafts() == null ? existing.skipDrafts() : request.skipDrafts(),
@@ -177,6 +175,49 @@ public class ProjectController {
         store.deleteProject(id);
     }
 
+    private String resolveGitlabUrl(Upsert request, String existing) {
+        if (request.gitlabInstanceId() != null && !request.gitlabInstanceId().isBlank()) {
+            return store.findGitlabInstance(request.gitlabInstanceId().trim())
+                    .orElseThrow(() -> ApiException.notFound("gitlab instance")).url();
+        }
+        if (request.gitlabUrl() == null || request.gitlabUrl().isBlank()) {
+            if (existing == null) {
+                throw ApiException.badRequest("gitlabUrl is required");
+            }
+            return existing;
+        }
+        return request.gitlabUrl().replaceAll("/+$", "");
+    }
+
+    private ResolvedLlm resolveLlm(Upsert request, Project existing) {
+        if (request.llmProviderId() != null && !request.llmProviderId().isBlank()) {
+            var preset = store.findLlmProvider(request.llmProviderId().trim())
+                    .orElseThrow(() -> ApiException.notFound("llm provider"));
+            return new ResolvedLlm(preset.provider(), preset.model(), preset.modelBaseUrl());
+        }
+        if (existing == null) {
+            if (request.provider() == null) {
+                throw ApiException.badRequest("provider must be ANTHROPIC or OPENAI_COMPAT");
+            }
+            require(request.model(), "model");
+            String base = request.modelBaseUrl() == null || request.modelBaseUrl().isBlank()
+                    ? null : request.modelBaseUrl().replaceAll("/+$", "");
+            return new ResolvedLlm(request.provider(), request.model().trim(), base);
+        }
+        String base;
+        if (request.modelBaseUrl() == null) {
+            base = existing.modelBaseUrl();
+        } else if (request.modelBaseUrl().isBlank()) {
+            base = existing.modelBaseUrl();
+        } else {
+            base = request.modelBaseUrl().replaceAll("/+$", "");
+        }
+        return new ResolvedLlm(
+                request.provider() == null ? existing.provider() : request.provider(),
+                orKeep(request.model(), existing.model()),
+                base);
+    }
+
     private static void require(String value, String field) {
         if (value == null || value.isBlank()) {
             throw ApiException.badRequest(field + " is required");
@@ -192,7 +233,11 @@ public class ProjectController {
             @Schema(description = "Display name.", example = "test-repo") String name,
             @Schema(description = "Set false to make mrr ignore this project's webhooks without deleting it.")
             Boolean enabled,
-            @Schema(description = "Your GitLab's base URL. This is what makes self-hosted work.",
+            @Schema(description = "Catalog GitLab host. When set, copies that URL onto the project "
+                    + "and `gitlabUrl` is ignored. The project keeps its own copy afterwards.")
+            String gitlabInstanceId,
+            @Schema(description = "Your GitLab's base URL. This is what makes self-hosted work. "
+                    + "Required on create unless `gitlabInstanceId` is set.",
                     example = "https://gitlab.com") String gitlabUrl,
             @Schema(description = "Numeric id or `group/project` path — both work.",
                     example = "bitboy.ro/test-repo") String gitlabProjectId,
@@ -203,7 +248,12 @@ public class ProjectController {
                     example = "glpat-xxxxxxxxxxxxxxxxxxxx") String gitlabToken,
             @Schema(description = "Shared secret GitLab sends as `X-Gitlab-Token`. Generated if omitted. Write-only.")
             String webhookSecret,
-            @Schema(description = "Which adapter reviews this project.", example = "OPENAI_COMPAT")
+            @Schema(description = "Catalog LLM endpoint. When set, copies provider, model, and "
+                    + "modelBaseUrl onto the project; those fields are ignored. The project keeps "
+                    + "its own copy afterwards.")
+            String llmProviderId,
+            @Schema(description = "Which adapter reviews this project. Required on create unless "
+                    + "`llmProviderId` is set.", example = "OPENAI_COMPAT")
             Project.Provider provider,
             @Schema(description = "Only for OPENAI_COMPAT. Omit for OpenAI itself; set it to reach "
                     + "Ollama, vLLM, llama.cpp, or a gateway.", example = "http://ollama:11434/v1")
@@ -230,6 +280,9 @@ public class ProjectController {
             Boolean autoApprove,
             @Schema(description = "Enable the optional librarian addon. Disable never deletes memory.")
             Boolean librarianEnabled) {
+    }
+
+    private record ResolvedLlm(Project.Provider provider, String model, String modelBaseUrl) {
     }
 
     @Schema(description = "A newly registered project, plus the two values GitLab needs.")

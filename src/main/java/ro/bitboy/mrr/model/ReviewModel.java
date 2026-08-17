@@ -80,28 +80,51 @@ public interface ReviewModel {
      * @param refused   true when the provider declined the request rather than answering
      * @param echo      see {@link Turn#echo()} — pass through on the following assistant turn
      */
+    record Usage(long input, long output, long cacheRead) {
+        public static final Usage NONE = new Usage(0, 0, 0);
+
+        public Usage plus(Usage other) {
+            if (other == null) {
+                return this;
+            }
+            return new Usage(input + other.input, output + other.output, cacheRead + other.cacheRead);
+        }
+    }
+
     record Result(String markdown, List<ToolCall> toolCalls, boolean refused, String stopReason,
-                  Object echo) {
+                  Object echo, Usage usage) {
 
         public Result {
             toolCalls = toolCalls == null ? List.of() : List.copyOf(toolCalls);
+            if (usage == null) {
+                usage = Usage.NONE;
+            }
         }
 
         public static Result of(String markdown, String stopReason) {
-            return new Result(markdown, List.of(), false, stopReason, null);
+            return of(markdown, stopReason, Usage.NONE);
+        }
+
+        public static Result of(String markdown, String stopReason, Usage usage) {
+            return new Result(markdown, List.of(), false, stopReason, null, usage);
         }
 
         public static Result tools(String markdown, List<ToolCall> toolCalls, String stopReason) {
-            return tools(markdown, toolCalls, stopReason, null);
+            return tools(markdown, toolCalls, stopReason, null, Usage.NONE);
         }
 
         public static Result tools(String markdown, List<ToolCall> toolCalls, String stopReason,
                                    Object echo) {
-            return new Result(markdown, toolCalls, false, stopReason, echo);
+            return tools(markdown, toolCalls, stopReason, echo, Usage.NONE);
+        }
+
+        public static Result tools(String markdown, List<ToolCall> toolCalls, String stopReason,
+                                   Object echo, Usage usage) {
+            return new Result(markdown, toolCalls, false, stopReason, echo, usage);
         }
 
         public static Result refusal(String stopReason) {
-            return new Result(null, List.of(), true, stopReason, null);
+            return new Result(null, List.of(), true, stopReason, null, Usage.NONE);
         }
 
         public boolean wantsTools() {

@@ -8,6 +8,7 @@ import ro.bitboy.mrr.review.Reviewer;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Executors;
 
 /** Records {@code submit} without running a review. */
 public final class FakeReviewer extends Reviewer {
@@ -17,8 +18,10 @@ public final class FakeReviewer extends Reviewer {
     public int aligns;
 
     public FakeReviewer() {
-        super(null, new GitLabClient(RestClient.builder()), RestClient.builder(),
-                TestStores.properties(), new ObjectMapper(), null);
+        super(null, new GitLabClient(RestClient.builder()), TestStores.properties(),
+                new ObjectMapper(), null, p -> {
+                    throw new IllegalStateException("no model");
+                }, Executors.newSingleThreadExecutor());
     }
 
     @Override

@@ -187,6 +187,14 @@ public class MemoryStore {
                 .params(turns, trace == null ? null : trace.toJson(), runId).update();
     }
 
+    public void saveRunUsage(String runId, ro.bitboy.mrr.model.ReviewModel.Usage usage) {
+        var u = usage == null ? ro.bitboy.mrr.model.ReviewModel.Usage.NONE : usage;
+        db.sql("""
+                UPDATE memory_runs SET input_tokens = ?, output_tokens = ?, cache_read_tokens = ?
+                WHERE id = ?
+                """).params(u.input(), u.output(), u.cacheRead(), runId).update();
+    }
+
     public void markRunReady(String runId, String response) {
         db.sql("UPDATE memory_runs SET state = ?, response = ?, finished_at = ? WHERE id = ?")
                 .params(MemoryRun.State.READY.name(), response, Instant.now().toString(), runId)

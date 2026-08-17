@@ -127,11 +127,65 @@ public class SchemaPatch {
         addColumn("mr_status", "user_context", "TEXT");
         addColumn("mr_status", "overview_discussion_id", "TEXT");
         addColumn("mr_status", "overview_note_id", "TEXT");
+        addColumn("replies", "source_note_id", "TEXT");
+        db.sql("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_replies_source_note
+                    ON replies(project_id, discussion_id, source_note_id)
+                    WHERE source_note_id IS NOT NULL
+                """).update();
         addColumn("reviews", "commit_count", "INTEGER");
         addColumn("reviews", "assignees", "TEXT");
         addColumn("reviews", "reviewers", "TEXT");
+        addColumn("reviews", "input_tokens", "INTEGER NOT NULL DEFAULT 0");
+        addColumn("reviews", "output_tokens", "INTEGER NOT NULL DEFAULT 0");
+        addColumn("reviews", "cache_read_tokens", "INTEGER NOT NULL DEFAULT 0");
+        addColumn("replies", "input_tokens", "INTEGER NOT NULL DEFAULT 0");
+        addColumn("replies", "output_tokens", "INTEGER NOT NULL DEFAULT 0");
+        addColumn("replies", "cache_read_tokens", "INTEGER NOT NULL DEFAULT 0");
+        addColumn("memory_runs", "input_tokens", "INTEGER NOT NULL DEFAULT 0");
+        addColumn("memory_runs", "output_tokens", "INTEGER NOT NULL DEFAULT 0");
+        addColumn("memory_runs", "cache_read_tokens", "INTEGER NOT NULL DEFAULT 0");
+        addColumn("agent_skills", "library_id", "TEXT");
+        db.sql("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """).update();
+        db.sql("""
+                CREATE TABLE IF NOT EXISTS skill_library (
+                    id         TEXT PRIMARY KEY,
+                    owner_id   TEXT NOT NULL,
+                    name       TEXT NOT NULL,
+                    body       TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (owner_id, name)
+                )
+                """).update();
+        db.sql("CREATE INDEX IF NOT EXISTS idx_skill_library_owner ON skill_library(owner_id, name)")
+                .update();
+        db.sql("""
+                CREATE TABLE IF NOT EXISTS gitlab_instances (
+                    id         TEXT PRIMARY KEY,
+                    name       TEXT NOT NULL UNIQUE,
+                    url        TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """).update();
+        db.sql("""
+                CREATE TABLE IF NOT EXISTS llm_providers (
+                    id             TEXT PRIMARY KEY,
+                    name           TEXT NOT NULL UNIQUE,
+                    provider       TEXT NOT NULL,
+                    model          TEXT NOT NULL,
+                    model_base_url TEXT,
+                    created_at     TEXT NOT NULL
+                )
+                """).update();
         backfillOverviewThreads();
         migrateLegacySkill();
+        backfillSkillLibrary();
     }
 
     /**
@@ -174,6 +228,68 @@ public class SchemaPatch {
                     """).params(Ids.newId(), row[0], row[1], row[2]).update();
             log.info("schema: migrated project {} skill into agent_skills", row[0]);
         }
+    }
+
+    /**
+     * Existing project skills become library rows owned by the project owner, then linked.
+     * Same owner + name + body share one library row. A name clash with a different body
+     * keeps both, suffixing the library name with the project name.
+     */
+    private void backfillSkillLibrary() {
+        record Row(String skillId, String projectId, String ownerId, String projectName,
+                   String name, String body, String createdAt) {
+        }
+        List<Row> rows = db.sql("""
+                SELECT s.id AS skill_id, s.project_id, p.owner_id, p.name AS project_name,
+                       s.name, s.body, s.created_at
+                FROM agent_skills s
+                JOIN projects p ON p.id = s.project_id
+                WHERE s.library_id IS NULL
+                """).query((rs, n) -> new Row(
+                rs.getString("skill_id"), rs.getString("project_id"), rs.getString("owner_id"),
+                rs.getString("project_name"), rs.getString("name"), rs.getString("body"),
+                rs.getString("created_at"))).list();
+        int linked = 0;
+        for (Row row : rows) {
+            String libraryId = findLibrary(row.ownerId(), row.name(), row.body());
+            if (libraryId == null) {
+                String name = row.name();
+                if (libraryNameTaken(row.ownerId(), name)) {
+                    name = row.name() + " (" + row.projectName() + ")";
+                    int n = 2;
+                    while (libraryNameTaken(row.ownerId(), name)) {
+                        name = row.name() + " (" + row.projectName() + " " + n++ + ")";
+                    }
+                }
+                libraryId = Ids.newId();
+                String now = row.createdAt() == null ? java.time.Instant.now().toString() : row.createdAt();
+                db.sql("""
+                        INSERT INTO skill_library (id, owner_id, name, body, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """).params(libraryId, row.ownerId(), name, row.body() == null ? "" : row.body(),
+                        now, now).update();
+            }
+            db.sql("UPDATE agent_skills SET library_id = ? WHERE id = ?")
+                    .params(libraryId, row.skillId()).update();
+            linked++;
+        }
+        if (linked > 0) {
+            log.info("schema: linked {} project skill(s) into the library", linked);
+        }
+    }
+
+    private String findLibrary(String ownerId, String name, String body) {
+        return db.sql("""
+                SELECT id FROM skill_library
+                WHERE owner_id = ? AND name = ? AND body = ?
+                LIMIT 1
+                """).params(ownerId, name, body == null ? "" : body)
+                .query(String.class).optional().orElse(null);
+    }
+
+    private boolean libraryNameTaken(String ownerId, String name) {
+        return db.sql("SELECT 1 FROM skill_library WHERE owner_id = ? AND name = ? LIMIT 1")
+                .params(ownerId, name).query(Integer.class).optional().isPresent();
     }
 
     private void addColumn(String table, String column, String definition) {

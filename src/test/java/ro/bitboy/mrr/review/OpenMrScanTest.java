@@ -8,6 +8,7 @@ import ro.bitboy.mrr.FakeMemory;
 import ro.bitboy.mrr.FakeReviewer;
 import ro.bitboy.mrr.TestStores;
 import ro.bitboy.mrr.gitlab.GitLabClient;
+import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.MrStatus;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Review;
@@ -41,7 +42,7 @@ class OpenMrScanTest {
         gitlab = new FakeGitLab();
         reviewer = new FakeReviewer();
         memory = new FakeMemory();
-        scan = new OpenMrScan(store, gitlab, reviewer, memory);
+        scan = new OpenMrScan(store, gitlab, reviewer, memory, 120_000);
     }
 
     @Test
@@ -96,6 +97,53 @@ class OpenMrScanTest {
         assertThat(store.findMrStatus(project.id(), 9).orElseThrow().currentStatus())
                 .isEqualTo(MrStatus.Status.MERGED);
         assertThat(memory.closed).containsExactly(project.id() + "!9:merge");
+        assertThat(reviewer.submitted).isEmpty();
+    }
+
+    @Test
+    void doesNotCloseAnOpenedMrMissingFromTheList() {
+        String id = store.claimReview(project.id(), 11, "sha-live", "{}", TestStores.mrInfo())
+                .review().id();
+        store.markReady(id, "d", "n");
+        store.upsertMrStatus(project.id(), 11, MrStatus.Status.NEEDS_WORK, id, "sha-live", 1);
+        gitlab.openMrs = List.of();
+        gitlab.oneMr = Optional.of(openMr(11, "sha-live"));
+
+        OpenMrScan.ScanResult result = scan.scan(project);
+
+        assertThat(result.closed()).isEqualTo(0);
+        assertThat(store.findMrStatus(project.id(), 11).orElseThrow().currentStatus())
+                .isEqualTo(MrStatus.Status.NEEDS_WORK);
+    }
+
+    @Test
+    void retriesARecentUnpostedRateLimitFailure() {
+        String id = store.claimReview(project.id(), 7, "sha-rl", "{}", TestStores.mrInfo())
+                .review().id();
+        store.markFailed(id, FailureKind.RATE_LIMIT, "slow down");
+        gitlab.openMrs = List.of(openMr(7, "sha-rl"));
+
+        OpenMrScan.ScanResult result = scan.scan(project);
+
+        assertThat(result.queued()).isEqualTo(1);
+        assertThat(reviewer.submitted).containsExactly(id);
+        assertThat(store.findReview(id).orElseThrow().state()).isEqualTo(Review.State.PENDING);
+    }
+
+    @Test
+    void doesNotRetryAPostedOrQuotaFailure() {
+        String posted = store.claimReview(project.id(), 7, "sha-posted", "{}", TestStores.mrInfo())
+                .review().id();
+        store.markReady(posted, "d", "n");
+        store.markFailed(posted, FailureKind.GITLAB, "later gitlab blip");
+        String quota = store.claimReview(project.id(), 8, "sha-quota", "{}", TestStores.mrInfo())
+                .review().id();
+        store.markFailed(quota, FailureKind.QUOTA, "out of credits");
+        gitlab.openMrs = List.of(openMr(7, "sha-posted"), openMr(8, "sha-quota"));
+
+        OpenMrScan.ScanResult result = scan.scan(project);
+
+        assertThat(result.queued()).isEqualTo(0);
         assertThat(reviewer.submitted).isEmpty();
     }
 

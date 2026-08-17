@@ -223,6 +223,7 @@ public class WebhookController {
                 .map(owned -> {
                     log.info("reply queued on thread {} of {}!{}", discussionId, project.name(), mrIid);
                     replier.submit(project.id(), mrIid, discussionId,
+                            WebhookPayload.noteId(body),
                             WebhookPayload.noteBody(body), WebhookPayload.noteAuthorUsername(body));
                     return ResponseEntity.accepted().body(new Ignored("reply_queued"));
                 })

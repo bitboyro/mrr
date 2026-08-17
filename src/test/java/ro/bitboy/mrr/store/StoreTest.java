@@ -7,6 +7,8 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.SimpleDriverDataSource;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
+import ro.bitboy.mrr.MrrProperties;
+import ro.bitboy.mrr.RuntimeSettings;
 import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.auth.Principal;
 import ro.bitboy.mrr.model.AgentDocument;
@@ -14,11 +16,16 @@ import ro.bitboy.mrr.model.AgentSkill;
 import ro.bitboy.mrr.model.AgentTrace;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.Finding;
+import ro.bitboy.mrr.model.GitlabInstance;
+import ro.bitboy.mrr.model.InstanceStats;
+import ro.bitboy.mrr.model.LibrarySkill;
+import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.MergeRequestInfo;
 import ro.bitboy.mrr.model.MrStatus;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Reply;
 import ro.bitboy.mrr.model.Review;
+import ro.bitboy.mrr.model.ReviewModel;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.User;
 import ro.bitboy.mrr.web.ApiException;
@@ -35,6 +42,7 @@ import static org.assertj.core.api.Assertions.tuple;
 class StoreTest {
 
     private Store store;
+    private JdbcClient db;
     private User admin;
     private User alice;
     private User bob;
@@ -53,7 +61,8 @@ class StoreTest {
         // fail if the production schema does.
         new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(dataSource);
 
-        store = new Store(JdbcClient.create(dataSource));
+        db = JdbcClient.create(dataSource);
+        store = new Store(db);
         admin = store.createUser("admin", Role.ADMIN);
         alice = store.createUser("alice", Role.USER);
         bob = store.createUser("bob", Role.USER);
@@ -194,7 +203,7 @@ class StoreTest {
         AgentTrace trace = new AgentTrace(1, 1, List.of(
                 AgentTrace.Event.assistant(1, 9L, "end_turn", "yes, that breaks", List.of())));
         Reply saved = store.createReply(new Reply(Ids.newId(), project.id(), 5, "disc-x",
-                finding.id(), "sys\n\n---\n\nuser", "yes, that breaks", trace, Instant.now()));
+                finding.id(), "gl-note-1", "sys\n\n---\n\nuser", "yes, that breaks", trace, Instant.now()));
 
         assertThat(store.listReplies(project.id(), 5)).singleElement()
                 .extracting(Reply::id, Reply::discussionId).containsExactly(saved.id(), "disc-x");
@@ -202,6 +211,7 @@ class StoreTest {
                 .extracting(Reply::prompt, r -> r.trace().turns())
                 .containsExactly("sys\n\n---\n\nuser", 1);
         assertThat(store.findReply(saved.id()).orElseThrow().summary().prompt()).isNull();
+        assertThat(store.findReplyBySourceNote(project.id(), "disc-x", "gl-note-1")).isPresent();
     }
 
     /**
@@ -464,6 +474,227 @@ class StoreTest {
         store.clearProjectError(project.id());
         assertThat(store.findProject(project.id())).get()
                 .extracting(Project::lastErrorKind).isNull();
+    }
+
+    @Test
+    void creatingAProjectSkillWritesTheOwnerLibraryAndAttachReusesIt() {
+        Project one = store.createProject(project(alice.id(), "one"));
+        Project two = store.createProject(project(alice.id(), "two"));
+        AgentSkill first = store.createSkill(one.id(), "security", "No eval.", true);
+        assertThat(first.libraryId()).isNotBlank();
+        assertThat(store.listLibrary(principal(alice)))
+                .extracting(LibrarySkill::name, LibrarySkill::body)
+                .containsExactly(tuple("security", "No eval."));
+
+        AgentSkill attached = store.attachSkill(two.id(), first.libraryId(), true, null);
+        assertThat(attached.libraryId()).isEqualTo(first.libraryId());
+        assertThat(store.listSkills(two.id())).extracting(AgentSkill::name).containsExactly("security");
+
+        store.updateSkill(first.id(), null, "Still no eval.", null, null, null);
+        assertThat(store.listSkills(two.id()).getFirst().body()).isEqualTo("Still no eval.");
+
+        assertThatThrownBy(() -> store.createSkill(one.id(), "security", "dup", true))
+                .isInstanceOf(ApiException.class);
+
+        store.deleteSkill(one.id(), first.id());
+        assertThat(store.listLibrary(principal(alice))).hasSize(1);
+        assertThatThrownBy(() -> store.deleteLibrary(first.libraryId()))
+                .isInstanceOf(ApiException.class);
+        store.deleteSkill(two.id(), attached.id());
+        store.deleteLibrary(first.libraryId());
+        assertThat(store.listLibrary(principal(alice))).isEmpty();
+    }
+
+    @Test
+    void aUserDoesNotSeeAnotherUsersLibraryAndAdminSeesAll() {
+        Project aliceApp = store.createProject(project(alice.id(), "alice-app"));
+        Project bobApp = store.createProject(project(bob.id(), "bob-app"));
+        store.createSkill(aliceApp.id(), "security", "Alice rules.", true);
+        store.createSkill(bobApp.id(), "security", "Bob rules.", true);
+
+        assertThat(store.listLibrary(principal(alice)))
+                .extracting(LibrarySkill::body).containsExactly("Alice rules.");
+        assertThat(store.listLibrary(principal(bob)))
+                .extracting(LibrarySkill::body).containsExactly("Bob rules.");
+        assertThat(store.listLibrary(principal(admin))).hasSize(2);
+        assertThatThrownBy(() -> store.requireLibraryVisible(principal(bob),
+                store.listLibrary(principal(alice)).getFirst().id()))
+                .isInstanceOf(ApiException.class);
+    }
+
+    @Test
+    void skillLibraryBackfillLinksExistingProjectSkills() {
+        Project project = store.createProject(project(alice.id(), "legacy"));
+        String skillId = Ids.newId();
+        db.sql("""
+                INSERT INTO agent_skills (id, project_id, name, body, enabled, position, created_at)
+                VALUES (?, ?, ?, ?, 1, 0, ?)
+                """).params(skillId, project.id(), "reviewer", "Be careful.", Instant.now().toString())
+                .update();
+
+        new SchemaPatch(db).patch();
+
+        AgentSkill skill = store.findSkill(project.id(), skillId).orElseThrow();
+        assertThat(skill.libraryId()).isNotBlank();
+        assertThat(skill.body()).isEqualTo("Be careful.");
+        assertThat(store.listLibrary(principal(alice)))
+                .extracting(LibrarySkill::name, LibrarySkill::body)
+                .contains(tuple("reviewer", "Be careful."));
+    }
+
+    @Test
+    void settingsOverlayClampsAndStatsCountMrsAndTokens() {
+        RuntimeSettings runtime = new RuntimeSettings(new MrrProperties(
+                "/tmp/root-token.txt", "http://localhost:8130", "/tmp/memory",
+                new MrrProperties.Review(2, 20_000, 30, 8_000, 8_000, 8_000, 2, 8_000, 8)), store);
+        runtime.load();
+        runtime.save(java.util.Map.of(
+                RuntimeSettings.WORKERS, "0",
+                RuntimeSettings.MAX_MODEL_TOKENS, "32000",
+                RuntimeSettings.ANTHROPIC_EFFORT, "LOW"));
+        assertThat(runtime.review().workers()).isEqualTo(2);
+        assertThat(runtime.review().maxModelTokens()).isEqualTo(32_000);
+        assertThat(runtime.review().anthropicEffort()).isEqualTo("low");
+        assertThat(runtime.sources().get(RuntimeSettings.WORKERS)).isEqualTo(RuntimeSettings.SOURCE_SAVED);
+
+        Project project = store.createProject(project(alice.id(), "stats-app"));
+        String one = store.claimReview(project.id(), 1, "sha-1", "{}", mrInfo()).review().id();
+        String two = store.claimReview(project.id(), 2, "sha-2", "{}", mrInfo()).review().id();
+        store.markReady(one, "d", "n");
+        store.markFailed(two, FailureKind.PROVIDER, "nope");
+        store.saveReviewUsage(one, new ReviewModel.Usage(10, 4, 2));
+        store.saveReviewUsage(two, new ReviewModel.Usage(3, 1, 0));
+        store.createFinding(finding(one, project.id(), 1, "disc-1"));
+
+        InstanceStats stats = store.instanceStats(1);
+        assertThat(stats.mrsProcessed()).isEqualTo(2);
+        assertThat(stats.reviewsTotal()).isEqualTo(2);
+        assertThat(stats.inFlight()).isEqualTo(1);
+        assertThat(stats.tokens().input()).isEqualTo(13);
+        assertThat(stats.tokens().output()).isEqualTo(5);
+        assertThat(stats.tokens().cacheRead()).isEqualTo(2);
+        assertThat(stats.findingsOpen()).isEqualTo(1);
+        assertThat(stats.failuresByKind()).containsEntry(FailureKind.PROVIDER.name(), 1L);
+        assertThat(stats.projects()).anySatisfy(row -> {
+            assertThat(row.name()).isEqualTo("stats-app");
+            assertThat(row.mrs()).isEqualTo(2);
+            assertThat(row.inputTokens()).isEqualTo(13);
+        });
+    }
+
+    @Test
+    void gitlabInstancesAreNamedUrlsWithNoToken() {
+        GitlabInstance gitlab = store.createGitlabInstance(" GitLab.com ", "https://gitlab.com/");
+        assertThat(gitlab.name()).isEqualTo("GitLab.com");
+        assertThat(gitlab.url()).isEqualTo("https://gitlab.com");
+
+        GitlabInstance self = store.createGitlabInstance("corp", "https://git.example.com");
+        store.updateGitlabInstance(self.id(), "Corp GitLab", "https://git.example.com/gitlab/");
+        assertThat(store.findGitlabInstance(self.id())).get()
+                .extracting(GitlabInstance::name, GitlabInstance::url)
+                .containsExactly("Corp GitLab", "https://git.example.com/gitlab");
+
+        assertThat(store.listGitlabInstances())
+                .extracting(GitlabInstance::name)
+                .containsExactly("Corp GitLab", "GitLab.com");
+
+        assertThatThrownBy(() -> store.createGitlabInstance("GitLab.com", "https://gitlab.com"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(409));
+        assertThatThrownBy(() -> store.createGitlabInstance("bad", "gitlab.com"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
+        assertThatThrownBy(() -> store.updateGitlabInstance("missing", "x", "https://gitlab.com"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(404));
+
+        store.deleteGitlabInstance(gitlab.id());
+        assertThat(store.findGitlabInstance(gitlab.id())).isEmpty();
+        assertThatThrownBy(() -> store.deleteGitlabInstance(gitlab.id()))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(404));
+    }
+
+    @Test
+    void llmProvidersStoreEndpointNotKeyAndBlankBaseUrlClears() {
+        LlmProvider opus = store.createLlmProvider("Opus", Project.Provider.ANTHROPIC,
+                "claude-opus-5", "  ");
+        assertThat(opus.modelBaseUrl()).isNull();
+        assertThat(opus.provider()).isEqualTo(Project.Provider.ANTHROPIC);
+
+        LlmProvider ollama = store.createLlmProvider("Ollama", Project.Provider.OPENAI_COMPAT,
+                "llama3.2", "http://ollama:11434/v1/");
+        assertThat(ollama.modelBaseUrl()).isEqualTo("http://ollama:11434/v1");
+
+        store.updateLlmProvider(ollama.id(), null, null, "llama3.3", "");
+        LlmProvider cleared = store.findLlmProvider(ollama.id()).orElseThrow();
+        assertThat(cleared.model()).isEqualTo("llama3.3");
+        assertThat(cleared.modelBaseUrl()).isNull();
+
+        assertThatThrownBy(() -> store.createLlmProvider("Opus", Project.Provider.ANTHROPIC,
+                "claude-sonnet-4", null))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(409));
+        assertThatThrownBy(() -> store.createLlmProvider("bad", Project.Provider.OPENAI_COMPAT,
+                "gpt-4", "not-a-url"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
+        assertThatThrownBy(() -> store.createLlmProvider("no-model", Project.Provider.ANTHROPIC,
+                "  ", null))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
+
+        store.deleteLlmProvider(opus.id());
+        assertThat(store.listLlmProviders()).extracting(LlmProvider::name).containsExactly("Ollama");
+    }
+
+    @Test
+    void schemaPatchCreatesCatalogTablesOnExistingDatabases() {
+        db.sql("DROP TABLE IF EXISTS gitlab_instances").update();
+        db.sql("DROP TABLE IF EXISTS llm_providers").update();
+        new SchemaPatch(db).patch();
+        GitlabInstance row = store.createGitlabInstance("patched", "https://gitlab.example");
+        assertThat(store.findGitlabInstance(row.id())).isPresent();
+    }
+
+    @Test
+    void editingACatalogDoesNotRewriteAnExistingProject() {
+        GitlabInstance gitlab = store.createGitlabInstance("gitlab.com", "https://gitlab.com");
+        LlmProvider opus = store.createLlmProvider("Opus", Project.Provider.ANTHROPIC,
+                "claude-opus-5", null);
+        Project project = store.createProject(new Project(Ids.newId(), alice.id(), "calc", true,
+                gitlab.url(), "group/calc", "glpat-x", Ids.newSecret(),
+                opus.provider(), opus.modelBaseUrl(), opus.model(), "sk-x",
+                null, false, 1, List.of(), false, false, null, null, null, null, null, null,
+                Instant.now()));
+
+        store.updateGitlabInstance(gitlab.id(), "GitLab", "https://gitlab.example.com");
+        store.updateLlmProvider(opus.id(), "Opus 4", Project.Provider.ANTHROPIC, "claude-opus-4", null);
+
+        Project kept = store.findProject(project.id()).orElseThrow();
+        assertThat(kept.gitlabUrl()).isEqualTo("https://gitlab.com");
+        assertThat(kept.model()).isEqualTo("claude-opus-5");
+    }
+
+    @Test
+    void schemaInitSurvivesAnOlderRepliesTableThenPatchAddsSourceNoteId() {
+        var dataSource = new SimpleDriverDataSource(
+                new org.sqlite.JDBC(), "jdbc:sqlite:" + tempDir.resolve("old-replies.db"));
+        JdbcClient old = JdbcClient.create(dataSource);
+        old.sql("""
+                CREATE TABLE replies (
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, mr_iid INTEGER NOT NULL,
+                    discussion_id TEXT NOT NULL, finding_id TEXT, prompt TEXT, response TEXT,
+                    trace TEXT, created_at TEXT NOT NULL)
+                """).update();
+        new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(dataSource);
+        new SchemaPatch(old).patch();
+        List<String> columns = old.sql("PRAGMA table_info(replies)")
+                .query((rs, n) -> rs.getString("name")).list();
+        assertThat(columns).contains("source_note_id");
+        List<String> indexes = old.sql("PRAGMA index_list(replies)")
+                .query((rs, n) -> rs.getString("name")).list();
+        assertThat(indexes).contains("idx_replies_source_note");
     }
 
     private Finding finding(String reviewId, String projectId, long mrIid, String discussionId) {

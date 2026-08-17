@@ -111,7 +111,7 @@ class WebhookControllerTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
         assertThat(replier.calls).containsExactly(
-                new FakeReplier.Call(project.id(), 42, "disc-1", "why?", "ada"));
+                new FakeReplier.Call(project.id(), 42, "disc-1", "9001", "why?", "ada"));
     }
 
     @Test
@@ -164,6 +164,7 @@ class WebhookControllerTest {
                     "noteable_type": "MergeRequest",
                     "system": %s,
                     "discussion_id": "disc-1",
+                    "id": 9001,
                     "note": "why?"
                   },
                   "merge_request": { "iid": 42 }

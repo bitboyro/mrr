@@ -55,12 +55,14 @@ final class Agent {
 
         List<Event> events = new ArrayList<>();
         Result result = null;
+        ReviewModel.Usage usage = ReviewModel.Usage.NONE;
         int cap = Math.max(1, maxTurns);
         int used = 0;
         for (int i = 0; i < cap; i++) {
             boolean last = i == cap - 1;
             long started = System.currentTimeMillis();
             result = model.complete(system, turns, last || tools.isEmpty() ? List.of() : tools);
+            usage = usage.plus(result.usage());
             long elapsed = System.currentTimeMillis() - started;
             used = i + 1;
 
@@ -102,7 +104,12 @@ final class Agent {
         if (onTurn != null) {
             onTurn.accept(new AgentTrace(used, cap, List.copyOf(events)));
         }
-        return new Run(result, new AgentTrace(used, cap, events));
+        Result last = result;
+        if (last != null && usage != last.usage()) {
+            last = new Result(last.markdown(), last.toolCalls(), last.refused(), last.stopReason(),
+                    last.echo(), usage);
+        }
+        return new Run(last, new AgentTrace(used, cap, events));
     }
 
     static AgentTrace concat(List<Run> runs) {

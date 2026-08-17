@@ -7,8 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestClient;
-import ro.bitboy.mrr.MrrProperties;
+import ro.bitboy.mrr.RuntimeSettings;
 import ro.bitboy.mrr.gitlab.GitLabClient;
 import ro.bitboy.mrr.memory.MemoryActor;
 import ro.bitboy.mrr.memory.MemoryDocument;
@@ -17,14 +16,12 @@ import ro.bitboy.mrr.memory.MemoryRun;
 import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.memory.MemoryStore;
 import ro.bitboy.mrr.model.AgentSkill;
-import ro.bitboy.mrr.model.AnthropicModel;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.MemoryStatus;
-import ro.bitboy.mrr.model.OpenAiModel;
 import ro.bitboy.mrr.model.Project;
-import ro.bitboy.mrr.model.ReviewModel;
 import ro.bitboy.mrr.model.ReviewModel.ToolCall;
 import ro.bitboy.mrr.model.ReviewModel.ToolSpec;
+import ro.bitboy.mrr.model.ReviewModelFactory;
 import ro.bitboy.mrr.store.Store;
 import ro.bitboy.mrr.web.ApiException;
 
@@ -56,22 +53,22 @@ public class Librarian {
     private final MemoryStore memoryStore;
     private final MemoryService memory;
     private final GitLabClient gitlab;
-    private final RestClient.Builder restClients;
-    private final MrrProperties properties;
+    private final ReviewModelFactory models;
+    private final RuntimeSettings settings;
     private final ObjectMapper mapper;
     private final Agent agent;
     private final String skill;
     private final ExecutorService workers;
 
     public Librarian(Store store, MemoryStore memoryStore, MemoryService memory,
-                     GitLabClient gitlab, RestClient.Builder restClients,
-                     MrrProperties properties, ObjectMapper mapper) {
+                     GitLabClient gitlab, ReviewModelFactory models,
+                     RuntimeSettings settings, ObjectMapper mapper) {
         this.store = store;
         this.memoryStore = memoryStore;
         this.memory = memory;
         this.gitlab = gitlab;
-        this.restClients = restClients;
-        this.properties = properties;
+        this.models = models;
+        this.settings = settings;
         this.mapper = mapper;
         this.agent = new Agent();
         this.skill = loadSkill();
@@ -83,8 +80,10 @@ public class Librarian {
         if (!project.librarianEnabled()) {
             throw ApiException.conflict("Librarian is disabled for this project.");
         }
+        recoverStaleRun(project);
         if (memoryStore.runningRun(projectId).isPresent()
-                || project.memoryStatus() == MemoryStatus.RUNNING) {
+                || store.findProject(projectId).map(Project::memoryStatus).orElse(project.memoryStatus())
+                == MemoryStatus.RUNNING) {
             throw ApiException.conflict("A librarian run is already in flight.");
         }
         boolean initialize = !memory.hasProjectSpace(projectId);
@@ -138,14 +137,17 @@ public class Librarian {
                 ReviewTools.searchMemory(),
                 ReviewTools.readMemory(),
                 ReviewTools.librarianWrite());
-        int cap = properties.review().librarianMaxTurns();
+        int cap = settings.review().librarianMaxTurns();
         Agent.Run agentRun = agent.run(
-                modelFor(project), skill, user, tools, cap,
+                models.forProject(project), skill, user, tools, cap,
                 call -> execute(call, project, info, tip.orElse(null), runId),
-                "librarian " + runId, properties.review().maxTraceChars(),
+                "librarian " + runId, settings.review().maxTraceChars(),
                 trace -> memoryStore.saveRunTrace(runId, trace));
 
         memoryStore.saveRunTrace(runId, agentRun.trace());
+        if (agentRun.result() != null) {
+            memoryStore.saveRunUsage(runId, agentRun.result().usage());
+        }
         if (agentRun.result() != null && agentRun.result().refused()) {
             memoryStore.markRunFailed(runId, FailureKind.REFUSAL.headline()
                     + " stop_reason=" + agentRun.result().stopReason());
@@ -194,9 +196,9 @@ public class Librarian {
         sb.append('\n');
         if (project.memoryHeadSha() != null && tip != null
                 && !project.memoryHeadSha().equals(tip)) {
-            gitlab.compare(project, project.memoryHeadSha(), tip, properties.review().maxDiffChars())
+            gitlab.compare(project, project.memoryHeadSha(), tip, settings.review().maxDiffChars())
                     .ifPresent(diff -> sb.append("\n## Default-branch compare since last refresh\n\n")
-                            .append(truncate(diff, properties.review().maxMemoryChars())).append('\n'));
+                            .append(truncate(diff, settings.review().maxMemoryChars())).append('\n'));
         }
 
         List<AgentSkill> skills = store.listSkills(project.id());
@@ -222,7 +224,7 @@ public class Librarian {
 
         if (!mrCards.isEmpty()) {
             sb.append("\nExisting merge-request cards (").append(mrCards.size()).append("):\n");
-            int budget = properties.review().maxMemoryChars();
+            int budget = settings.review().maxMemoryChars();
             int used = 0;
             for (MemoryDocument card : mrCards) {
                 MemoryDocument full = memory.get(project.id(), card.id()).orElse(card);
@@ -254,12 +256,12 @@ public class Librarian {
         if (path == null) {
             return;
         }
-        String text = gitlab.fileAt(project, path, ref, null, null, properties.review().maxFileChars());
+        String text = gitlab.fileAt(project, path, ref, null, null, settings.review().maxFileChars());
         if (text.startsWith("error:")) {
             return;
         }
         sb.append("\n## Prefetched ").append(label).append(" (`").append(path).append("`)\n\n");
-        sb.append(truncate(text, properties.review().maxMemoryChars())).append("\n");
+        sb.append(truncate(text, settings.review().maxMemoryChars())).append("\n");
     }
 
     private static String firstPresent(List<GitLabClient.TreeEntry> tree, List<String> names) {
@@ -299,7 +301,7 @@ public class Librarian {
                 }
                 Integer start = args.path("start_line").isIntegralNumber() ? args.path("start_line").asInt() : null;
                 Integer end = args.path("end_line").isIntegralNumber() ? args.path("end_line").asInt() : null;
-                return gitlab.fileAt(project, path, ref, start, end, properties.review().maxFileChars());
+                return gitlab.fileAt(project, path, ref, start, end, settings.review().maxFileChars());
             }
             return ReviewTools.executeMemory(mapper, memory, project.id(), MemoryActor.LIBRARIAN,
                     null, name, call.argumentsJson());
@@ -309,13 +311,23 @@ public class Librarian {
         }
     }
 
-    private ReviewModel modelFor(Project project) {
-        return switch (project.provider()) {
-            case ANTHROPIC -> new AnthropicModel(
-                    project.modelKey(), project.modelBaseUrl(), project.model());
-            case OPENAI_COMPAT -> new OpenAiModel(
-                    restClients, project.modelKey(), project.modelBaseUrl(), project.model());
-        };
+    private void recoverStaleRun(Project project) {
+        Optional<MemoryRun> running = memoryStore.runningRun(project.id());
+        if (running.isEmpty() && project.memoryStatus() != MemoryStatus.RUNNING) {
+            return;
+        }
+        Instant started = running.map(MemoryRun::createdAt).orElse(project.memoryRefreshedAt());
+        long staleAfterMs = Math.max(1, settings.review().timeoutSeconds())
+                * 1_000L * (settings.review().librarianMaxTurns() + 2);
+        if (started != null && Instant.now().toEpochMilli() - started.toEpochMilli() < staleAfterMs) {
+            return;
+        }
+        running.ifPresent(run -> {
+            log.warn("librarian {} left {} — marking failed so a new run can start",
+                    run.id(), run.state());
+            memoryStore.markRunFailed(run.id(), "Librarian run was interrupted.");
+        });
+        store.updateMemoryState(project.id(), project.memoryHeadSha(), MemoryStatus.FAILED, Instant.now());
     }
 
     private static String loadSkill() {
@@ -323,6 +335,7 @@ public class Librarian {
             return new ClassPathResource("skills/librarian.md")
                     .getContentAsString(StandardCharsets.UTF_8);
         } catch (IOException e) {
+            log.error("could not load skills/librarian.md — using a stub skill", e);
             return "Write project/overview.md from the prefetched repository context.";
         }
     }

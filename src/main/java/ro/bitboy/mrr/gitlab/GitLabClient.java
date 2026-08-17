@@ -6,6 +6,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 import ro.bitboy.mrr.model.Project;
@@ -64,10 +65,20 @@ public class GitLabClient {
             assembled.append(file.asText());
         }
 
-        boolean truncated = maxChars < Integer.MAX_VALUE && assembled.length() > maxChars;
-        String text = truncated
+        boolean overflow = body.path("overflow").asBoolean(false)
+                || body.path("overflowed").asBoolean(false);
+        if (overflow) {
+            log.warn("GitLab truncated the changes collection for {}!{} — reviewing a partial diff",
+                    project.name(), mrIid);
+        }
+        boolean truncated = overflow
+                || (maxChars < Integer.MAX_VALUE && assembled.length() > maxChars);
+        String text = (maxChars < Integer.MAX_VALUE && assembled.length() > maxChars)
                 ? assembled.substring(0, maxChars) + "\n\n[diff truncated by mrr]"
                 : assembled.toString();
+        if (overflow && !text.contains("[diff truncated by mrr]")) {
+            text = text + (text.isEmpty() ? "" : "\n\n") + "[diff truncated by GitLab]";
+        }
 
         // The MR author, which the webhook gives only as a numeric author_id.
         JsonNode author = body.path("author");
@@ -84,9 +95,8 @@ public class GitLabClient {
     }
 
     public List<MergeRequest> openMergeRequests(Project project) {
-        JsonNode body = exchange(project, HttpMethod.GET, "/merge_requests?state=opened&per_page=100", null);
         List<MergeRequest> result = new ArrayList<>();
-        for (JsonNode mr : body) {
+        for (JsonNode mr : pagedArray(project, "/merge_requests?state=opened")) {
             result.add(toMergeRequest(mr));
         }
         return result;
@@ -157,6 +167,9 @@ public class GitLabClient {
             throw new ApiException(HttpStatus.BAD_GATEWAY, "gitlab_error",
                     "GitLab GET /merge_requests/" + mrIid + "/commits failed with "
                             + e.getStatusCode());
+        } catch (ResourceAccessException e) {
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "gitlab_error",
+                    "GitLab GET /merge_requests/" + mrIid + "/commits failed: " + e.getMessage());
         }
     }
 
@@ -286,27 +299,10 @@ public class GitLabClient {
      */
     public List<DiscussionView> listDiscussions(Project project, long mrIid) {
         List<DiscussionView> result = new ArrayList<>();
-        int page = 1;
-        while (page > 0 && page <= 20) {
-            ResponseEntity<JsonNode> response = exchangeEntity(project, HttpMethod.GET,
-                    "/merge_requests/" + mrIid + "/discussions?per_page=100&page=" + page, null);
-            JsonNode body = response.getBody();
-            if (body != null && body.isArray()) {
-                for (JsonNode d : body) {
-                    DiscussionView view = toDiscussionView(d);
-                    if (view != null) {
-                        result.add(view);
-                    }
-                }
-            }
-            String next = response.getHeaders().getFirst("X-Next-Page");
-            if (next == null || next.isBlank()) {
-                break;
-            }
-            try {
-                page = Integer.parseInt(next.trim());
-            } catch (NumberFormatException e) {
-                break;
+        for (JsonNode d : pagedArray(project, "/merge_requests/" + mrIid + "/discussions")) {
+            DiscussionView view = toDiscussionView(d);
+            if (view != null) {
+                result.add(view);
             }
         }
         return result;
@@ -388,6 +384,8 @@ public class GitLabClient {
                     .body(String.class);
         } catch (RestClientResponseException e) {
             return "error: GitLab returned " + e.getStatusCode() + " for " + path;
+        } catch (ResourceAccessException e) {
+            return "error: GitLab timed out or could not be reached for " + path;
         }
         if (body == null) {
             return "error: empty file";
@@ -556,7 +554,38 @@ public class GitLabClient {
             // Surface GitLab's status but not its body — the body can echo the token back.
             throw new ApiException(HttpStatus.BAD_GATEWAY, "gitlab_error",
                     "GitLab " + method + " " + path + " failed with " + e.getStatusCode());
+        } catch (ResourceAccessException e) {
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "gitlab_error",
+                    "GitLab " + method + " " + path + " failed: " + e.getMessage());
         }
+    }
+
+    /**
+     * Follows GitLab's {@code X-Next-Page} up to 20 pages. Open-MR listing used to stop
+     * at page 1, after which the scan treated every unlisted live MR as closed.
+     */
+    private List<JsonNode> pagedArray(Project project, String path) {
+        List<JsonNode> items = new ArrayList<>();
+        int page = 1;
+        while (page > 0 && page <= 20) {
+            String join = path.contains("?") ? "&" : "?";
+            ResponseEntity<JsonNode> response = exchangeEntity(project, HttpMethod.GET,
+                    path + join + "per_page=100&page=" + page, null);
+            JsonNode body = response.getBody();
+            if (body != null && body.isArray()) {
+                body.forEach(items::add);
+            }
+            String next = response.getHeaders().getFirst("X-Next-Page");
+            if (next == null || next.isBlank()) {
+                break;
+            }
+            try {
+                page = Integer.parseInt(next.trim());
+            } catch (NumberFormatException e) {
+                break;
+            }
+        }
+        return items;
     }
 
     /** 404 is "nothing there" for tree/commit/compare on an empty repo. Anything else fails closed. */

@@ -146,6 +146,52 @@ type AgentSkill = {
   enabled: boolean;
   branchPattern: string | null;
   position: number;
+  libraryId?: string | null;
+};
+type LibrarySkill = {
+  id: string;
+  ownerId: string;
+  ownerName: string | null;
+  name: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+};
+type GitlabInstance = { id: string; name: string; url: string; createdAt: string };
+type LlmProvider = {
+  id: string;
+  name: string;
+  provider: Project["provider"];
+  model: string;
+  modelBaseUrl: string | null;
+  createdAt: string;
+};
+type InstanceInfo = { baseUrl: string; webhookUrlTemplate: string };
+type SettingsView = {
+  live: Record<string, string | number>;
+  sources: Record<string, "env" | "saved">;
+  restartOnly: Record<string, string>;
+};
+type InstanceStats = {
+  mrsProcessed: number;
+  reviewsTotal: number;
+  reviewsByState: Record<string, number>;
+  inFlight: number;
+  pendingOrProcessing: number;
+  tokens: { input: number; output: number; cacheRead: number };
+  tokensLast7Days: { input: number; output: number; cacheRead: number };
+  findingsOpen: number;
+  findingsAddressed: number;
+  meanReadyDurationSeconds: number | null;
+  failuresByKind: Record<string, number>;
+  projects: {
+    projectId: string;
+    name: string;
+    mrs: number;
+    reviews: number;
+    inputTokens: number;
+    outputTokens: number;
+  }[];
 };
 type AgentDocument = {
   id: string;
@@ -165,7 +211,8 @@ type Route =
   | { name: "mr"; id: string; iid: string }
   | { name: "review"; id: string }
   | { name: "admin" }
-  | { name: "logs" };
+  | { name: "logs" }
+  | { name: "configure" };
 
 function parseRoute(path: string): Route {
   if (path === "/" || path === "/login" || path === "/howto") return { name: "howto" };
@@ -173,6 +220,7 @@ function parseRoute(path: string): Route {
   if (path === "/projects/new") return { name: "new" };
   if (path === "/admin") return { name: "admin" };
   if (path === "/logs") return { name: "logs" };
+  if (path === "/configure") return { name: "configure" };
   let m = path.match(/^\/projects\/([^/]+)\/edit$/);
   if (m) return { name: "edit", id: m[1] };
   m = path.match(/^\/projects\/([^/]+)\/mrs\/(\d+)$/);
@@ -476,6 +524,7 @@ export default function App() {
             <a href="/projects" onClick={(e) => { e.preventDefault(); go("/projects"); }}>Projects</a>
             {me.role === "ADMIN" && (
               <>
+                <a href="/configure" onClick={(e) => { e.preventDefault(); go("/configure"); }}>Configure</a>
                 <a href="/logs" onClick={(e) => { e.preventDefault(); go("/logs"); }}>Logs</a>
                 <a href="/admin" onClick={(e) => { e.preventDefault(); go("/admin"); }}>Admin</a>
               </>
@@ -495,6 +544,7 @@ export default function App() {
         {route.name === "review" && <ReviewDetail id={route.id} />}
         {route.name === "admin" && me.role === "ADMIN" && <Admin />}
         {route.name === "logs" && me.role === "ADMIN" && <Logs />}
+        {route.name === "configure" && me.role === "ADMIN" && <Configure />}
       </div>
     );
   }
@@ -838,8 +888,10 @@ function MrList({ projectId }: { projectId: string }) {
 function AgentContext({ projectId, tools }: { projectId: string; tools: string[] }) {
   const [skills, setSkills] = useState<AgentSkill[] | null>(null);
   const [docs, setDocs] = useState<AgentDocument[] | null>(null);
+  const [library, setLibrary] = useState<LibrarySkill[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [draftSkill, setDraftSkill] = useState({ name: "", body: "", branchPattern: "" });
+  const [pickLibraryId, setPickLibraryId] = useState("");
   const [draftDoc, setDraftDoc] = useState({ name: "", body: "" });
   const [editing, setEditing] = useState<{ type: "skill" | "doc"; id: string; body: string; branchPattern?: string } | null>(null);
 
@@ -847,7 +899,8 @@ function AgentContext({ projectId, tools }: { projectId: string; tools: string[]
     Promise.all([
       api<AgentSkill[]>(`/api/projects/${projectId}/skills`),
       api<AgentDocument[]>(`/api/projects/${projectId}/documents`),
-    ]).then(([s, d]) => { setSkills(s); setDocs(d); })
+      api<LibrarySkill[]>("/api/skills"),
+    ]).then(([s, d, lib]) => { setSkills(s); setDocs(d); setLibrary(lib); })
       .catch((e) => setErr(String(e.message)));
   }
   useEffect(load, [projectId]);
@@ -880,6 +933,15 @@ function AgentContext({ projectId, tools }: { projectId: string; tools: string[]
       method: "POST", body: JSON.stringify({ ...draftSkill, enabled: true }),
     });
     setDraftSkill({ name: "", body: "", branchPattern: "" });
+    load();
+  }
+  async function attachLibrary(e: FormEvent) {
+    e.preventDefault();
+    if (!pickLibraryId) return;
+    await api(`/api/projects/${projectId}/skills`, {
+      method: "POST", body: JSON.stringify({ libraryId: pickLibraryId, enabled: true }),
+    });
+    setPickLibraryId("");
     load();
   }
   async function addDoc(e: FormEvent) {
@@ -1001,7 +1063,7 @@ function AgentContext({ projectId, tools }: { projectId: string; tools: string[]
             <p className="muted">Select a skill or document, or add one below.</p>
           )}
           <form onSubmit={addSkill}>
-            <label>Add skill</label>
+            <label>New skill</label>
             <div className="grid">
               <input placeholder="name (e.g. security)" value={draftSkill.name}
                 onChange={(e) => setDraftSkill({ ...draftSkill, name: e.target.value })} required />
@@ -1012,6 +1074,18 @@ function AgentContext({ projectId, tools }: { projectId: string; tools: string[]
             <textarea placeholder="instructions" value={draftSkill.body}
               onChange={(e) => setDraftSkill({ ...draftSkill, body: e.target.value })} />
             <p className="row"><button className="primary" type="submit">Add</button></p>
+          </form>
+          <form onSubmit={attachLibrary}>
+            <label>From library</label>
+            <div className="grid">
+              <select value={pickLibraryId} onChange={(e) => setPickLibraryId(e.target.value)}>
+                <option value="">Select a library skill…</option>
+                {library.filter((s) => !skills.some((p) => p.libraryId === s.id || p.name === s.name)).map((s) => (
+                  <option key={s.id} value={s.id}>{s.name}{s.ownerName ? ` · ${s.ownerName}` : ""}</option>
+                ))}
+              </select>
+              <button className="primary" type="submit" disabled={!pickLibraryId}>Attach</button>
+            </div>
           </form>
           <form onSubmit={addDoc}>
             <label>Add document</label>
@@ -1205,12 +1279,44 @@ function MemoryPanel({ project, onRefresh }: { project: Project; onRefresh: () =
 function ProjectForm({ id }: { id?: string }) {
   const [form, setForm] = useState({
     name: "", gitlabUrl: "https://gitlab.com", gitlabProjectId: "", gitlabToken: "",
-    provider: "ANTHROPIC", modelBaseUrl: "", model: "", modelKey: "", skill: "",
+    provider: "ANTHROPIC" as Project["provider"], modelBaseUrl: "", model: "", modelKey: "", skill: "",
     skipDrafts: false, agentMaxTurns: 1, agentTools: "", autoApprove: false,
     librarianEnabled: false, enabled: true,
   });
   const [secret, setSecret] = useState<{ webhookUrl: string; webhookSecret: string } | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [gitlabInstances, setGitlabInstances] = useState<GitlabInstance[]>([]);
+  const [llmProviders, setLlmProviders] = useState<LlmProvider[]>([]);
+  const [instance, setInstance] = useState<InstanceInfo | null>(null);
+  const [gitlabPick, setGitlabPick] = useState("custom");
+  const [llmPick, setLlmPick] = useState("custom");
+
+  useEffect(() => {
+    Promise.all([
+      api<GitlabInstance[]>("/api/gitlab-instances"),
+      api<LlmProvider[]>("/api/llm-providers"),
+      api<InstanceInfo>("/api/instance"),
+    ]).then(([hosts, providers, info]) => {
+      setGitlabInstances(hosts);
+      setLlmProviders(providers);
+      setInstance(info);
+      if (id) return;
+      if (hosts.length > 0) {
+        setGitlabPick(hosts[0].id);
+        setForm((f) => ({ ...f, gitlabUrl: hosts[0].url }));
+      }
+      if (providers.length > 0) {
+        const p = providers[0];
+        setLlmPick(p.id);
+        setForm((f) => ({
+          ...f,
+          provider: p.provider,
+          model: p.model,
+          modelBaseUrl: p.modelBaseUrl ?? "",
+        }));
+      }
+    }).catch((e) => setErr(String((e as Error).message)));
+  }, [id]);
 
   useEffect(() => {
     if (!id) return;
@@ -1236,16 +1342,34 @@ function ProjectForm({ id }: { id?: string }) {
     setForm((f) => ({ ...f, [key]: value }));
   }
 
+  function pickGitlab(value: string) {
+    setGitlabPick(value);
+    if (value === "custom") return;
+    const host = gitlabInstances.find((g) => g.id === value);
+    if (host) set("gitlabUrl", host.url);
+  }
+
+  function pickLlm(value: string) {
+    setLlmPick(value);
+    if (value === "custom") return;
+    const provider = llmProviders.find((p) => p.id === value);
+    if (provider) {
+      setForm((f) => ({
+        ...f,
+        provider: provider.provider,
+        model: provider.model,
+        modelBaseUrl: provider.modelBaseUrl ?? "",
+      }));
+    }
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     setErr(null);
     const tools = form.agentTools.split(",").map((s) => s.trim()).filter(Boolean);
     const body: Record<string, unknown> = {
       name: form.name,
-      gitlabUrl: form.gitlabUrl,
       gitlabProjectId: form.gitlabProjectId,
-      provider: form.provider,
-      model: form.model,
       skill: form.skill || null,
       skipDrafts: form.skipDrafts,
       agentMaxTurns: Number(form.agentMaxTurns) || 1,
@@ -1254,9 +1378,16 @@ function ProjectForm({ id }: { id?: string }) {
       librarianEnabled: form.librarianEnabled,
       enabled: form.enabled,
     };
+    if (gitlabPick !== "custom") body.gitlabInstanceId = gitlabPick;
+    else body.gitlabUrl = form.gitlabUrl;
+    if (llmPick !== "custom") body.llmProviderId = llmPick;
+    else {
+      body.provider = form.provider;
+      body.model = form.model;
+      if (form.modelBaseUrl) body.modelBaseUrl = form.modelBaseUrl;
+    }
     if (form.gitlabToken) body.gitlabToken = form.gitlabToken;
     if (form.modelKey) body.modelKey = form.modelKey;
-    if (form.modelBaseUrl) body.modelBaseUrl = form.modelBaseUrl;
     try {
       if (id) {
         await api(`/api/projects/${id}`, { method: "PUT", body: JSON.stringify(body) });
@@ -1289,17 +1420,38 @@ function ProjectForm({ id }: { id?: string }) {
     );
   }
 
+  const webhookPreview = instance
+    ? instance.webhookUrlTemplate.replace("{projectId}", "<project-id>")
+    : null;
+  const gitlabLocked = gitlabPick !== "custom";
+  const llmLocked = llmPick !== "custom";
+
   return (
     <form onSubmit={submit}>
       <h2>{id ? "Edit project" : "New project"}</h2>
+      {!id && webhookPreview && (
+        <p className="callout">
+          Webhook URL will be <code className="mono">{webhookPreview}</code>
+        </p>
+      )}
       <div className="grid">
         <div>
           <label>Name</label>
           <input value={form.name} onChange={(e) => set("name", e.target.value)} required />
         </div>
         <div>
+          <label>GitLab</label>
+          <select value={gitlabPick} onChange={(e) => pickGitlab(e.target.value)}>
+            <option value="custom">Custom URL</option>
+            {gitlabInstances.map((g) => (
+              <option key={g.id} value={g.id}>{g.name} — {g.url}</option>
+            ))}
+          </select>
+        </div>
+        <div>
           <label>GitLab URL</label>
-          <input value={form.gitlabUrl} onChange={(e) => set("gitlabUrl", e.target.value)} required />
+          <input value={form.gitlabUrl} readOnly={gitlabLocked} required={!gitlabLocked}
+            onChange={(e) => { setGitlabPick("custom"); set("gitlabUrl", e.target.value); }} />
         </div>
         <div>
           <label>GitLab project id or path</label>
@@ -1310,19 +1462,31 @@ function ProjectForm({ id }: { id?: string }) {
           <input value={form.gitlabToken} onChange={(e) => set("gitlabToken", e.target.value)} />
         </div>
         <div>
+          <label>LLM</label>
+          <select value={llmPick} onChange={(e) => pickLlm(e.target.value)}>
+            <option value="custom">Custom provider</option>
+            {llmProviders.map((p) => (
+              <option key={p.id} value={p.id}>{p.name} — {p.model}</option>
+            ))}
+          </select>
+        </div>
+        <div>
           <label>Provider</label>
-          <select value={form.provider} onChange={(e) => set("provider", e.target.value as Project["provider"])}>
+          <select value={form.provider} disabled={llmLocked}
+            onChange={(e) => { setLlmPick("custom"); set("provider", e.target.value as Project["provider"]); }}>
             <option>ANTHROPIC</option>
             <option>OPENAI_COMPAT</option>
           </select>
         </div>
         <div>
           <label>Model</label>
-          <input value={form.model} onChange={(e) => set("model", e.target.value)} required />
+          <input value={form.model} readOnly={llmLocked} required={!llmLocked}
+            onChange={(e) => { setLlmPick("custom"); set("model", e.target.value); }} />
         </div>
         <div>
           <label>Model base URL</label>
-          <input value={form.modelBaseUrl} onChange={(e) => set("modelBaseUrl", e.target.value)} />
+          <input value={form.modelBaseUrl} readOnly={llmLocked}
+            onChange={(e) => { setLlmPick("custom"); set("modelBaseUrl", e.target.value); }} />
         </div>
         <div>
           <label>Model key {id && <span className="muted">(blank keeps current)</span>}</label>
@@ -1847,6 +2011,472 @@ function Logs() {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function Configure() {
+  const [settings, setSettings] = useState<SettingsView | null>(null);
+  const [stats, setStats] = useState<InstanceStats | null>(null);
+  const [library, setLibrary] = useState<LibrarySkill[]>([]);
+  const [gitlabInstances, setGitlabInstances] = useState<GitlabInstance[]>([]);
+  const [llmProviders, setLlmProviders] = useState<LlmProvider[]>([]);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [libDraft, setLibDraft] = useState({ name: "", body: "" });
+  const [gitlabDraft, setGitlabDraft] = useState({ name: "", url: "https://gitlab.com" });
+  const [llmDraft, setLlmDraft] = useState({
+    name: "", provider: "ANTHROPIC" as Project["provider"], model: "", modelBaseUrl: "",
+  });
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  function load() {
+    Promise.all([
+      api<SettingsView>("/api/settings"),
+      api<InstanceStats>("/api/stats"),
+      api<LibrarySkill[]>("/api/skills"),
+      api<GitlabInstance[]>("/api/gitlab-instances"),
+      api<LlmProvider[]>("/api/llm-providers"),
+    ]).then(([s, st, lib, hosts, providers]) => {
+      setSettings(s);
+      setStats(st);
+      setLibrary(lib);
+      setGitlabInstances(hosts);
+      setLlmProviders(providers);
+      const next: Record<string, string> = {};
+      for (const [k, v] of Object.entries(s.live)) next[k] = String(v ?? "");
+      setDraft(next);
+    }).catch((e) => setErr(String((e as Error).message)));
+  }
+  useEffect(load, []);
+
+  function applyView(next: SettingsView) {
+    setSettings(next);
+    const mapped: Record<string, string> = {};
+    for (const [k, v] of Object.entries(next.live)) mapped[k] = String(v ?? "");
+    setDraft(mapped);
+  }
+
+  async function saveBase(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setErr(null);
+    try {
+      applyView(await api<SettingsView>("/api/settings", {
+        method: "PUT", body: JSON.stringify({ baseUrl: draft.baseUrl }),
+      }));
+    } catch (e) {
+      setErr(String((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setErr(null);
+    try {
+      applyView(await api<SettingsView>("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          scanIntervalMs: Number(draft.scanIntervalMs),
+          workers: Number(draft.workers),
+          maxDiffChars: Number(draft.maxDiffChars),
+          maxDiffChunks: Number(draft.maxDiffChunks),
+          timeoutSeconds: Number(draft.timeoutSeconds),
+          maxFileChars: Number(draft.maxFileChars),
+          maxDocumentChars: Number(draft.maxDocumentChars),
+          maxTraceChars: Number(draft.maxTraceChars),
+          librarianMaxTurns: Number(draft.librarianMaxTurns),
+          maxMemoryChars: Number(draft.maxMemoryChars),
+          maxModelTokens: Number(draft.maxModelTokens),
+          anthropicEffort: draft.anthropicEffort,
+        }),
+      }));
+    } catch (e) {
+      setErr(String((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reset() {
+    setBusy(true);
+    try {
+      applyView(await api<SettingsView>("/api/settings/reset", { method: "POST" }));
+    } catch (e) {
+      setErr(String((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addLibrary(e: FormEvent) {
+    e.preventDefault();
+    await api("/api/skills", { method: "POST", body: JSON.stringify(libDraft) });
+    setLibDraft({ name: "", body: "" });
+    load();
+  }
+
+  async function saveLibrary(s: LibrarySkill, body: string) {
+    await api(`/api/skills/${s.id}`, { method: "PUT", body: JSON.stringify({ body }) });
+    load();
+  }
+
+  async function removeLibrary(id: string) {
+    await api(`/api/skills/${id}`, { method: "DELETE" });
+    load();
+  }
+
+  async function addGitlab(e: FormEvent) {
+    e.preventDefault();
+    await api("/api/gitlab-instances", { method: "POST", body: JSON.stringify(gitlabDraft) });
+    setGitlabDraft({ name: "", url: "https://gitlab.com" });
+    load();
+  }
+
+  async function saveGitlab(row: GitlabInstance, patch: { name?: string; url?: string }) {
+    await api(`/api/gitlab-instances/${row.id}`, { method: "PUT", body: JSON.stringify(patch) });
+    load();
+  }
+
+  async function removeGitlab(id: string) {
+    await api(`/api/gitlab-instances/${id}`, { method: "DELETE" });
+    load();
+  }
+
+  async function addLlm(e: FormEvent) {
+    e.preventDefault();
+    await api("/api/llm-providers", {
+      method: "POST",
+      body: JSON.stringify({
+        name: llmDraft.name,
+        provider: llmDraft.provider,
+        model: llmDraft.model,
+        modelBaseUrl: llmDraft.modelBaseUrl || null,
+      }),
+    });
+    setLlmDraft({ name: "", provider: "ANTHROPIC", model: "", modelBaseUrl: "" });
+    load();
+  }
+
+  async function saveLlm(row: LlmProvider, patch: Partial<LlmProvider>) {
+    await api(`/api/llm-providers/${row.id}`, { method: "PUT", body: JSON.stringify(patch) });
+    load();
+  }
+
+  async function removeLlm(id: string) {
+    await api(`/api/llm-providers/${id}`, { method: "DELETE" });
+    load();
+  }
+
+  const fields: { key: string; label: string; type?: string; help: string }[] = [
+    {
+      key: "scanIntervalMs", label: "Scan interval (ms)", type: "number",
+      help: "How often mrr lists GitLab’s open merge requests. Catches missed webhooks and marks merged or closed MRs. Applies on the next sleep.",
+    },
+    {
+      key: "workers", label: "Review workers", type: "number",
+      help: "How many reviews run at once. SQLite takes a write lock per connection, so keep this modest. Applies without a restart.",
+    },
+    {
+      key: "maxDiffChars", label: "Max diff chars", type: "number",
+      help: "Per-turn diff window. Larger merge requests are packed into slices instead of being silently chopped.",
+    },
+    {
+      key: "maxDiffChunks", label: "Max diff chunks", type: "number",
+      help: "Cap on how many slices one merge request can take. A merge turn then produces one verdict.",
+    },
+    {
+      key: "timeoutSeconds", label: "HTTP timeout (seconds)", type: "number",
+      help: "Timeout per GitLab or model HTTP request. A sliced review can take longer overall than this.",
+    },
+    {
+      key: "maxFileChars", label: "Max file chars", type: "number",
+      help: "Files fetched with read_file are truncated at this many characters. The reviewer still sees the start of the file.",
+    },
+    {
+      key: "maxDocumentChars", label: "Max document chars", type: "number",
+      help: "Each enabled project document stuffed into the prompt is truncated here.",
+    },
+    {
+      key: "maxTraceChars", label: "Max trace chars", type: "number",
+      help: "Tool results stored on reviews.trace / replies.trace. The model still sees the full file; DEBUG logs still print the full body.",
+    },
+    {
+      key: "librarianMaxTurns", label: "Librarian max turns", type: "number",
+      help: "Turn budget for Initialize / Refresh. Independent of the reviewer’s max turns.",
+    },
+    {
+      key: "maxMemoryChars", label: "Max memory chars", type: "number",
+      help: "Prefetched memory and file excerpts handed to the librarian on the first turn.",
+    },
+    {
+      key: "maxModelTokens", label: "Max model tokens", type: "number",
+      help: "Output budget sent as max_tokens (Anthropic and OpenAI). Covers thinking / reasoning tokens.",
+    },
+    {
+      key: "anthropicEffort", label: "Anthropic effort",
+      help: "Anthropic effort parameter. high is slower and more thorough; low is cheaper.",
+    },
+  ];
+
+  if (!settings || !stats) return <p className="muted">Loading configure…</p>;
+
+  const restartOnly: { key: string; label: string; help: string }[] = [
+    { key: "serverPort", label: "SERVER_PORT", help: "HTTP port this process listens on." },
+    { key: "dbPath", label: "MRR_DB_PATH", help: "SQLite file. Users, projects, and review history live here." },
+    { key: "rootTokenFile", label: "MRR_ROOT_TOKEN_FILE", help: "Where the bootstrap admin token is written on first boot." },
+    { key: "memoryRoot", label: "MRR_MEMORY_ROOT", help: "On-disk OKF files per project (project/ and mrs/)." },
+    { key: "mcpEndpoint", label: "MCP endpoint", help: "Streamable HTTP path for the MCP server." },
+    { key: "mcpKeepAlive", label: "MCP keep-alive", help: "Keep-alive interval for MCP streams." },
+    { key: "logRingCapacity", label: "Log ring capacity", help: "How many lines the Logs page keeps in memory." },
+    { key: "logRingMaxMessageChars", label: "Log ring max message chars", help: "Cap per line in that ring. Longer lines are truncated there only." },
+  ];
+
+  function sourceBadge(key: string) {
+    const saved = settings?.sources[key] === "saved";
+    return <span className={`source ${saved ? "saved" : "env"}`}>{saved ? "saved" : "from env"}</span>;
+  }
+
+  return (
+    <div>
+      <h1>Configure</h1>
+      {err && <p className="err">{err}</p>}
+
+      <h2>Public base URL</h2>
+      <p className="muted">
+        The URL GitLab can reach. New Project previews webhook URLs from this value.
+        {sourceBadge("baseUrl")}
+      </p>
+      <form onSubmit={saveBase}>
+        <input value={draft.baseUrl ?? ""}
+          onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })} />
+        <p className="callout">
+          Webhook URLs: <code className="mono">{`${(draft.baseUrl ?? "").replace(/\/+$/, "")}/webhooks/gitlab/<project-id>`}</code>
+        </p>
+        <button className="primary" type="submit" disabled={busy}>Save</button>
+      </form>
+
+      <h2>GitLab configuration</h2>
+      <p className="muted">
+        Named hosts, URL only — PATs stay on the project. New Project can pick one of these
+        or type a custom URL. Editing a row does not rewrite existing projects.
+      </p>
+      <table>
+        <thead><tr><th>Name</th><th>URL</th><th></th></tr></thead>
+        <tbody>
+          {gitlabInstances.length === 0 && <tr><td colSpan={3} className="muted">None yet.</td></tr>}
+          {gitlabInstances.map((g) => (
+            <tr key={g.id}>
+              <td>
+                <input defaultValue={g.name} key={`${g.id}-name-${g.name}`}
+                  onBlur={(e) => { if (e.target.value !== g.name) saveGitlab(g, { name: e.target.value }); }} />
+              </td>
+              <td>
+                <input defaultValue={g.url} key={`${g.id}-url-${g.url}`}
+                  onBlur={(e) => { if (e.target.value !== g.url) saveGitlab(g, { url: e.target.value }); }} />
+              </td>
+              <td><button className="danger" onClick={() => removeGitlab(g.id)}>Delete</button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <form onSubmit={addGitlab}>
+        <label>New GitLab instance</label>
+        <div className="grid">
+          <input placeholder="name" value={gitlabDraft.name}
+            onChange={(e) => setGitlabDraft({ ...gitlabDraft, name: e.target.value })} required />
+          <input placeholder="https://gitlab.com" value={gitlabDraft.url}
+            onChange={(e) => setGitlabDraft({ ...gitlabDraft, url: e.target.value })} required />
+          <button className="primary" type="submit">Add</button>
+        </div>
+      </form>
+
+      <h2>Model provider</h2>
+      <p className="muted">
+        Named endpoints — provider, model, and optional base URL. No API key; keys stay on
+        the project. New Project can pick one of these or type custom values. Editing a row
+        does not rewrite existing projects.
+      </p>
+      <table>
+        <thead><tr><th>Name</th><th>Provider</th><th>Model</th><th>Base URL</th><th></th></tr></thead>
+        <tbody>
+          {llmProviders.length === 0 && <tr><td colSpan={5} className="muted">None yet.</td></tr>}
+          {llmProviders.map((p) => (
+            <tr key={p.id}>
+              <td>
+                <input defaultValue={p.name} key={`${p.id}-name-${p.name}`}
+                  onBlur={(e) => { if (e.target.value !== p.name) saveLlm(p, { name: e.target.value }); }} />
+              </td>
+              <td>
+                <select defaultValue={p.provider} key={`${p.id}-provider-${p.provider}`}
+                  onChange={(e) => saveLlm(p, { provider: e.target.value as Project["provider"] })}>
+                  <option>ANTHROPIC</option>
+                  <option>OPENAI_COMPAT</option>
+                </select>
+              </td>
+              <td>
+                <input defaultValue={p.model} key={`${p.id}-model-${p.model}`}
+                  onBlur={(e) => { if (e.target.value !== p.model) saveLlm(p, { model: e.target.value }); }} />
+              </td>
+              <td>
+                <input defaultValue={p.modelBaseUrl ?? ""} key={`${p.id}-base-${p.modelBaseUrl ?? ""}`}
+                  placeholder="OpenAI default"
+                  onBlur={(e) => {
+                    const next = e.target.value;
+                    if (next !== (p.modelBaseUrl ?? "")) saveLlm(p, { modelBaseUrl: next });
+                  }} />
+              </td>
+              <td><button className="danger" onClick={() => removeLlm(p.id)}>Delete</button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <form onSubmit={addLlm}>
+        <label>New LLM provider</label>
+        <div className="grid">
+          <input placeholder="name" value={llmDraft.name}
+            onChange={(e) => setLlmDraft({ ...llmDraft, name: e.target.value })} required />
+          <select value={llmDraft.provider}
+            onChange={(e) => setLlmDraft({ ...llmDraft, provider: e.target.value as Project["provider"] })}>
+            <option>ANTHROPIC</option>
+            <option>OPENAI_COMPAT</option>
+          </select>
+          <input placeholder="model id" value={llmDraft.model}
+            onChange={(e) => setLlmDraft({ ...llmDraft, model: e.target.value })} required />
+          <input placeholder="model base URL (optional)" value={llmDraft.modelBaseUrl}
+            onChange={(e) => setLlmDraft({ ...llmDraft, modelBaseUrl: e.target.value })} />
+          <button className="primary" type="submit">Add</button>
+        </div>
+      </form>
+
+      <h2>Settings</h2>
+      <p className="muted">
+        Live values persist in SQLite and apply without a restart. “from env” is the boot
+        default; “saved” is an overlay. Reset to env clears every overlay, including the
+        public base URL.
+      </p>
+      <form onSubmit={save}>
+        {fields.map((f) => (
+          <div className="setting" key={f.key}>
+            <label>
+              {f.label}
+              {sourceBadge(f.key)}
+            </label>
+            <p className="muted">{f.help}</p>
+            {f.key === "anthropicEffort" ? (
+              <select value={draft[f.key] ?? "high"}
+                onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })}>
+                <option value="high">high</option>
+                <option value="low">low</option>
+              </select>
+            ) : (
+              <input type={f.type ?? "text"} value={draft[f.key] ?? ""}
+                onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })} />
+            )}
+          </div>
+        ))}
+        <p className="row" style={{ marginTop: 16 }}>
+          <button className="primary" type="submit" disabled={busy}>Save</button>
+          <button type="button" onClick={reset} disabled={busy}>Reset to env</button>
+        </p>
+      </form>
+
+      <h3>Restart-only</h3>
+      <p className="muted">Read from the process environment. Changing these needs a restart.</p>
+      <table>
+        <thead><tr><th>Setting</th><th>Value</th><th></th></tr></thead>
+        <tbody>
+          {restartOnly.map((row) => (
+            <tr key={row.key}>
+              <td className="mono">{row.label}</td>
+              <td className="mono">{settings.restartOnly[row.key] ?? ""}</td>
+              <td className="muted">{row.help}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <h2>Skill library</h2>
+      <p className="muted">
+        Instruction bodies owned by the user behind the API token. A project skill is an
+        attachment; editing a body here updates every attached project. Delete is blocked
+        while a project still uses the skill.
+      </p>
+      <table>
+        <thead><tr><th>Name</th><th>Owner</th><th></th></tr></thead>
+        <tbody>
+          {library.length === 0 && <tr><td colSpan={3} className="muted">Empty.</td></tr>}
+          {library.map((s) => (
+            <tr key={s.id}>
+              <td>
+                <strong>{s.name}</strong>
+                <textarea defaultValue={s.body} key={s.updatedAt}
+                  onBlur={(e) => { if (e.target.value !== s.body) saveLibrary(s, e.target.value); }} />
+              </td>
+              <td>{s.ownerName}</td>
+              <td><button className="danger" onClick={() => removeLibrary(s.id)}>Delete</button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <form onSubmit={addLibrary}>
+        <label>New library skill</label>
+        <div className="grid">
+          <input placeholder="name" value={libDraft.name}
+            onChange={(e) => setLibDraft({ ...libDraft, name: e.target.value })} required />
+          <button className="primary" type="submit">Add</button>
+        </div>
+        <textarea placeholder="instructions" value={libDraft.body}
+          onChange={(e) => setLibDraft({ ...libDraft, body: e.target.value })} />
+      </form>
+
+      <h2>Stats</h2>
+      <p className="muted">Token totals are from this version forward — older reviews show as zero.</p>
+      <div className="stats-grid">
+        <div className="stat"><strong>{stats.mrsProcessed}</strong><span>MRs processed</span></div>
+        <div className="stat"><strong>{stats.tokens.input.toLocaleString()}</strong><span>Tokens in</span></div>
+        <div className="stat"><strong>{stats.tokens.output.toLocaleString()}</strong><span>Tokens out</span></div>
+        <div className="stat"><strong>{stats.tokens.cacheRead.toLocaleString()}</strong><span>Cache read</span></div>
+        <div className="stat"><strong>{stats.tokensLast7Days.input.toLocaleString()}</strong><span>In (7d)</span></div>
+        <div className="stat"><strong>{stats.tokensLast7Days.output.toLocaleString()}</strong><span>Out (7d)</span></div>
+        <div className="stat"><strong>{stats.findingsOpen}</strong><span>Open findings</span></div>
+        <div className="stat"><strong>{stats.findingsAddressed}</strong><span>Addressed</span></div>
+        <div className="stat"><strong>{stats.inFlight}</strong><span>In flight</span></div>
+        <div className="stat"><strong>{stats.pendingOrProcessing}</strong><span>Queued</span></div>
+        <div className="stat">
+          <strong>{stats.meanReadyDurationSeconds == null ? "—" : `${Math.round(stats.meanReadyDurationSeconds)}s`}</strong>
+          <span>Mean READY duration</span>
+        </div>
+        <div className="stat"><strong>{stats.reviewsTotal}</strong><span>Reviews</span></div>
+      </div>
+      <p className="muted">
+        By state: {Object.entries(stats.reviewsByState).map(([k, v]) => `${k} ${v}`).join(" · ") || "none"}
+        {Object.keys(stats.failuresByKind).length > 0
+          ? ` · Failures: ${Object.entries(stats.failuresByKind).map(([k, v]) => `${k} ${v}`).join(", ")}`
+          : ""}
+      </p>
+      <table>
+        <thead>
+          <tr><th>Project</th><th>MRs</th><th>Reviews</th><th>Tokens in</th><th>Tokens out</th></tr>
+        </thead>
+        <tbody>
+          {stats.projects.length === 0 && (
+            <tr><td colSpan={5} className="muted">No projects yet.</td></tr>
+          )}
+          {stats.projects.map((p) => (
+            <tr key={p.projectId}>
+              <td><a href={`/projects/${p.projectId}`} onClick={(e) => { e.preventDefault(); go(`/projects/${p.projectId}`); }}>{p.name}</a></td>
+              <td>{p.mrs}</td>
+              <td>{p.reviews}</td>
+              <td>{p.inputTokens.toLocaleString()}</td>
+              <td>{p.outputTokens.toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

@@ -46,13 +46,20 @@ public class AgentContextController {
         return store.listSkills(id);
     }
 
-    @Operation(summary = "Add a skill")
+    @Operation(summary = "Add a skill",
+            description = "Send `name`+`body` to create (or reuse) a library row owned by the "
+                    + "project owner and attach it, or send `libraryId` to attach an existing one.")
     @ApiResponse(responseCode = "201", description = "Created")
     @PostMapping("/api/projects/{id}/skills")
     @ResponseStatus(HttpStatus.CREATED)
     public AgentSkill createSkill(Principal caller, @PathVariable String id,
                                   @RequestBody SkillUpsert request) {
         store.requireVisible(caller, id);
+        if (request.libraryId() != null && !request.libraryId().isBlank()) {
+            store.requireLibraryVisible(caller, request.libraryId());
+            return store.attachSkill(id, request.libraryId(),
+                    request.enabled() == null || request.enabled(), request.branchPattern());
+        }
         return store.createSkill(id, request.name(), request.body(),
                 request.enabled() == null || request.enabled(), request.branchPattern());
     }
@@ -119,8 +126,9 @@ public class AgentContextController {
         }
     }
 
-    @Schema(description = "Create or update a skill. On update, omitted fields are kept. "
-            + "Send an empty `branchPattern` to clear a branch restriction.")
+    @Schema(description = "Create or update a skill. On create, send `name`+`body` or `libraryId`. "
+            + "On update, omitted fields are kept. Send an empty `branchPattern` to clear a "
+            + "branch restriction.")
     public record SkillUpsert(
             @Schema(example = "security") String name,
             String body,
@@ -128,7 +136,9 @@ public class AgentContextController {
             @Schema(description = "Glob or Java regex against the MR source branch. Blank = "
                     + "every branch. `hotfix` exact, `hotfix/*` prefix, `release-\\d+` regex.",
                     example = "hotfix/*", nullable = true) String branchPattern,
-            Integer position) {
+            Integer position,
+            @Schema(description = "Attach this library skill instead of creating a new body.",
+                    nullable = true) String libraryId) {
     }
 
     @Schema(description = "Create or update a document. On update, omitted fields are kept.")

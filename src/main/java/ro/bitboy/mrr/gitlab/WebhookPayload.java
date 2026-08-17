@@ -64,6 +64,16 @@ public final class WebhookPayload {
         return text(body.path("object_attributes").path("discussion_id"));
     }
 
+    /** GitLab's id for this note. Redeliveries of the same comment share it. */
+    public static String noteId(JsonNode body) {
+        JsonNode id = body.path("object_attributes").path("id");
+        if (id.isMissingNode() || id.isNull()) {
+            return null;
+        }
+        String value = id.asText();
+        return value == null || value.isBlank() || "null".equals(value) ? null : value;
+    }
+
     public static String noteBody(JsonNode body) {
         return text(body.path("object_attributes").path("note"));
     }

@@ -5,8 +5,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestClient;
 import ro.bitboy.mrr.MrrProperties;
+import ro.bitboy.mrr.RuntimeSettings;
 import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.gitlab.GitLabClient;
 import ro.bitboy.mrr.model.FailureKind;
@@ -14,10 +14,13 @@ import ro.bitboy.mrr.model.Finding;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Reply;
 import ro.bitboy.mrr.model.ReviewModel;
+import ro.bitboy.mrr.model.ReviewModelFactory;
 import ro.bitboy.mrr.store.Store;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Function;
@@ -55,45 +58,67 @@ public class Replier {
 
     private final Store store;
     private final GitLabClient gitlab;
-    private final MrrProperties properties;
+    private final RuntimeSettings settings;
     private final Agent agent;
     private final Function<Project, ReviewModel> models;
     private final ExecutorService workers;
+    private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
 
     @Autowired
-    public Replier(Store store, GitLabClient gitlab, RestClient.Builder restClients,
-                   MrrProperties properties) {
-        this(store, gitlab, properties,
-                project -> Reviewer.defaultModel(restClients, project),
-                Executors.newFixedThreadPool(1));
+    public Replier(Store store, GitLabClient gitlab, ReviewModelFactory models,
+                   RuntimeSettings settings) {
+        this(store, gitlab, settings, models::forProject, Executors.newFixedThreadPool(1));
     }
 
-    Replier(Store store, GitLabClient gitlab, MrrProperties properties,
+    public Replier(Store store, GitLabClient gitlab, MrrProperties properties,
+            Function<Project, ReviewModel> models, ExecutorService workers) {
+        this(store, gitlab, RuntimeSettings.frozen(properties), models, workers);
+    }
+
+    public Replier(Store store, GitLabClient gitlab, RuntimeSettings settings,
             Function<Project, ReviewModel> models, ExecutorService workers) {
         this.store = store;
         this.gitlab = gitlab;
-        this.properties = properties;
+        this.settings = settings;
         this.agent = new Agent();
         this.models = models;
         this.workers = workers;
     }
 
-    public void submit(String projectId, long mrIid, String discussionId,
+    public void submit(String projectId, long mrIid, String discussionId, String sourceNoteId,
                        String note, String author) {
+        String key = projectId + ":" + discussionId + ":"
+                + (sourceNoteId == null || sourceNoteId.isBlank() ? note : sourceNoteId);
+        if (sourceNoteId != null && !sourceNoteId.isBlank()
+                && store.findReplyBySourceNote(projectId, discussionId, sourceNoteId).isPresent()) {
+            log.info("reply skipped on thread {} — note {} already answered", discussionId, sourceNoteId);
+            return;
+        }
+        if (!inFlight.add(key)) {
+            log.info("reply already running for {} — not queueing again", key);
+            return;
+        }
         workers.submit(() -> {
             try {
-                reply(projectId, mrIid, discussionId, note, author);
+                reply(projectId, mrIid, discussionId, sourceNoteId, note, author);
             } catch (Exception e) {
                 // A reply that fails is a missing reply, not a broken review. Never surface it
                 // onto the merge request.
                 log.warn("could not reply on thread {}: {}", discussionId, e.getMessage());
+            } finally {
+                inFlight.remove(key);
             }
         });
     }
 
-    void reply(String projectId, long mrIid, String discussionId,
+    void reply(String projectId, long mrIid, String discussionId, String sourceNoteId,
                String note, String author) {
         if (note == null || note.isBlank()) {
+            return;
+        }
+        if (sourceNoteId != null && !sourceNoteId.isBlank()
+                && store.findReplyBySourceNote(projectId, discussionId, sourceNoteId).isPresent()) {
+            log.info("reply skipped on thread {} — note {} already answered", discussionId, sourceNoteId);
             return;
         }
         Project project = store.findProject(projectId).orElseThrow();
@@ -115,7 +140,7 @@ public class Replier {
         // The diff is what makes the answer specific rather than a restatement of the finding.
         try {
             GitLabClient.Diff diff = gitlab.changes(project, mrIid,
-                    properties.review().maxDiffChars());
+                    settings.review().maxDiffChars());
             prompt.append("The diff under review:\n\n").append(diff.text());
         } catch (Exception e) {
             log.info("reply on thread {} of {}!{} — continuing without the diff: {}",
@@ -127,7 +152,7 @@ public class Replier {
         try {
             run = agent.run(models.apply(project), SYSTEM, user, List.of(), 1,
                     call -> "unused", "reply " + discussionId,
-                    properties.review().maxTraceChars());
+                    settings.review().maxTraceChars());
         } catch (Exception e) {
             FailureKind kind = FailureKind.of(e);
             store.recordProjectError(project.id(), kind, kind.headline());
@@ -143,10 +168,11 @@ public class Replier {
         }
 
         String posted = answer.markdown().trim();
-        store.createReply(new Reply(
+        Reply reply = store.createReply(new Reply(
                 Ids.newId(), projectId, mrIid, discussionId,
-                finding == null ? null : finding.id(),
+                finding == null ? null : finding.id(), sourceNoteId,
                 SYSTEM + "\n\n---\n\n" + user, posted, run.trace(), Instant.now()));
+        store.saveReplyUsage(reply.id(), answer.usage());
         gitlab.replyToDiscussion(project, mrIid, discussionId, posted);
         store.clearProjectError(project.id());
         log.info("replied on thread {} of {}!{}", discussionId, project.name(), mrIid);
