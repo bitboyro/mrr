@@ -115,7 +115,7 @@ public class OpenAiModel implements ReviewModel {
         }
 
         if (text.isBlank() && calls.isEmpty()) {
-            return Result.refusal(stopReason);
+            return Result.refusal(stopReason, usage);
         }
         if (!calls.isEmpty()) {
             return Result.tools(text.isBlank() ? null : text, calls, stopReason, null, usage);
@@ -138,7 +138,7 @@ public class OpenAiModel implements ReviewModel {
         Usage usage = parseUsage(response);
         String stopReason = response.path("status").asText(null);
         if ("failed".equals(stopReason)) {
-            return Result.refusal(stopReason);
+            return Result.refusal(stopReason, usage);
         }
 
         List<Map<String, Object>> echo = new ArrayList<>();
@@ -161,7 +161,7 @@ public class OpenAiModel implements ReviewModel {
                         if (!text.isEmpty()) text.append('\n');
                         text.append(part.path("text").asText(""));
                     } else if ("refusal".equals(partType)) {
-                        return Result.refusal(part.path("refusal").asText(stopReason));
+                        return Result.refusal(part.path("refusal").asText(stopReason), usage);
                     }
                 }
             }
@@ -175,7 +175,7 @@ public class OpenAiModel implements ReviewModel {
         }
 
         if (text.isEmpty() && calls.isEmpty()) {
-            return Result.refusal(stopReason);
+            return Result.refusal(stopReason, usage);
         }
         if (!calls.isEmpty()) {
             return Result.tools(text.isEmpty() ? null : text.toString(), calls, stopReason, echo, usage);

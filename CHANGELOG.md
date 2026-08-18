@@ -18,6 +18,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a 502 cannot mark the note answered forever.
 - **Bind-mount `/data`.** The image entrypoint chowns `/data` to uid 10001 before dropping
   privileges, so a Compose-created `./data` as root is writable.
+- **HTTP clients reused.** GitLab/OpenAI RestClients keep one JDK client per timeout value
+  instead of allocating a new one on every request.
+- **Refusal usage.** Anthropic and OpenAI refusal results keep the provider's token counts
+  so Configure stats do not undercount.
+- **Compose env.** Scan interval, diff chunks, model tokens, Anthropic effort, and the
+  other boot `MRR_*` settings from `.env` are passed into the container.
 
 - **Logs page columns.** An exception on a line (`ApiException: GitLab GET … 401`)
   stretched the log grid, so every row's time/level/logger sat on the left of a

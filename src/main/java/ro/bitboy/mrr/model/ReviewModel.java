@@ -124,7 +124,11 @@ public interface ReviewModel {
         }
 
         public static Result refusal(String stopReason) {
-            return new Result(null, List.of(), true, stopReason, null, Usage.NONE);
+            return refusal(stopReason, Usage.NONE);
+        }
+
+        public static Result refusal(String stopReason, Usage usage) {
+            return new Result(null, List.of(), true, stopReason, null, usage);
         }
 
         public boolean wantsTools() {

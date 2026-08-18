@@ -13,11 +13,13 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Applies {@code timeoutSeconds} to every Spring {@link org.springframework.web.client.RestClient}
- * — GitLab and OpenAI-compatible providers. Read from {@link RuntimeSettings} on each
- * request so Configure can change the timeout without a restart.
+ * — GitLab and OpenAI-compatible providers. The timeout is read from {@link RuntimeSettings}
+ * so Configure can change it without a restart. The JDK client is reused until that value
+ * actually changes.
  */
 @Configuration
 public class HttpClientConfig {
@@ -29,7 +31,11 @@ public class HttpClientConfig {
 
     static final class LiveTimeoutFactory implements ClientHttpRequestFactory {
 
+        private record Cached(int seconds, JdkClientHttpRequestFactory factory) {
+        }
+
         private final RuntimeSettings settings;
+        private final AtomicReference<Cached> cached = new AtomicReference<>();
 
         LiveTimeoutFactory(RuntimeSettings settings) {
             this.settings = settings;
@@ -37,11 +43,23 @@ public class HttpClientConfig {
 
         @Override
         public ClientHttpRequest createRequest(URI uri, HttpMethod httpMethod) throws IOException {
-            Duration timeout = Duration.ofSeconds(Math.max(1, settings.review().timeoutSeconds()));
+            return factory().createRequest(uri, httpMethod);
+        }
+
+        JdkClientHttpRequestFactory factory() {
+            int seconds = Math.max(1, settings.review().timeoutSeconds());
+            Cached current = cached.get();
+            if (current != null && current.seconds() == seconds) {
+                return current.factory();
+            }
+            Duration timeout = Duration.ofSeconds(seconds);
             HttpClient http = HttpClient.newBuilder().connectTimeout(timeout).build();
             JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(http);
             factory.setReadTimeout(timeout);
-            return factory.createRequest(uri, httpMethod);
+            Cached next = new Cached(seconds, factory);
+            cached.compareAndSet(current, next);
+            Cached won = cached.get();
+            return won != null && won.seconds() == seconds ? won.factory() : next.factory();
         }
     }
 }

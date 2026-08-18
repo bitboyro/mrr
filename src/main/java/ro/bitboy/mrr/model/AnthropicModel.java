@@ -126,8 +126,9 @@ public class AnthropicModel implements ReviewModel {
         }
 
         String stopReason = response.stopReason().map(StopReason::asString).orElse(null);
+        Usage usage = usageOf(response);
         if (response.stopReason().filter(StopReason.REFUSAL::equals).isPresent()) {
-            return Result.refusal(stopReason);
+            return Result.refusal(stopReason, usage);
         }
 
         List<ContentBlockParam> echo = new ArrayList<>();
@@ -142,9 +143,8 @@ public class AnthropicModel implements ReviewModel {
             block.toolUse().ifPresent(use -> calls.add(toCall(use)));
         }
 
-        Usage usage = usageOf(response);
         if (text.isEmpty() && calls.isEmpty()) {
-            return Result.refusal(stopReason);
+            return Result.refusal(stopReason, usage);
         }
         if (!calls.isEmpty()) {
             return Result.tools(text.isEmpty() ? null : text.toString(), calls, stopReason, echo, usage);

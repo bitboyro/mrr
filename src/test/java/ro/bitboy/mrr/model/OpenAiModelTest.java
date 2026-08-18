@@ -153,6 +153,20 @@ class OpenAiModelTest {
         assertThat(result.usage().cacheRead()).isEqualTo(8);
     }
 
+    @Test
+    void anEmptyChatCompletionKeepsUsageOnRefusal() throws Exception {
+        openai.enqueue(json("""
+                {"choices":[{"finish_reason":"content_filter","message":{"content":""}}],
+                 "usage":{"prompt_tokens":11,"completion_tokens":2}}
+                """));
+
+        Result result = model.completeChat("sys", List.of(Turn.user("diff")), List.of());
+
+        assertThat(result.refused()).isTrue();
+        assertThat(result.usage().input()).isEqualTo(11);
+        assertThat(result.usage().output()).isEqualTo(2);
+    }
+
     private static MockResponse json(String body) {
         return new MockResponse()
                 .setHeader("Content-Type", "application/json")
