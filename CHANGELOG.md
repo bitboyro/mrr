@@ -24,6 +24,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so Configure stats do not undercount.
 - **Compose env.** Scan interval, diff chunks, model tokens, Anthropic effort, and the
   other boot `MRR_*` settings from `.env` are passed into the container.
+- **Stale librarian RUNNING.** A crashed first Initialize with no run row and no
+  start timestamp is marked failed immediately, so a later Initialize is not
+  rejected forever. A new run also persists its start time.
+- **Anthropic client cache.** One client per project; a settings or key change
+  closes the previous OkHttp client instead of retaining every superseded one.
 
 - **Logs page columns.** An exception on a line (`ApiException: GitLab GET … 401`)
   stretched the log grid, so every row's time/level/logger sat on the left of a

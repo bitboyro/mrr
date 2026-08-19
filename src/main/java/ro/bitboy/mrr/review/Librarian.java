@@ -89,7 +89,7 @@ public class Librarian {
         boolean initialize = !memory.hasProjectSpace(projectId);
         MemoryRun run = memoryStore.createRun(projectId,
                 initialize ? MemoryRun.Kind.INITIALIZE : MemoryRun.Kind.REFRESH);
-        store.updateMemoryState(projectId, project.memoryHeadSha(), MemoryStatus.RUNNING, project.memoryRefreshedAt());
+        store.updateMemoryState(projectId, project.memoryHeadSha(), MemoryStatus.RUNNING, Instant.now());
         log.info("librarian {} queued for {} ({})", run.id(), project.name(), run.kind());
         workers.submit(() -> {
             try {
@@ -311,22 +311,25 @@ public class Librarian {
         }
     }
 
-    private void recoverStaleRun(Project project) {
+    void recoverStaleRun(Project project) {
         Optional<MemoryRun> running = memoryStore.runningRun(project.id());
         if (running.isEmpty() && project.memoryStatus() != MemoryStatus.RUNNING) {
             return;
         }
-        Instant started = running.map(MemoryRun::createdAt).orElse(project.memoryRefreshedAt());
+        if (running.isEmpty()) {
+            log.warn("librarian left {} RUNNING with no active run — marking failed", project.name());
+            store.updateMemoryState(project.id(), project.memoryHeadSha(), MemoryStatus.FAILED, Instant.now());
+            return;
+        }
+        Instant started = running.get().createdAt();
         long staleAfterMs = Math.max(1, settings.review().timeoutSeconds())
                 * 1_000L * (settings.review().librarianMaxTurns() + 2);
         if (started != null && Instant.now().toEpochMilli() - started.toEpochMilli() < staleAfterMs) {
             return;
         }
-        running.ifPresent(run -> {
-            log.warn("librarian {} left {} — marking failed so a new run can start",
-                    run.id(), run.state());
-            memoryStore.markRunFailed(run.id(), "Librarian run was interrupted.");
-        });
+        log.warn("librarian {} left {} — marking failed so a new run can start",
+                running.get().id(), running.get().state());
+        memoryStore.markRunFailed(running.get().id(), "Librarian run was interrupted.");
         store.updateMemoryState(project.id(), project.memoryHeadSha(), MemoryStatus.FAILED, Instant.now());
     }
 

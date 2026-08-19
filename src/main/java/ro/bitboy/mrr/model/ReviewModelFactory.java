@@ -8,15 +8,15 @@ import ro.bitboy.mrr.RuntimeSettings;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * One model client per distinct (provider, base URL, key, model, timeout). Anthropic's
- * OkHttp client used to be constructed on every review and never closed.
+ * One Anthropic client per project. Settings or key changes replace the previous client
+ * and close it so OkHttp pools do not accumulate for the process lifetime.
  */
 @Component
 public class ReviewModelFactory {
 
     private final RestClient.Builder restClients;
     private final RuntimeSettings settings;
-    private final ConcurrentHashMap<String, AnthropicModel> anthropic = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Held> anthropic = new ConcurrentHashMap<>();
 
     public ReviewModelFactory(RestClient.Builder restClients, RuntimeSettings settings) {
         this.restClients = restClients;
@@ -26,14 +26,27 @@ public class ReviewModelFactory {
     public ReviewModel forProject(Project project) {
         int timeout = settings.review().timeoutSeconds();
         return switch (project.provider()) {
-            case ANTHROPIC -> anthropic.computeIfAbsent(key(project, timeout),
-                    ignored -> new AnthropicModel(
-                            project.modelKey(), project.modelBaseUrl(), project.model(),
-                            timeout, settings));
+            case ANTHROPIC -> anthropic.compute(project.id(), (id, held) -> {
+                String cacheKey = key(project, timeout);
+                if (held != null && held.key.equals(cacheKey)) {
+                    return held;
+                }
+                AnthropicModel next = new AnthropicModel(
+                        project.modelKey(), project.modelBaseUrl(), project.model(),
+                        timeout, settings);
+                if (held != null) {
+                    held.model.close();
+                }
+                return new Held(cacheKey, next);
+            }).model();
             case OPENAI_COMPAT -> new OpenAiModel(
                     restClients, project.modelKey(), project.modelBaseUrl(), project.model(),
                     settings);
         };
+    }
+
+    int cachedAnthropicClients() {
+        return anthropic.size();
     }
 
     private static String key(Project project, int timeoutSeconds) {
@@ -45,7 +58,10 @@ public class ReviewModelFactory {
 
     @PreDestroy
     void close() {
-        anthropic.values().forEach(AnthropicModel::close);
+        anthropic.values().forEach(held -> held.model.close());
         anthropic.clear();
+    }
+
+    private record Held(String key, AnthropicModel model) {
     }
 }
