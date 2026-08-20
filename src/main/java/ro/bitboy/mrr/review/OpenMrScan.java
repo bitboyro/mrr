@@ -189,14 +189,18 @@ public class OpenMrScan implements ApplicationRunner {
 
     /**
      * Rate-limits and GitLab blips fail-closed. Retry from the scan only when nothing was
-     * posted, so a later success cannot duplicate threads, and only while the failure is
-     * still young — old FAILED rows stay failed until a human reruns.
+     * posted — including finding threads whose ids live on {@code findings}, not the
+     * review row — so a later success cannot duplicate threads. Old FAILED rows stay
+     * failed until a human reruns.
      */
     private boolean retryFailed(Review review) {
         if (review.state() != Review.State.FAILED) {
             return false;
         }
         if (review.discussionId() != null || review.noteId() != null) {
+            return false;
+        }
+        if (!store.findingsOf(review.id()).isEmpty()) {
             return false;
         }
         if (review.errorKind() != FailureKind.RATE_LIMIT

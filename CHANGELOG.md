@@ -31,6 +31,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   closes the previous OkHttp client instead of retaining every superseded one.
 - **Librarian boot recovery.** A `RUNNING` project with no live run is marked
   failed at process start, not only when the next Initialize is clicked.
+- **Scan retry after a partial GitLab post.** A FAILED review that already has
+  finding threads is not auto-retried, so the next scan cannot duplicate them.
+- **Live-timeout test.** The HTTP factory test now changes `timeoutSeconds` and
+  asserts a new client, not only reuse of the same one.
 
 - **Logs page columns.** An exception on a line (`ApiException: GitLab GET … 401`)
   stretched the log grid, so every row's time/level/logger sat on the left of a

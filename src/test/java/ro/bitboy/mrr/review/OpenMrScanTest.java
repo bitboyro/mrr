@@ -148,6 +148,25 @@ class OpenMrScanTest {
     }
 
     @Test
+    void doesNotRetryAGitlabFailureAfterFindingsWerePosted() {
+        String id = store.claimReview(project.id(), 7, "sha-partial", "{}", TestStores.mrInfo())
+                .review().id();
+        store.markFailed(id, FailureKind.GITLAB, "overview post failed");
+        store.createFinding(new ro.bitboy.mrr.model.Finding(
+                ro.bitboy.mrr.auth.Ids.newId(), id, project.id(), 7, "A.java", 1,
+                ro.bitboy.mrr.model.Finding.Severity.MAJOR, "leak", "body",
+                "disc-1", "note-1", true, ro.bitboy.mrr.model.Finding.State.OPEN,
+                java.time.Instant.now(), null));
+        gitlab.openMrs = List.of(openMr(7, "sha-partial"));
+
+        OpenMrScan.ScanResult result = scan.scan(project);
+
+        assertThat(result.queued()).isEqualTo(0);
+        assertThat(reviewer.submitted).isEmpty();
+        assertThat(store.findReview(id).orElseThrow().state()).isEqualTo(Review.State.FAILED);
+    }
+
+    @Test
     void skipsDraftsWhenTheProjectAsks() {
         Project skipping = store.createProject(
                 TestStores.project(project.ownerId(), "drafty", "other-secret", true, true));
