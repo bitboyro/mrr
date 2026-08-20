@@ -99,11 +99,17 @@ public class OpenMrScan implements ApplicationRunner {
 
     private void loop() {
         sleep(intervalMs());
-        while (running && !Thread.currentThread().isInterrupted()) {
+        while (true) {
+            if (!running || Thread.currentThread().isInterrupted()) {
+                return;
+            }
             try {
                 scanAll("periodic");
             } catch (Exception e) {
                 log.warn("periodic scan failed: {}", e.getMessage());
+            }
+            if (!running || Thread.currentThread().isInterrupted()) {
+                return;
             }
             sleep(intervalMs());
         }
