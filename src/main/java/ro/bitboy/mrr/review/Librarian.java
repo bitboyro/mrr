@@ -2,6 +2,7 @@ package ro.bitboy.mrr.review;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -73,6 +74,13 @@ public class Librarian {
         this.agent = new Agent();
         this.skill = loadSkill();
         this.workers = Executors.newFixedThreadPool(1);
+    }
+
+    @PostConstruct
+    void recoverStaleRunsOnBoot() {
+        for (Project project : store.listProjectsWithMemoryStatus(MemoryStatus.RUNNING)) {
+            recoverStaleRun(project);
+        }
     }
 
     public MemoryRun submit(String projectId) {

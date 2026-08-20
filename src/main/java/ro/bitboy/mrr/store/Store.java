@@ -193,6 +193,11 @@ public class Store {
                 .query(Store::toProject).list();
     }
 
+    public List<Project> listProjectsWithMemoryStatus(MemoryStatus status) {
+        return db.sql("SELECT * FROM projects WHERE memory_status = ? ORDER BY created_at")
+                .param(status.name()).query(Store::toProject).list();
+    }
+
     public boolean deleteProject(String id) {
         db.sql("DELETE FROM memory_runs WHERE project_id = ?").param(id).update();
         db.sql("DELETE FROM memory_documents WHERE project_id = ?").param(id).update();

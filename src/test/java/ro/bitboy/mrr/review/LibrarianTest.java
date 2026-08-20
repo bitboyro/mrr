@@ -68,4 +68,14 @@ class LibrarianTest {
         assertThat(store.findProject(project.id()).orElseThrow().memoryStatus())
                 .isEqualTo(MemoryStatus.FAILED);
     }
+
+    @Test
+    void bootRecoversAStuckRunningProjectWithoutWaitingForSubmit() {
+        store.updateMemoryState(project.id(), null, MemoryStatus.RUNNING, null);
+
+        librarian.recoverStaleRunsOnBoot();
+
+        assertThat(store.findProject(project.id()).orElseThrow().memoryStatus())
+                .isEqualTo(MemoryStatus.FAILED);
+    }
 }

@@ -29,6 +29,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rejected forever. A new run also persists its start time.
 - **Anthropic client cache.** One client per project; a settings or key change
   closes the previous OkHttp client instead of retaining every superseded one.
+- **Librarian boot recovery.** A `RUNNING` project with no live run is marked
+  failed at process start, not only when the next Initialize is clicked.
 
 - **Logs page columns.** An exception on a line (`ApiException: GitLab GET … 401`)
   stretched the log grid, so every row's time/level/logger sat on the left of a
