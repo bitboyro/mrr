@@ -63,6 +63,7 @@ public class CatalogController {
     @ResponseStatus(HttpStatus.CREATED)
     public GitlabInstance createGitlab(Principal caller, @RequestBody GitlabUpsert request) {
         requireAdmin(caller);
+        requireGitlabCreate(request);
         return store.createGitlabInstance(request.name(), request.url());
     }
 
@@ -73,6 +74,7 @@ public class CatalogController {
     public GitlabInstance updateGitlab(Principal caller, @PathVariable String id,
                                        @RequestBody GitlabUpsert request) {
         requireAdmin(caller);
+        requireGitlabUpdate(request);
         return store.updateGitlabInstance(id, request.name(), request.url());
     }
 
@@ -98,6 +100,7 @@ public class CatalogController {
     @ResponseStatus(HttpStatus.CREATED)
     public LlmProvider createLlm(Principal caller, @RequestBody LlmUpsert request) {
         requireAdmin(caller);
+        requireLlmCreate(request);
         return store.createLlmProvider(request.name(), request.provider(), request.model(),
                 request.modelBaseUrl());
     }
@@ -109,6 +112,7 @@ public class CatalogController {
     public LlmProvider updateLlm(Principal caller, @PathVariable String id,
                                  @RequestBody LlmUpsert request) {
         requireAdmin(caller);
+        requireLlmUpdate(request);
         return store.updateLlmProvider(id, request.name(), request.provider(), request.model(),
                 request.modelBaseUrl());
     }
@@ -125,6 +129,71 @@ public class CatalogController {
     private static void requireAdmin(Principal caller) {
         if (!caller.isAdmin()) {
             throw ApiException.forbidden("Only an admin token can perform this operation.");
+        }
+    }
+
+    private static void requireGitlabCreate(GitlabUpsert request) {
+        if (request == null) {
+            throw ApiException.badRequest("body is required");
+        }
+        requireText(request.name(), "name");
+        requireHttpUrl(request.url(), "url");
+    }
+
+    private static void requireGitlabUpdate(GitlabUpsert request) {
+        if (request == null) {
+            throw ApiException.badRequest("body is required");
+        }
+        if (request.name() != null) {
+            requireText(request.name(), "name");
+        }
+        if (request.url() != null) {
+            requireHttpUrl(request.url(), "url");
+        }
+    }
+
+    private static void requireLlmCreate(LlmUpsert request) {
+        if (request == null) {
+            throw ApiException.badRequest("body is required");
+        }
+        requireText(request.name(), "name");
+        if (request.provider() == null) {
+            throw ApiException.badRequest("provider must be ANTHROPIC or OPENAI_COMPAT");
+        }
+        requireText(request.model(), "model");
+        if (request.modelBaseUrl() != null && !request.modelBaseUrl().isBlank()) {
+            requireHttpUrl(request.modelBaseUrl(), "modelBaseUrl");
+        }
+    }
+
+    private static void requireLlmUpdate(LlmUpsert request) {
+        if (request == null) {
+            throw ApiException.badRequest("body is required");
+        }
+        if (request.name() != null) {
+            requireText(request.name(), "name");
+        }
+        if (request.model() != null) {
+            requireText(request.model(), "model");
+        }
+        if (request.modelBaseUrl() != null && !request.modelBaseUrl().isBlank()) {
+            requireHttpUrl(request.modelBaseUrl(), "modelBaseUrl");
+        }
+    }
+
+    private static void requireText(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw ApiException.badRequest(field + " is required");
+        }
+    }
+
+    private static void requireHttpUrl(String url, String field) {
+        if (url == null || url.isBlank()) {
+            throw ApiException.badRequest(field + " is required");
+        }
+        String lower = url.trim().toLowerCase();
+        if (!lower.startsWith("http://") && !lower.startsWith("https://")) {
+            throw ApiException.badRequest(field + " must start with http:// or https://");
         }
     }
 

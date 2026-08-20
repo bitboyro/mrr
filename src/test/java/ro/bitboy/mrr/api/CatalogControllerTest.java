@@ -108,6 +108,28 @@ class CatalogControllerTest {
     }
 
     @Test
+    void catalogCreatesRejectBlankFields() {
+        assertThatThrownBy(() -> catalog.createGitlab(admin,
+                new CatalogController.GitlabUpsert(" ", "https://gitlab.com")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
+        assertThatThrownBy(() -> catalog.createGitlab(admin,
+                new CatalogController.GitlabUpsert("gl", "gitlab.com")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
+        assertThatThrownBy(() -> catalog.createLlm(admin,
+                new CatalogController.LlmUpsert("Opus", null, "claude-opus-5", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
+        assertThatThrownBy(() -> catalog.createLlm(admin,
+                new CatalogController.LlmUpsert("Opus", Project.Provider.ANTHROPIC, "  ", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
+        assertThat(catalog.listGitlab(admin)).isEmpty();
+        assertThat(catalog.listLlm(admin)).isEmpty();
+    }
+
+    @Test
     void envBaseUrlIsTheDefaultWebhookHost() {
         CatalogController.InstanceInfo info = catalog.instance(admin);
         assertThat(info.baseUrl()).isEqualTo("http://localhost:8130");

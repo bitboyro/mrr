@@ -43,6 +43,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   change.
 - **Reply in-flight.** A second worker that sees an unposted claim leaves it
   alone instead of posting GitLab again; only a stale claim is taken over.
+- **Catalog writes.** Create/update of GitLab and LLM catalog rows reject a
+  missing name, URL, provider, or model with 400 before persistence.
 
 - **Logs page columns.** An exception on a line (`ApiException: GitLab GET … 401`)
   stretched the log grid, so every row's time/level/logger sat on the left of a
