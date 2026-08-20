@@ -35,6 +35,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   finding threads is not auto-retried, so the next scan cannot duplicate them.
 - **Live-timeout test.** The HTTP factory test now changes `timeoutSeconds` and
   asserts a new client, not only reuse of the same one.
+- **Reply claim.** A source-note row is reserved (unposted) before GitLab is
+  called, so a concurrent webhook cannot double-post. GitLab failure deletes the
+  claim so a later delivery can retry.
 
 - **Logs page columns.** An exception on a line (`ApiException: GitLab GET … 401`)
   stretched the log grid, so every row's time/level/logger sat on the left of a

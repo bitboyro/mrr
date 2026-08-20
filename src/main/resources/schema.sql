@@ -187,6 +187,7 @@ CREATE TABLE IF NOT EXISTS replies (
     input_tokens      INTEGER NOT NULL DEFAULT 0,
     output_tokens     INTEGER NOT NULL DEFAULT 0,
     cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    posted         INTEGER NOT NULL DEFAULT 1,       -- 0 until GitLab accepts the note
     created_at     TEXT NOT NULL
 );
 

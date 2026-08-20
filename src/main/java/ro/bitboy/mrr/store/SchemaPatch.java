@@ -142,6 +142,7 @@ public class SchemaPatch {
         addColumn("replies", "input_tokens", "INTEGER NOT NULL DEFAULT 0");
         addColumn("replies", "output_tokens", "INTEGER NOT NULL DEFAULT 0");
         addColumn("replies", "cache_read_tokens", "INTEGER NOT NULL DEFAULT 0");
+        addColumn("replies", "posted", "INTEGER NOT NULL DEFAULT 1");
         addColumn("memory_runs", "input_tokens", "INTEGER NOT NULL DEFAULT 0");
         addColumn("memory_runs", "output_tokens", "INTEGER NOT NULL DEFAULT 0");
         addColumn("memory_runs", "cache_read_tokens", "INTEGER NOT NULL DEFAULT 0");

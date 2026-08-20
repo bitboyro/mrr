@@ -9,6 +9,7 @@ import ro.bitboy.mrr.TestStores;
 import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.model.Finding;
 import ro.bitboy.mrr.model.Project;
+import ro.bitboy.mrr.model.Reply;
 import ro.bitboy.mrr.model.ReviewModel.Result;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.User;
@@ -111,6 +112,23 @@ class ReplierTest {
         assertThat(store.listReplies(project.id(), 7)).isEmpty();
         assertThat(store.findReplyBySourceNote(project.id(), "disc-1", "note-99")).isEmpty();
         assertThat(gitlab.replies).isEmpty();
+    }
+
+    @Test
+    void aLostClaimDoesNotPostASecondGitlabReply() {
+        model = new RecordingModel(List.of(
+                Result.of("first", "end_turn"),
+                Result.of("second", "end_turn")));
+        Replier replier = replier();
+        Reply claimed = new Reply(Ids.newId(), project.id(), 7, "disc-1", null, "note-99",
+                "p", "first", null, Instant.now());
+        assertThat(store.claimUnpostedReply(claimed)).isTrue();
+
+        replier.reply(project.id(), 7, "disc-1", "note-99", "nobody reads it", "ada");
+
+        assertThat(gitlab.replies).containsExactly("disc-1:first");
+        assertThat(store.sourceNotePosted(project.id(), "disc-1", "note-99")).isTrue();
+        assertThat(model.turns).isEmpty();
     }
 
     private Replier replier() {

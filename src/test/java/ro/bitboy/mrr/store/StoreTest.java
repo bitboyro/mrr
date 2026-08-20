@@ -691,7 +691,7 @@ class StoreTest {
         new SchemaPatch(old).patch();
         List<String> columns = old.sql("PRAGMA table_info(replies)")
                 .query((rs, n) -> rs.getString("name")).list();
-        assertThat(columns).contains("source_note_id");
+        assertThat(columns).contains("source_note_id", "posted");
         List<String> indexes = old.sql("PRAGMA index_list(replies)")
                 .query((rs, n) -> rs.getString("name")).list();
         assertThat(indexes).contains("idx_replies_source_note");

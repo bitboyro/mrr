@@ -19,6 +19,7 @@ import ro.bitboy.mrr.store.Store;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -90,7 +91,7 @@ public class Replier {
         String key = projectId + ":" + discussionId + ":"
                 + (sourceNoteId == null || sourceNoteId.isBlank() ? note : sourceNoteId);
         if (sourceNoteId != null && !sourceNoteId.isBlank()
-                && store.findReplyBySourceNote(projectId, discussionId, sourceNoteId).isPresent()) {
+                && store.sourceNotePosted(projectId, discussionId, sourceNoteId)) {
             log.info("reply skipped on thread {} — note {} already answered", discussionId, sourceNoteId);
             return;
         }
@@ -117,11 +118,19 @@ public class Replier {
             return;
         }
         if (sourceNoteId != null && !sourceNoteId.isBlank()
-                && store.findReplyBySourceNote(projectId, discussionId, sourceNoteId).isPresent()) {
+                && store.sourceNotePosted(projectId, discussionId, sourceNoteId)) {
             log.info("reply skipped on thread {} — note {} already answered", discussionId, sourceNoteId);
             return;
         }
         Project project = store.findProject(projectId).orElseThrow();
+        if (sourceNoteId != null && !sourceNoteId.isBlank()) {
+            Optional<Reply> existing = store.findReplyBySourceNote(projectId, discussionId, sourceNoteId);
+            if (existing.isPresent()) {
+                deliver(project, mrIid, discussionId, existing.get().id(), existing.get().response(),
+                        sourceNoteId, null);
+                return;
+            }
+        }
         log.info("reply processing thread {} of {}!{}", discussionId, project.name(), mrIid);
 
         Finding finding = store.findByDiscussion(projectId, mrIid, discussionId).orElse(null);
@@ -168,14 +177,40 @@ public class Replier {
         }
 
         String posted = answer.markdown().trim();
-        // GitLab first. Recording sourceNoteId before the post would make a failed delivery
-        // look answered forever — the next webhook skips the note.
-        gitlab.replyToDiscussion(project, mrIid, discussionId, posted);
-        Reply reply = store.createReply(new Reply(
+        Reply draft = new Reply(
                 Ids.newId(), projectId, mrIid, discussionId,
                 finding == null ? null : finding.id(), sourceNoteId,
-                SYSTEM + "\n\n---\n\n" + user, posted, run.trace(), Instant.now()));
-        store.saveReplyUsage(reply.id(), answer.usage());
+                SYSTEM + "\n\n---\n\n" + user, posted, run.trace(), Instant.now());
+        if (sourceNoteId == null || sourceNoteId.isBlank()) {
+            gitlab.replyToDiscussion(project, mrIid, discussionId, posted);
+            store.createReply(draft);
+            store.saveReplyUsage(draft.id(), answer.usage());
+            store.clearProjectError(project.id());
+            log.info("replied on thread {} of {}!{}", discussionId, project.name(), mrIid);
+            return;
+        }
+        if (!store.claimUnpostedReply(draft)) {
+            return;
+        }
+        deliver(project, mrIid, discussionId, draft.id(), posted, sourceNoteId, answer.usage());
+    }
+
+    private void deliver(Project project, long mrIid, String discussionId, String replyId,
+                         String posted, String sourceNoteId, ReviewModel.Usage usage) {
+        try {
+            gitlab.replyToDiscussion(project, mrIid, discussionId, posted);
+        } catch (RuntimeException e) {
+            if (sourceNoteId != null && !sourceNoteId.isBlank()) {
+                store.abandonReply(replyId);
+            }
+            throw e;
+        }
+        if (sourceNoteId != null && !sourceNoteId.isBlank()) {
+            store.markReplyPosted(replyId);
+        }
+        if (usage != null) {
+            store.saveReplyUsage(replyId, usage);
+        }
         store.clearProjectError(project.id());
         log.info("replied on thread {} of {}!{}", discussionId, project.name(), mrIid);
     }

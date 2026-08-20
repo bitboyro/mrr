@@ -578,8 +578,8 @@ public class Store {
     public Reply createReply(Reply reply) {
         db.sql("""
                 INSERT INTO replies (id, project_id, mr_iid, discussion_id, finding_id, source_note_id,
-                                     prompt, response, trace, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                     prompt, response, trace, posted, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                 """)
                 .params(reply.id(), reply.projectId(), reply.mrIid(), reply.discussionId(),
                         reply.findingId(), reply.sourceNoteId(), reply.prompt(), reply.response(),
@@ -587,6 +587,45 @@ public class Store {
                         reply.createdAt().toString())
                 .update();
         return reply;
+    }
+
+    /**
+     * Reserves {@code sourceNoteId} before the GitLab post. Returns false when another
+     * worker already claimed it (unique index). Unposted rows are deleted if GitLab fails.
+     */
+    public boolean claimUnpostedReply(Reply reply) {
+        int n = db.sql("""
+                INSERT OR IGNORE INTO replies (id, project_id, mr_iid, discussion_id, finding_id,
+                                               source_note_id, prompt, response, trace, posted, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                """)
+                .params(reply.id(), reply.projectId(), reply.mrIid(), reply.discussionId(),
+                        reply.findingId(), reply.sourceNoteId(), reply.prompt(), reply.response(),
+                        reply.trace() == null ? null : reply.trace().toJson(),
+                        reply.createdAt().toString())
+                .update();
+        return n > 0;
+    }
+
+    public void markReplyPosted(String replyId) {
+        db.sql("UPDATE replies SET posted = 1 WHERE id = ?").param(replyId).update();
+    }
+
+    public void abandonReply(String replyId) {
+        db.sql("DELETE FROM replies WHERE id = ? AND posted = 0").param(replyId).update();
+    }
+
+    public boolean sourceNotePosted(String projectId, String discussionId, String sourceNoteId) {
+        if (sourceNoteId == null || sourceNoteId.isBlank()) {
+            return false;
+        }
+        return db.sql("""
+                SELECT 1 FROM replies
+                WHERE project_id = ? AND discussion_id = ? AND source_note_id = ? AND posted = 1
+                LIMIT 1
+                """)
+                .params(projectId, discussionId, sourceNoteId)
+                .query(Integer.class).optional().isPresent();
     }
 
     public Optional<Reply> findReplyBySourceNote(String projectId, String discussionId,
@@ -609,7 +648,10 @@ public class Store {
     }
 
     public List<Reply> listReplies(String projectId, long mrIid) {
-        return db.sql("SELECT * FROM replies WHERE project_id = ? AND mr_iid = ? ORDER BY created_at")
+        return db.sql("""
+                SELECT * FROM replies
+                WHERE project_id = ? AND mr_iid = ? AND posted = 1 ORDER BY created_at
+                """)
                 .params(projectId, mrIid)
                 .query(Store::toReply).list();
     }
