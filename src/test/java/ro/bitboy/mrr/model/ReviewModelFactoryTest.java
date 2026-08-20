@@ -36,7 +36,7 @@ class ReviewModelFactoryTest {
     }
 
     @Test
-    void closesThePreviousClientWhenTheProjectSettingsChange() {
+    void replacesTheCachedClientWhenTheProjectSettingsChange() {
         Project project = TestStores.project("owner", "calc", "hook");
         ReviewModel first = factory.forProject(project);
 

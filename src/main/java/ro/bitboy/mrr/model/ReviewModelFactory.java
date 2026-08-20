@@ -6,10 +6,14 @@ import org.springframework.web.client.RestClient;
 import ro.bitboy.mrr.RuntimeSettings;
 
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
- * One Anthropic client per project. Settings or key changes replace the previous client
- * and close it so OkHttp pools do not accumulate for the process lifetime.
+ * One Anthropic client per project. Settings or key changes replace the previous client.
+ * The old OkHttp client is closed after the current timeout so an in-flight review can
+ * finish, then the pool is released.
  */
 @Component
 public class ReviewModelFactory {
@@ -17,6 +21,12 @@ public class ReviewModelFactory {
     private final RestClient.Builder restClients;
     private final RuntimeSettings settings;
     private final ConcurrentHashMap<String, Held> anthropic = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<AnthropicModel, Boolean> retiring = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService closer = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread thread = new Thread(r, "anthropic-client-retire");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     public ReviewModelFactory(RestClient.Builder restClients, RuntimeSettings settings) {
         this.restClients = restClients;
@@ -35,7 +45,7 @@ public class ReviewModelFactory {
                         project.modelKey(), project.modelBaseUrl(), project.model(),
                         timeout, settings);
                 if (held != null) {
-                    held.model.close();
+                    retire(held.model(), timeout);
                 }
                 return new Held(cacheKey, next);
             }).model();
@@ -49,6 +59,18 @@ public class ReviewModelFactory {
         return anthropic.size();
     }
 
+    private void retire(AnthropicModel client, int timeoutSeconds) {
+        retiring.put(client, Boolean.TRUE);
+        long delay = Math.max(1, timeoutSeconds) + 2L;
+        closer.schedule(() -> {
+            try {
+                client.close();
+            } finally {
+                retiring.remove(client);
+            }
+        }, delay, TimeUnit.SECONDS);
+    }
+
     private static String key(Project project, int timeoutSeconds) {
         String base = project.modelBaseUrl() == null ? "" : project.modelBaseUrl();
         String secret = project.modelKey() == null ? "" : project.modelKey();
@@ -58,6 +80,9 @@ public class ReviewModelFactory {
 
     @PreDestroy
     void close() {
+        closer.shutdownNow();
+        retiring.keySet().forEach(AnthropicModel::close);
+        retiring.clear();
         anthropic.values().forEach(held -> held.model.close());
         anthropic.clear();
     }
