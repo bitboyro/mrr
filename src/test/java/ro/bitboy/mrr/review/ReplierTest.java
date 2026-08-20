@@ -115,20 +115,30 @@ class ReplierTest {
     }
 
     @Test
-    void aLostClaimDoesNotPostASecondGitlabReply() {
-        model = new RecordingModel(List.of(
-                Result.of("first", "end_turn"),
-                Result.of("second", "end_turn")));
-        Replier replier = replier();
+    void anInFlightClaimIsLeftToTheOwner() {
+        model = new RecordingModel(List.of(Result.of("second", "end_turn")));
         Reply claimed = new Reply(Ids.newId(), project.id(), 7, "disc-1", null, "note-99",
                 "p", "first", null, Instant.now());
         assertThat(store.claimUnpostedReply(claimed)).isTrue();
 
-        replier.reply(project.id(), 7, "disc-1", "note-99", "nobody reads it", "ada");
+        replier().reply(project.id(), 7, "disc-1", "note-99", "nobody reads it", "ada");
 
-        assertThat(gitlab.replies).containsExactly("disc-1:first");
-        assertThat(store.sourceNotePosted(project.id(), "disc-1", "note-99")).isTrue();
+        assertThat(gitlab.replies).isEmpty();
+        assertThat(store.sourceNotePosted(project.id(), "disc-1", "note-99")).isFalse();
         assertThat(model.turns).isEmpty();
+    }
+
+    @Test
+    void aStaleUnpostedClaimCanBeTakenOver() {
+        model = new RecordingModel(List.of(Result.of("recovered", "end_turn")));
+        Reply claimed = new Reply(Ids.newId(), project.id(), 7, "disc-1", null, "note-99",
+                "p", "old", null, Instant.now().minusSeconds(120));
+        assertThat(store.claimUnpostedReply(claimed)).isTrue();
+
+        replier().reply(project.id(), 7, "disc-1", "note-99", "nobody reads it", "ada");
+
+        assertThat(gitlab.replies).containsExactly("disc-1:recovered");
+        assertThat(store.sourceNotePosted(project.id(), "disc-1", "note-99")).isTrue();
     }
 
     private Replier replier() {

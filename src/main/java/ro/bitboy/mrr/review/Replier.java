@@ -17,6 +17,7 @@ import ro.bitboy.mrr.model.ReviewModel;
 import ro.bitboy.mrr.model.ReviewModelFactory;
 import ro.bitboy.mrr.store.Store;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -126,9 +127,18 @@ public class Replier {
         if (sourceNoteId != null && !sourceNoteId.isBlank()) {
             Optional<Reply> existing = store.findReplyBySourceNote(projectId, discussionId, sourceNoteId);
             if (existing.isPresent()) {
-                deliver(project, mrIid, discussionId, existing.get().id(), existing.get().response(),
-                        sourceNoteId, null);
-                return;
+                if (store.sourceNotePosted(projectId, discussionId, sourceNoteId)) {
+                    return;
+                }
+                long staleAfter = Math.max(1, settings.review().timeoutSeconds()) + 2L;
+                Instant started = existing.get().createdAt();
+                if (started != null
+                        && Duration.between(started, Instant.now()).toSeconds() < staleAfter) {
+                    log.info("reply already in flight for note {} — leaving it to the owner",
+                            sourceNoteId);
+                    return;
+                }
+                store.abandonReply(existing.get().id());
             }
         }
         log.info("reply processing thread {} of {}!{}", discussionId, project.name(), mrIid);
