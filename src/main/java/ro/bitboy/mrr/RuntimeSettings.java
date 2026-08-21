@@ -122,7 +122,7 @@ public class RuntimeSettings {
         MrrProperties.Review clamped = review();
         Map<String, String> persist = new LinkedHashMap<>();
         if (incoming.containsKey(BASE_URL)) {
-            persist.put(BASE_URL, baseUrl());
+            persist.put(BASE_URL, incoming.get(BASE_URL));
         }
         if (incoming.containsKey(SCAN_INTERVAL_MS)) {
             persist.put(SCAN_INTERVAL_MS, Long.toString(scanIntervalMs()));

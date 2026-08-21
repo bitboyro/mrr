@@ -38,6 +38,12 @@ public class ApiException extends RuntimeException {
         return new ApiException(HttpStatus.FORBIDDEN, "forbidden", message);
     }
 
+    public static void requireBody(Object body) {
+        if (body == null) {
+            throw badRequest("body is required");
+        }
+    }
+
     public static ApiException conflict(String message) {
         return new ApiException(HttpStatus.CONFLICT, "conflict", message);
     }

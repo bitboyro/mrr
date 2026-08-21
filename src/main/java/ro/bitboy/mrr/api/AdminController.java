@@ -57,6 +57,7 @@ public class AdminController {
     @ResponseStatus(HttpStatus.CREATED)
     public User createUser(Principal caller, @RequestBody CreateUser request) {
         requireAdmin(caller);
+        ApiException.requireBody(request);
         if (request.name() == null || request.name().isBlank()) {
             throw ApiException.badRequest("name is required");
         }
@@ -90,6 +91,7 @@ public class AdminController {
     @ResponseStatus(HttpStatus.CREATED)
     public CreatedToken createToken(Principal caller, @RequestBody CreateToken request) {
         requireAdmin(caller);
+        ApiException.requireBody(request);
 
         String userId = request.userId() == null ? caller.userId() : request.userId();
         store.findUser(userId).orElseThrow(() -> ApiException.notFound("user"));

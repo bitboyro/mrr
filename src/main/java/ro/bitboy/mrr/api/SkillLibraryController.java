@@ -16,6 +16,7 @@ import org.springframework.web.bind.annotation.RestController;
 import ro.bitboy.mrr.auth.Principal;
 import ro.bitboy.mrr.model.LibrarySkill;
 import ro.bitboy.mrr.store.Store;
+import ro.bitboy.mrr.web.ApiException;
 
 import java.util.List;
 
@@ -49,6 +50,7 @@ public class SkillLibraryController {
     @PostMapping("/api/skills")
     @ResponseStatus(HttpStatus.CREATED)
     public LibrarySkill create(Principal caller, @RequestBody LibraryUpsert request) {
+        ApiException.requireBody(request);
         return store.createLibrary(caller.userId(), request.name(), request.body());
     }
 
@@ -56,6 +58,7 @@ public class SkillLibraryController {
     @PutMapping("/api/skills/{id}")
     public LibrarySkill update(Principal caller, @PathVariable String id,
                                @RequestBody LibraryUpsert request) {
+        ApiException.requireBody(request);
         store.requireLibraryVisible(caller, id);
         return store.updateLibrary(id, request.name(), request.body());
     }

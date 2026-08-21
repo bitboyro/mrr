@@ -70,6 +70,7 @@ public class ProjectController {
     @PostMapping("/api/projects")
     @ResponseStatus(HttpStatus.CREATED)
     public Registered create(Principal caller, @RequestBody Upsert request) {
+        ApiException.requireBody(request);
         require(request.name(), "name");
         require(request.gitlabProjectId(), "gitlabProjectId");
         require(request.gitlabToken(), "gitlabToken");
@@ -129,6 +130,7 @@ public class ProjectController {
     @ApiResponse(responseCode = "404", description = "No such project, or not yours", content = @io.swagger.v3.oas.annotations.media.Content(schema = @io.swagger.v3.oas.annotations.media.Schema(implementation = ro.bitboy.mrr.web.ErrorResponse.class)))
     @PutMapping("/api/projects/{id}")
     public Project update(Principal caller, @PathVariable String id, @RequestBody Upsert request) {
+        ApiException.requireBody(request);
         Project existing = store.requireVisible(caller, id);
         String gitlabUrl = resolveGitlabUrl(request, existing.gitlabUrl());
         ResolvedLlm llm = resolveLlm(request, existing);
@@ -206,8 +208,10 @@ public class ProjectController {
             return new ResolvedLlm(request.provider(), request.model().trim(), base);
         }
         String base;
-        if (request.modelBaseUrl() == null || request.modelBaseUrl().isBlank()) {
+        if (request.modelBaseUrl() == null) {
             base = existing.modelBaseUrl();
+        } else if (request.modelBaseUrl().isBlank()) {
+            base = null;
         } else {
             base = Urls.requireHttp(request.modelBaseUrl(), "modelBaseUrl");
         }

@@ -55,6 +55,7 @@ public class AgentContextController {
     public AgentSkill createSkill(Principal caller, @PathVariable String id,
                                   @RequestBody SkillUpsert request) {
         store.requireVisible(caller, id);
+        ApiException.requireBody(request);
         if (request.libraryId() != null && !request.libraryId().isBlank()) {
             store.requireLibraryVisible(caller, request.libraryId());
             return store.attachSkill(id, request.libraryId(),
@@ -72,6 +73,7 @@ public class AgentContextController {
                                   @PathVariable String skillId,
                                   @RequestBody SkillUpsert request) {
         store.requireVisible(caller, id);
+        ApiException.requireBody(request);
         store.findSkill(id, skillId).orElseThrow(() -> ApiException.notFound("skill"));
         return store.updateSkill(skillId, request.name(), request.body(),
                 request.enabled(), request.position(), request.branchPattern());
@@ -101,6 +103,7 @@ public class AgentContextController {
     public AgentDocument createDocument(Principal caller, @PathVariable String id,
                                         @RequestBody DocumentUpsert request) {
         store.requireVisible(caller, id);
+        ApiException.requireBody(request);
         return store.createDocument(id, request.name(), request.body(),
                 request.enabled() == null || request.enabled());
     }
@@ -111,6 +114,7 @@ public class AgentContextController {
                                         @PathVariable String documentId,
                                         @RequestBody DocumentUpsert request) {
         store.requireVisible(caller, id);
+        ApiException.requireBody(request);
         store.findDocument(id, documentId).orElseThrow(() -> ApiException.notFound("document"));
         return store.updateDocument(documentId, request.name(), request.body(), request.enabled());
     }

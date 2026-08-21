@@ -54,6 +54,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or `file:///tmp` is a 400 instead of a later client failure.
 - **Configure base URL.** Saving `baseUrl` as `not-a-url` is a 400; webhook
   links keep the previous env or saved host.
+- **Clear model endpoint.** A blank `modelBaseUrl` on project update stores
+  `null` (default OpenAI) instead of keeping the previous custom URL.
+- **JSON `null` bodies.** Configure, skill library, and the other JSON
+  writes return 400 instead of throwing.
 
 - **Logs page columns.** An exception on a line (`ApiException: GitLab GET … 401`)
   stretched the log grid, so every row's time/level/logger sat on the left of a

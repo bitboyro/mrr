@@ -165,6 +165,33 @@ class ProjectControllerTest {
     }
 
     @Test
+    void updateClearsACustomModelBaseUrlWhenBlank() {
+        ProjectController.Registered created = projects.create(alice, upsert(
+                null, "https://gitlab.com", null,
+                Project.Provider.OPENAI_COMPAT, "gpt-5.4", "http://ollama:11434/v1"));
+
+        Project updated = projects.update(alice, created.project().id(), upsert(
+                null, null, null, null, null, "  "));
+
+        assertThat(updated.modelBaseUrl()).isNull();
+        assertThat(store.findProject(updated.id()).orElseThrow().modelBaseUrl()).isNull();
+        assertThat(updated.model()).isEqualTo("gpt-5.4");
+    }
+
+    @Test
+    void createAndUpdateRejectANullBody() {
+        assertThatThrownBy(() -> projects.create(alice, null))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
+        ProjectController.Registered created = projects.create(alice, upsert(
+                null, "https://gitlab.com", null,
+                Project.Provider.ANTHROPIC, "claude-opus-5", null));
+        assertThatThrownBy(() -> projects.update(alice, created.project().id(), null))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
+    }
+
+    @Test
     void updateCanSwitchOntoACatalogWithoutRewritingSecrets() {
         ProjectController.Registered created = projects.create(alice, upsert(
                 null, "https://gitlab.com", null,

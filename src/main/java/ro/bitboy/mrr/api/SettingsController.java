@@ -72,6 +72,7 @@ public class SettingsController {
     @PutMapping("/api/settings")
     public SettingsView put(Principal caller, @RequestBody SettingsPatch patch) {
         requireAdmin(caller);
+        ApiException.requireBody(patch);
         settings.save(patch.toMap());
         return view();
     }

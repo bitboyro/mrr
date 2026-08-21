@@ -79,6 +79,7 @@ public class MemoryController {
     public MemoryDocument create(Principal caller, @PathVariable String id,
                                  @RequestBody Upsert request) {
         store.requireVisible(caller, id);
+        ApiException.requireBody(request);
         MemoryKind kind = request.kind() == null ? null
                 : MemoryKind.fromSlug(request.kind()).orElse(MemoryKind.DOCUMENT);
         return memory.create(id, MemoryActor.OWNER, kind, request.space(), request.title(),
@@ -91,6 +92,7 @@ public class MemoryController {
     public MemoryDocument update(Principal caller, @PathVariable String id,
                                  @PathVariable String docId, @RequestBody Upsert request) {
         store.requireVisible(caller, id);
+        ApiException.requireBody(request);
         return memory.update(id, MemoryActor.OWNER, docId, request.title(), request.subject(),
                 request.tags(), request.status(), request.sourceSha(), request.body());
     }
