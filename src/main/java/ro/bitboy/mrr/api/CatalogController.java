@@ -65,7 +65,8 @@ public class CatalogController {
     public GitlabInstance createGitlab(Principal caller, @RequestBody GitlabUpsert request) {
         requireAdmin(caller);
         requireGitlabCreate(request);
-        return store.createGitlabInstance(request.name(), request.url());
+        return store.createGitlabInstance(request.name().trim(),
+                Urls.requireHttp(request.url(), "url"));
     }
 
     @Operation(summary = "Update a GitLab instance",
@@ -76,7 +77,8 @@ public class CatalogController {
                                        @RequestBody GitlabUpsert request) {
         requireAdmin(caller);
         requireGitlabUpdate(request);
-        return store.updateGitlabInstance(id, request.name(), request.url());
+        String url = request.url() == null ? null : Urls.requireHttp(request.url(), "url");
+        return store.updateGitlabInstance(id, request.name(), url);
     }
 
     @Operation(summary = "Delete a GitLab instance")
@@ -102,8 +104,10 @@ public class CatalogController {
     public LlmProvider createLlm(Principal caller, @RequestBody LlmUpsert request) {
         requireAdmin(caller);
         requireLlmCreate(request);
-        return store.createLlmProvider(request.name(), request.provider(), request.model(),
-                request.modelBaseUrl());
+        String base = request.modelBaseUrl() == null || request.modelBaseUrl().isBlank()
+                ? null : Urls.requireHttp(request.modelBaseUrl(), "modelBaseUrl");
+        return store.createLlmProvider(request.name().trim(), request.provider(),
+                request.model().trim(), base);
     }
 
     @Operation(summary = "Update an LLM provider",
@@ -114,8 +118,11 @@ public class CatalogController {
                                  @RequestBody LlmUpsert request) {
         requireAdmin(caller);
         requireLlmUpdate(request);
+        String base = request.modelBaseUrl() == null || request.modelBaseUrl().isBlank()
+                ? request.modelBaseUrl()
+                : Urls.requireHttp(request.modelBaseUrl(), "modelBaseUrl");
         return store.updateLlmProvider(id, request.name(), request.provider(), request.model(),
-                request.modelBaseUrl());
+                base);
     }
 
     @Operation(summary = "Delete an LLM provider")

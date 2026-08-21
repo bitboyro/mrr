@@ -557,6 +557,18 @@ class StoreTest {
         assertThat(runtime.review().anthropicEffort()).isEqualTo("low");
         assertThat(runtime.sources().get(RuntimeSettings.WORKERS)).isEqualTo(RuntimeSettings.SOURCE_SAVED);
 
+        assertThatThrownBy(() -> runtime.save(java.util.Map.of(RuntimeSettings.BASE_URL, "not-a-url")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> {
+                    assertThat(((ApiException) e).status().value()).isEqualTo(400);
+                    assertThat(e.getMessage()).contains("baseUrl");
+                });
+        assertThat(runtime.baseUrl()).isEqualTo("http://localhost:8130");
+        runtime.save(java.util.Map.of(RuntimeSettings.BASE_URL, "https://mrr.example.com/"));
+        assertThat(runtime.baseUrl()).isEqualTo("https://mrr.example.com");
+        assertThat(runtime.webhookUrl("proj-1"))
+                .isEqualTo("https://mrr.example.com/webhooks/gitlab/proj-1");
+
         Project project = store.createProject(project(alice.id(), "stats-app"));
         String one = store.claimReview(project.id(), 1, "sha-1", "{}", mrInfo()).review().id();
         String two = store.claimReview(project.id(), 2, "sha-2", "{}", mrInfo()).review().id();

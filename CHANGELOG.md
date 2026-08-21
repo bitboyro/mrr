@@ -52,6 +52,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Custom project URLs.** A project GitLab URL or `modelBaseUrl` typed by
   hand (not copied from a catalog) is checked the same way, so `gitlab.com`
   or `file:///tmp` is a 400 instead of a later client failure.
+- **Configure base URL.** Saving `baseUrl` as `not-a-url` is a 400; webhook
+  links keep the previous env or saved host.
 
 - **Logs page columns.** An exception on a line (`ApiException: GitLab GET … 401`)
   stretched the log grid, so every row's time/level/logger sat on the left of a

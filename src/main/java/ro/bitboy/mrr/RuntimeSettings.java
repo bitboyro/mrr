@@ -3,6 +3,7 @@ package ro.bitboy.mrr;
 import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Component;
 import ro.bitboy.mrr.store.Store;
+import ro.bitboy.mrr.web.Urls;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -113,6 +114,9 @@ public class RuntimeSettings {
                 continue;
             }
             incoming.put(entry.getKey(), entry.getValue().trim());
+        }
+        if (incoming.containsKey(BASE_URL)) {
+            incoming.put(BASE_URL, Urls.requireHttp(incoming.get(BASE_URL), "baseUrl"));
         }
         overlay.putAll(incoming);
         MrrProperties.Review clamped = review();
