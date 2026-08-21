@@ -24,6 +24,7 @@ import ro.bitboy.mrr.model.ReviewModel;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.User;
 import ro.bitboy.mrr.web.ApiException;
+import ro.bitboy.mrr.web.Urls;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -1324,15 +1325,7 @@ public class Store {
     }
 
     private static String requireHttpUrl(String url, String field) {
-        if (url == null || url.isBlank()) {
-            throw ApiException.badRequest(field + " is required");
-        }
-        String trimmed = url.trim().replaceAll("/+$", "");
-        String lower = trimmed.toLowerCase();
-        if (!lower.startsWith("http://") && !lower.startsWith("https://")) {
-            throw ApiException.badRequest(field + " must start with http:// or https://");
-        }
-        return trimmed;
+        return Urls.requireHttp(url, field);
     }
 
     private static String optionalHttpUrl(String url, String field) {

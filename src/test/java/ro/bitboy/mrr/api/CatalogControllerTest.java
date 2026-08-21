@@ -117,6 +117,14 @@ class CatalogControllerTest {
                 new CatalogController.GitlabUpsert("gl", "gitlab.com")))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
+        assertThatThrownBy(() -> catalog.createGitlab(admin,
+                new CatalogController.GitlabUpsert("gl", "https://")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
+        assertThatThrownBy(() -> catalog.createGitlab(admin,
+                new CatalogController.GitlabUpsert("gl", "https://?bad")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
         assertThatThrownBy(() -> catalog.createLlm(admin,
                 new CatalogController.LlmUpsert("Opus", null, "claude-opus-5", null)))
                 .isInstanceOf(ApiException.class)

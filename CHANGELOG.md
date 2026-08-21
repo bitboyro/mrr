@@ -47,6 +47,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   missing name, URL, provider, or model with 400 before persistence.
 - **Scan shutdown.** After the interval sleep, the periodic loop checks
   `running` before it starts another GitLab scan.
+- **Catalog URLs.** GitLab and LLM catalog URLs must parse as `http`/`https`
+  with a host, so values like `https://` are rejected at write time.
 
 - **Logs page columns.** An exception on a line (`ApiException: GitLab GET … 401`)
   stretched the log grid, so every row's time/level/logger sat on the left of a

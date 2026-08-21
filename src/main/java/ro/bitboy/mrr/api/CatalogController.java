@@ -20,6 +20,7 @@ import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.store.Store;
 import ro.bitboy.mrr.web.ApiException;
+import ro.bitboy.mrr.web.Urls;
 
 import java.util.List;
 
@@ -188,13 +189,7 @@ public class CatalogController {
     }
 
     private static void requireHttpUrl(String url, String field) {
-        if (url == null || url.isBlank()) {
-            throw ApiException.badRequest(field + " is required");
-        }
-        String lower = url.trim().toLowerCase();
-        if (!lower.startsWith("http://") && !lower.startsWith("https://")) {
-            throw ApiException.badRequest(field + " must start with http:// or https://");
-        }
+        Urls.requireHttp(url, field);
     }
 
     @Schema(description = "Live public base URL. Used to build GitLab webhook URLs.")
