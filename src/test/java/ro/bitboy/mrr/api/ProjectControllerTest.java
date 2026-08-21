@@ -121,6 +121,50 @@ class ProjectControllerTest {
     }
 
     @Test
+    void createRejectsCustomUrlsThatAreNotHttp() {
+        assertThatThrownBy(() -> projects.create(alice, upsert(
+                null, "gitlab.com", null,
+                Project.Provider.ANTHROPIC, "claude-opus-5", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> {
+                    assertThat(((ApiException) e).status().value()).isEqualTo(400);
+                    assertThat(e.getMessage()).contains("gitlabUrl");
+                });
+        assertThatThrownBy(() -> projects.create(alice, upsert(
+                null, "file:///tmp", null,
+                Project.Provider.ANTHROPIC, "claude-opus-5", null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> {
+                    assertThat(((ApiException) e).status().value()).isEqualTo(400);
+                    assertThat(e.getMessage()).contains("gitlabUrl");
+                });
+        assertThatThrownBy(() -> projects.create(alice, upsert(
+                null, "https://gitlab.com", null,
+                Project.Provider.OPENAI_COMPAT, "llama3.2", "not-a-url")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> {
+                    assertThat(((ApiException) e).status().value()).isEqualTo(400);
+                    assertThat(e.getMessage()).contains("modelBaseUrl");
+                });
+        assertThat(store.listProjects(alice)).isEmpty();
+    }
+
+    @Test
+    void updateRejectsAMalformedCustomGitlabUrl() {
+        ProjectController.Registered created = projects.create(alice, upsert(
+                null, "https://gitlab.com", null,
+                Project.Provider.ANTHROPIC, "claude-opus-5", null));
+
+        assertThatThrownBy(() -> projects.update(alice, created.project().id(), upsert(
+                null, "gitlab.com", null,
+                null, null, null)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
+        assertThat(store.findProject(created.project().id()).orElseThrow().gitlabUrl())
+                .isEqualTo("https://gitlab.com");
+    }
+
+    @Test
     void updateCanSwitchOntoACatalogWithoutRewritingSecrets() {
         ProjectController.Registered created = projects.create(alice, upsert(
                 null, "https://gitlab.com", null,

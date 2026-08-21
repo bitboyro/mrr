@@ -49,6 +49,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `running` before it starts another GitLab scan.
 - **Catalog URLs.** GitLab and LLM catalog URLs must parse as `http`/`https`
   with a host, so values like `https://` are rejected at write time.
+- **Custom project URLs.** A project GitLab URL or `modelBaseUrl` typed by
+  hand (not copied from a catalog) is checked the same way, so `gitlab.com`
+  or `file:///tmp` is a 400 instead of a later client failure.
 
 - **Logs page columns.** An exception on a line (`ApiException: GitLab GET … 401`)
   stretched the log grid, so every row's time/level/logger sat on the left of a

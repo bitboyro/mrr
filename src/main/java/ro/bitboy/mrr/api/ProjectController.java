@@ -21,6 +21,7 @@ import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.review.OpenMrScan;
 import ro.bitboy.mrr.store.Store;
 import ro.bitboy.mrr.web.ApiException;
+import ro.bitboy.mrr.web.Urls;
 
 import java.time.Instant;
 import java.util.List;
@@ -186,7 +187,7 @@ public class ProjectController {
             }
             return existing;
         }
-        return request.gitlabUrl().replaceAll("/+$", "");
+        return Urls.requireHttp(request.gitlabUrl(), "gitlabUrl");
     }
 
     private ResolvedLlm resolveLlm(Upsert request, Project existing) {
@@ -201,16 +202,14 @@ public class ProjectController {
             }
             require(request.model(), "model");
             String base = request.modelBaseUrl() == null || request.modelBaseUrl().isBlank()
-                    ? null : request.modelBaseUrl().replaceAll("/+$", "");
+                    ? null : Urls.requireHttp(request.modelBaseUrl(), "modelBaseUrl");
             return new ResolvedLlm(request.provider(), request.model().trim(), base);
         }
         String base;
-        if (request.modelBaseUrl() == null) {
-            base = existing.modelBaseUrl();
-        } else if (request.modelBaseUrl().isBlank()) {
+        if (request.modelBaseUrl() == null || request.modelBaseUrl().isBlank()) {
             base = existing.modelBaseUrl();
         } else {
-            base = request.modelBaseUrl().replaceAll("/+$", "");
+            base = Urls.requireHttp(request.modelBaseUrl(), "modelBaseUrl");
         }
         return new ResolvedLlm(
                 request.provider() == null ? existing.provider() : request.provider(),
