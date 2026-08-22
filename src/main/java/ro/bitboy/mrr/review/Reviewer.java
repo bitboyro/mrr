@@ -166,7 +166,8 @@ public class Reviewer {
                 diff.sourceBranch(), diff.targetBranch(), diff.files().size());
         try {
             var meta = gitlab.gitMeta(project, review.mrIid());
-            info = info.withGitMeta(meta.commitCount(), meta.assigneesText(), meta.reviewersText());
+            info = info.withGitMeta(meta.commitCount(), meta.assigneesText(), meta.reviewersText(),
+                    meta.detailedMergeStatus(), meta.divergedCommitsCount(), meta.hasConflicts());
         } catch (Exception e) {
             log.warn("git meta failed for review {} — continuing without it ({})",
                     reviewId, e.getMessage());
@@ -207,7 +208,7 @@ public class Reviewer {
         }
 
         if (result.markdown() == null || result.markdown().isBlank()) {
-            failClosed(reviewId, FailureKind.PROVIDER, FailureKind.PROVIDER.headline()
+            failClosed(reviewId, FailureKind.OUTPUT, FailureKind.OUTPUT.headline()
                     + " The model returned no verdict.");
             return;
         }
@@ -226,10 +227,13 @@ public class Reviewer {
         if (verdict == null || verdict.summary() == null || verdict.summary().isBlank()) {
             // Paid-for output is already on reviews.response. Posting it as prose would look
             // READY and leave the next commit with nothing to resolve.
-            failClosed(reviewId, FailureKind.PROVIDER, FailureKind.PROVIDER.headline()
+            log.warn("review {} last turn was not a JSON verdict ({} chars): {}",
+                    reviewId, result.markdown().length(), preview(result.markdown()));
+            failClosed(reviewId, FailureKind.OUTPUT, FailureKind.OUTPUT.headline()
                     + " The model did not return a JSON verdict.");
             return;
         }
+        verdict = verdict.completePriors(priorOpen);
 
         List<Finding> opened;
         try {
@@ -309,8 +313,9 @@ public class Reviewer {
                     gitlab.resolveDiscussion(project, review.mrIid(), finding.discussionId());
                 }
                 store.markAddressed(finding.id());
-                log.info("finding {} addressed by {} — thread resolved",
-                        finding.id(), review.headSha().substring(0, 8));
+                String sha = review.headSha() == null ? "?"
+                        : review.headSha().substring(0, Math.min(8, review.headSha().length()));
+                log.info("finding {} addressed by {} — thread resolved", finding.id(), sha);
             } catch (Exception e) {
                 // A thread that will not resolve is not worth failing the review over.
                 log.warn("could not resolve thread for finding {}: {}", finding.id(), e.getMessage());
@@ -404,7 +409,7 @@ public class Reviewer {
             current.put(thread.discussionId(), thread.resolved());
         }
         syncOverviewResolved(project, review, clean, threads, current);
-        reopenOpenFindingThreads(project, review, current);
+        syncFindingThreads(project, review, current);
     }
 
     private void setResolvedIfNeeded(Project project, long mrIid, Map<String, Boolean> current,
@@ -480,22 +485,23 @@ public class Reviewer {
     }
 
     /**
-     * mrr is source of truth for OPEN vs ADDRESSED. If GitLab was resolved by a later
-     * "resolve all" or an author "fixed in" note, reopen every finding still standing
-     * so the merge widget matches NEEDS_WORK.
+     * mrr is source of truth for OPEN vs ADDRESSED. GitLab must match: still-open
+     * threads are reopened (a "resolve all" must not hide NEEDS_WORK); addressed
+     * threads are resolved again if a later comment reopened them.
      */
-    private void reopenOpenFindingThreads(Project project, Review review,
-                                          Map<String, Boolean> current) {
-        for (Finding finding : store.openFindings(project.id(), review.mrIid())) {
+    private void syncFindingThreads(Project project, Review review,
+                                    Map<String, Boolean> current) {
+        for (Finding finding : store.findingsOfMr(project.id(), review.mrIid())) {
             if (finding.discussionId() == null) {
                 continue;
             }
+            boolean resolve = finding.state() == Finding.State.ADDRESSED;
             try {
                 setResolvedIfNeeded(project, review.mrIid(), current,
-                        finding.discussionId(), false);
+                        finding.discussionId(), resolve);
             } catch (Exception e) {
-                log.warn("could not reopen thread for finding {}: {}",
-                        finding.id(), e.getMessage());
+                log.warn("could not {} thread for finding {}: {}",
+                        resolve ? "resolve" : "reopen", finding.id(), e.getMessage());
             }
         }
     }
@@ -517,6 +523,11 @@ public class Reviewer {
             return FailureKind.GITLAB;
         }
         return FailureKind.of(e);
+    }
+
+    private static String preview(String text) {
+        String flat = text.replaceAll("\\s+", " ").trim();
+        return flat.length() <= 240 ? flat : flat.substring(0, 240);
     }
 
     private static String safeMessage(Exception e) {
@@ -569,7 +580,8 @@ public class Reviewer {
             return new Ask(run.result(), run.trace(), run.turns(), 1);
         }
 
-        String first = Prompts.userSlice(diff, slices.getFirst(), documents, maxDoc, userContext);
+        String first = Prompts.userSlice(diff, slices.getFirst(), documents, maxDoc, userContext,
+                priorOpen);
         store.markProcessing(reviewId,
                 "Reviewed in " + slices.size() + " slices (window=" + window
                         + " chars). First slice follows; later slices and the merge are on reviews.trace.\n\n"
@@ -582,7 +594,7 @@ public class Reviewer {
         List<Agent.Run> runs = new ArrayList<>();
         List<String> partials = new ArrayList<>();
         for (DiffWindows.Slice slice : slices) {
-            String user = Prompts.userSlice(diff, slice, documents, maxDoc, userContext);
+            String user = Prompts.userSlice(diff, slice, documents, maxDoc, userContext, priorOpen);
             Agent.Run sliceRun = agent.run(model, system, user, tools, project.agentMaxTurns(),
                     call -> executeTool(call, project, reviewId, review.headSha()),
                     "review " + reviewId + " slice " + slice.index() + "/" + slice.of(),

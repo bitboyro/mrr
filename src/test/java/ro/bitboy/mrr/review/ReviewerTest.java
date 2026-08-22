@@ -8,7 +8,9 @@ import org.junit.jupiter.api.io.TempDir;
 import ro.bitboy.mrr.FakeGitLab;
 import ro.bitboy.mrr.FakeMemory;
 import ro.bitboy.mrr.TestStores;
+import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.model.FailureKind;
+import ro.bitboy.mrr.model.Finding;
 import ro.bitboy.mrr.model.MrStatus;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Review;
@@ -18,6 +20,7 @@ import ro.bitboy.mrr.model.User;
 import ro.bitboy.mrr.store.Store;
 
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -103,6 +106,46 @@ class ReviewerTest {
     }
 
     @Test
+    void aLaterReviewResolvesAPriorFindingById() {
+        model = new RecordingModel(List.of(
+                Result.of("{\"summary\":\"bug\",\"findings\":[{\"file\":\"A.java\",\"line\":1,"
+                        + "\"severity\":\"major\",\"title\":\"leak\",\"body\":\"close it\"}],"
+                        + "\"prior\":[]}", "end_turn")));
+        reviewer().run(claim("sha-first"));
+        Finding open = store.openFindings(project.id(), 7).getFirst();
+
+        model = new RecordingModel(List.of(
+                Result.of("{\"summary\":\"fixed\",\"findings\":[],\"prior\":[{\"id\":\""
+                        + open.id() + "\",\"status\":\"addressed\",\"note\":\"closed\"}]}",
+                        "end_turn")));
+        reviewer().run(claim("sha-fix"));
+
+        assertThat(store.openFindings(project.id(), 7)).isEmpty();
+        assertThat(store.findingsOfMr(project.id(), 7).getFirst().state())
+                .isEqualTo(Finding.State.ADDRESSED);
+        assertThat(gitlab.resolved).contains(open.discussionId() + ":true");
+    }
+
+    @Test
+    void alignGitlabReResolvesAnAddressedThreadThatGitLabReopened() {
+        String reviewId = claim("sha-addr");
+        store.markReady(reviewId, "ov-1", "note-1");
+        store.saveOverview(project.id(), 7, "ov-1", "note-1");
+        store.createFinding(new Finding(Ids.newId(), reviewId, project.id(), 7,
+                "A.java", 1, Finding.Severity.MAJOR, "leak", "close it",
+                "disc-find", "n-2", true, Finding.State.ADDRESSED, Instant.now(), Instant.now()));
+        store.upsertMrStatus(project.id(), 7, MrStatus.Status.CLEAN, reviewId, "sha-addr", 0);
+        gitlab.discussions.add(new ro.bitboy.mrr.gitlab.GitLabClient.DiscussionView(
+                "ov-1", "note-1", "### mrr review", true, true, false));
+        gitlab.discussions.add(new ro.bitboy.mrr.gitlab.GitLabClient.DiscussionView(
+                "disc-find", "n-2", "**[Major]** leak", true, false, false));
+
+        reviewer().alignGitlab(project, 7);
+
+        assertThat(gitlab.resolved).contains("disc-find:true");
+    }
+
+    @Test
     void unparseableOutputFailsClosedAndKeepsTheResponse() {
         String prose = "Here is a nice review in markdown. Looks fine.";
         model = new RecordingModel(List.of(Result.of(prose, "end_turn")));
@@ -112,7 +155,7 @@ class ReviewerTest {
 
         Review review = store.findReview(id).orElseThrow();
         assertThat(review.state()).isEqualTo(Review.State.FAILED);
-        assertThat(review.errorKind()).isEqualTo(FailureKind.PROVIDER);
+        assertThat(review.errorKind()).isEqualTo(FailureKind.OUTPUT);
         assertThat(review.response()).isEqualTo(prose);
         assertThat(review.discussionId()).isNull();
         assertThat(store.findMrStatus(project.id(), 7).orElseThrow().currentStatus())

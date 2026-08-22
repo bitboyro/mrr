@@ -57,12 +57,39 @@ public record MergeRequestInfo(
         String assignees,
         @Schema(description = "Reviewers GitLab lists on the MR, same shape as assignees.",
                 nullable = true)
-        String reviewers
+        String reviewers,
+        @Schema(description = "GitLab `detailed_merge_status`, or `merge_status` when that is "
+                + "all the payload had. `need_rebase` means the source is behind the target.",
+                example = "need_rebase", nullable = true)
+        String detailedMergeStatus,
+        @Schema(description = "Commits the source branch is behind the target. GitLab only "
+                + "returns this when asked; null means we have not seen a count.",
+                nullable = true)
+        Integer divergedCommitsCount,
+        @Schema(description = "True when GitLab reports conflicts with the target.",
+                nullable = true)
+        Boolean hasConflicts
 ) {
 
     public static MergeRequestInfo empty() {
         return new MergeRequestInfo(null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null, null,
+                null, null, null);
+    }
+
+    /** Source is behind the target — GitLab will not merge until it is rebased. */
+    public boolean behindTarget() {
+        if (divergedCommitsCount != null && divergedCommitsCount > 0) {
+            return true;
+        }
+        return detailedMergeStatus != null && "need_rebase".equalsIgnoreCase(detailedMergeStatus);
+    }
+
+    public boolean conflicts() {
+        if (Boolean.TRUE.equals(hasConflicts)) {
+            return true;
+        }
+        return detailedMergeStatus != null && "conflict".equalsIgnoreCase(detailedMergeStatus);
     }
 
     /**
@@ -94,11 +121,20 @@ public record MergeRequestInfo(
                 apiFilesChanged == null ? filesChanged : apiFilesChanged,
                 commitCount,
                 assignees,
-                reviewers);
+                reviewers,
+                detailedMergeStatus,
+                divergedCommitsCount,
+                hasConflicts);
     }
 
     public MergeRequestInfo withGitMeta(Integer apiCommitCount, String apiAssignees,
                                         String apiReviewers) {
+        return withGitMeta(apiCommitCount, apiAssignees, apiReviewers, null, null, null);
+    }
+
+    public MergeRequestInfo withGitMeta(Integer apiCommitCount, String apiAssignees,
+                                        String apiReviewers, String apiMergeStatus,
+                                        Integer apiDiverged, Boolean apiConflicts) {
         return new MergeRequestInfo(
                 title, url, state, action, draft, sourceBranch, targetBranch,
                 authorName, authorUsername, actorName, actorUsername,
@@ -106,7 +142,10 @@ public record MergeRequestInfo(
                 filesChanged,
                 apiCommitCount == null ? commitCount : apiCommitCount,
                 pick(apiAssignees, assignees),
-                pick(apiReviewers, reviewers));
+                pick(apiReviewers, reviewers),
+                pick(apiMergeStatus, detailedMergeStatus),
+                apiDiverged == null ? divergedCommitsCount : apiDiverged,
+                apiConflicts == null ? hasConflicts : apiConflicts);
     }
 
     private static String pick(String preferred, String fallback) {

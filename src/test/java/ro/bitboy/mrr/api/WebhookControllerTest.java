@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import ro.bitboy.mrr.FakeGitLab;
 import ro.bitboy.mrr.FakeMemory;
 import ro.bitboy.mrr.FakeReplier;
 import ro.bitboy.mrr.FakeReviewer;
@@ -38,6 +39,7 @@ class WebhookControllerTest {
     private FakeReviewer reviewer;
     private FakeReplier replier;
     private FakeMemory memory;
+    private FakeGitLab gitlab;
     private WebhookController webhooks;
     private Project project;
 
@@ -49,7 +51,8 @@ class WebhookControllerTest {
         reviewer = new FakeReviewer();
         replier = new FakeReplier();
         memory = new FakeMemory();
-        webhooks = new WebhookController(store, reviewer, replier, memory, MAPPER);
+        gitlab = new FakeGitLab();
+        webhooks = new WebhookController(store, reviewer, replier, memory, gitlab, MAPPER);
     }
 
     @Test
@@ -130,6 +133,21 @@ class WebhookControllerTest {
     }
 
     @Test
+    void aNoteFromTheTokenUserIsIgnored() {
+        String reviewId = store.claimReview(project.id(), 42, "sha-n", "{}", TestStores.mrInfo())
+                .review().id();
+        store.createFinding(new Finding(Ids.newId(), reviewId, project.id(), 42,
+                "A.java", 3, Finding.Severity.MAJOR, "title", "body",
+                "disc-1", "note-1", true, Finding.State.OPEN, Instant.now(), null));
+
+        ResponseEntity<?> response = webhooks.receive(project.id(), SECRET, note(false, "mrr-bot"));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).extracting("reason").isEqualTo("own_note");
+        assertThat(replier.calls).isEmpty();
+    }
+
+    @Test
     void aPayloadWithoutIidIsRejected() {
         assertThatThrownBy(() -> webhooks.receive(project.id(), SECRET, """
                 {"object_kind":"merge_request","object_attributes":{"action":"open","iid":0}}
@@ -156,10 +174,14 @@ class WebhookControllerTest {
     }
 
     private static String note(boolean system) {
+        return note(system, "ada");
+    }
+
+    private static String note(boolean system, String username) {
         return """
                 {
                   "object_kind": "note",
-                  "user": { "username": "ada" },
+                  "user": { "username": "%s" },
                   "object_attributes": {
                     "noteable_type": "MergeRequest",
                     "system": %s,
@@ -169,6 +191,6 @@ class WebhookControllerTest {
                   },
                   "merge_request": { "iid": 42 }
                 }
-                """.formatted(system);
+                """.formatted(username, system);
     }
 }

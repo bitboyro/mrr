@@ -112,7 +112,24 @@ public final class WebhookPayload {
                 text(commitAuthor.path("email")),
                 instant(text(commit.path("timestamp"))),
                 labels(body),
-                null, null, null, null);
+                null, null, null, null,
+                mergeStatus(attributes),
+                integer(attributes.path("diverged_commits_count")),
+                attributes.hasNonNull("has_conflicts")
+                        ? attributes.path("has_conflicts").asBoolean() : null);
+    }
+
+    /**
+     * Prefer {@code detailed_merge_status} ({@code need_rebase}, {@code mergeable}). Older
+     * GitLab only sends {@code merge_status} ({@code can_be_merged}, {@code cannot_be_merged}).
+     */
+    private static String mergeStatus(JsonNode attributes) {
+        String detailed = text(attributes.path("detailed_merge_status"));
+        return detailed != null ? detailed : text(attributes.path("merge_status"));
+    }
+
+    private static Integer integer(JsonNode node) {
+        return node != null && node.isIntegralNumber() ? node.asInt() : null;
     }
 
     /**

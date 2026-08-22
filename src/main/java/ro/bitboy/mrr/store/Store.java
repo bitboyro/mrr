@@ -382,12 +382,15 @@ public class Store {
         db.sql("""
                 UPDATE reviews SET mr_title = ?, mr_url = ?, source_branch = ?, target_branch = ?,
                        mr_author_name = ?, mr_author_username = ?, files_changed = ?,
-                       commit_count = ?, assignees = ?, reviewers = ?
+                       commit_count = ?, assignees = ?, reviewers = ?,
+                       detailed_merge_status = ?, diverged_commits_count = ?, has_conflicts = ?
                 WHERE id = ?
                 """)
                 .params(mr.title(), mr.url(), mr.sourceBranch(), mr.targetBranch(),
                         mr.authorName(), mr.authorUsername(), mr.filesChanged(),
-                        mr.commitCount(), mr.assignees(), mr.reviewers(), reviewId)
+                        mr.commitCount(), mr.assignees(), mr.reviewers(),
+                        mr.detailedMergeStatus(), mr.divergedCommitsCount(), bool(mr.hasConflicts()),
+                        reviewId)
                 .update();
     }
 
@@ -1374,7 +1377,10 @@ public class Store {
                 rs.getString("commit_author_email"), instant(rs.getString("commit_at")),
                 rs.getString("labels"), nullableInt(rs, "files_changed"),
                 nullableInt(rs, "commit_count"), rs.getString("assignees"),
-                rs.getString("reviewers"));
+                rs.getString("reviewers"),
+                rs.getString("detailed_merge_status"),
+                nullableInt(rs, "diverged_commits_count"),
+                nullableBool(rs, "has_conflicts"));
 
         return new Review(
                 rs.getString("id"), rs.getString("project_id"), rs.getLong("mr_iid"),

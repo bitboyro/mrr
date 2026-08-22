@@ -108,6 +108,9 @@ type MrSnapshot = {
   filesChanged?: number | null;
   assignees?: string | null;
   reviewers?: string | null;
+  detailedMergeStatus?: string | null;
+  divergedCommitsCount?: number | null;
+  hasConflicts?: boolean | null;
 };
 type AgentTrace = {
   turns: number;
@@ -292,7 +295,8 @@ function pill(status: string) {
     : s === "NEEDS_WORK" || s === "OPEN" || s === "REVIEWING" || s === "PENDING"
       || s === "PROCESSING" || s === "RUNNING" || s === "INITIALIZE" || s === "REFRESH" ? "warn"
     : s === "FAILED" || s === "CANCELLED" || s === "BLOCKER" || s === "QUOTA" || s === "PROVIDER"
-      || s === "AUTH" || s === "MCP" || s === "GITLAB" || s === "RATE_LIMIT" || s === "REFUSAL" ? "bad"
+      || s === "OUTPUT" || s === "AUTH" || s === "MCP" || s === "GITLAB" || s === "RATE_LIMIT"
+      || s === "REFUSAL" ? "bad"
     : s === "MAJOR" ? "major"
     : s === "MINOR" ? "minor"
     : "";
@@ -416,7 +420,11 @@ function GitMeta({ mr, sha }: { mr?: MrSnapshot | null; sha?: string | null }) {
   for (const p of parsePeople(mr.assignees)) add("assignee", p.label, p.username);
   for (const p of parsePeople(mr.reviewers)) add("reviewer", p.label, p.username);
 
-  const hasGit = !!(mr.sourceBranch || mr.commitCount != null || mr.filesChanged != null || sha);
+  const target = mr.targetBranch || "target";
+  const behind = (mr.divergedCommitsCount ?? 0) > 0 || mr.detailedMergeStatus === "need_rebase";
+  const conflicts = mr.hasConflicts === true || mr.detailedMergeStatus === "conflict";
+  const hasGit = !!(mr.sourceBranch || mr.commitCount != null || mr.filesChanged != null
+    || sha || behind || conflicts);
   if (!hasGit && chips.length === 0) return null;
 
   return (
@@ -434,6 +442,14 @@ function GitMeta({ mr, sha }: { mr?: MrSnapshot | null; sha?: string | null }) {
                 : mr.targetBranch}
             </>
           )}
+        </span>
+      )}
+      {conflicts && <span className="pill bad">conflicts with {target}</span>}
+      {behind && (
+        <span className="pill warn">
+          {(mr.divergedCommitsCount ?? 0) > 0
+            ? `${mr.divergedCommitsCount} ${mr.divergedCommitsCount === 1 ? "commit" : "commits"} behind ${target}`
+            : `needs rebase onto ${target}`}
         </span>
       )}
       {mr.commitCount != null && (
@@ -676,11 +692,14 @@ function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
       <ul>
         <li>One <code>### mrr review</code> overview, edited in place</li>
         <li>One thread per finding</li>
-        <li>Later commits: addressed resolve; still-open stay (reopened if resolved by hand); new problems get new threads</li>
+        <li>Later commits: the model must return <code>prior</code> for every still-open id. <code>addressed</code> resolves that thread; a leftover related bug is a new finding</li>
+        <li>GitLab follows mrr: open findings stay unresolved (reopened if resolved by hand); addressed findings stay resolved (re-resolved if a comment reopened them)</li>
+        <li>A reply on a finding can close it when the model returns <code>status: addressed</code>. Do not comment “Closing this”</li>
       </ul>
       <p className="muted">
-        Resolving in GitLab does not mark addressed in mrr. Title/label edits without a new SHA
-        don’t spend tokens. Drafts are reviewed unless Skip drafts is on.
+        Resolving in GitLab does not mark addressed in mrr. Notes from the review PAT are
+        ignored. Title/label edits without a new SHA don’t spend tokens. Drafts are
+        reviewed unless Skip drafts is on.
       </p>
 
       <h2>6. Optional</h2>

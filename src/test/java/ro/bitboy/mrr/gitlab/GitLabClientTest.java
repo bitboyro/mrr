@@ -245,6 +245,14 @@ class GitLabClientTest {
     }
 
     @Test
+    void tokenUsernameReadsTheInstanceUser() throws Exception {
+        gitlab.enqueue(json("{\"username\":\"review-bot\"}"));
+
+        assertThat(client.tokenUsername(project("g/p"))).isEqualTo("review-bot");
+        assertThat(gitlab.takeRequest().getPath()).isEqualTo("/api/v4/user");
+    }
+
+    @Test
     void approvesAMergeRequest() throws Exception {
         gitlab.enqueue(json("{\"id\":1}"));
 
@@ -307,14 +315,17 @@ class GitLabClientTest {
                  "web_url":"https://gitlab.com/g/p/-/merge_requests/3",
                  "assignees":[{"name":"Ada Lovelace","username":"ada"}],
                  "reviewers":[{"name":"Grace Hopper","username":"grace"},
-                              {"username":"linus"}]}
+                              {"username":"linus"}],
+                 "detailed_merge_status":"need_rebase",
+                 "diverged_commits_count":4,
+                 "has_conflicts":false}
                 """));
         gitlab.enqueue(json("[{\"id\":\"c1\"}]").setHeader("X-Total", "7"));
 
         GitLabClient.GitMeta meta = client.gitMeta(project("g/p"), 3);
 
         assertThat(gitlab.takeRequest().getPath())
-                .isEqualTo("/api/v4/projects/g%2Fp/merge_requests/3");
+                .isEqualTo("/api/v4/projects/g%2Fp/merge_requests/3?include_diverged_commits_count=true");
         assertThat(gitlab.takeRequest().getPath())
                 .isEqualTo("/api/v4/projects/g%2Fp/merge_requests/3/commits?per_page=1");
         assertThat(meta.commitCount()).isEqualTo(7);
@@ -322,6 +333,9 @@ class GitLabClientTest {
         assertThat(meta.reviewers()).containsExactly("Grace Hopper (@grace)", "@linus");
         assertThat(meta.assigneesText()).isEqualTo("Ada Lovelace (@ada)");
         assertThat(meta.reviewersText()).contains("Grace Hopper (@grace)", "@linus");
+        assertThat(meta.detailedMergeStatus()).isEqualTo("need_rebase");
+        assertThat(meta.divergedCommitsCount()).isEqualTo(4);
+        assertThat(meta.hasConflicts()).isFalse();
     }
 
     @Test

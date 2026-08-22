@@ -6,7 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Branch behind the target.** The review snapshot now stores GitLab's
+  `detailed_merge_status`, how many commits the source is behind, and
+  `has_conflicts`. The cycle and review pages show a warning when the
+  branch needs a rebase, and a red pill when it conflicts.
+
 ### Fixed
+
+- **Unusable model output is no longer a PROVIDER failure.** A completed
+  review that returned prose or JSON without `summary` is `OUTPUT`. The
+  provider was reached; the last-turn text is kept on `reviews.response` and
+  a short preview is logged.
+
+- **Finding threads stay closed after a later review.** Large MRs judged priors
+  on a merge turn that could not see the fix, so threads stayed open. Slice
+  turns now judge priors in their files; the merge turn gets the current patch
+  for each open finding, under one shared character budget. Missing `prior`
+  ids stay open instead of being skipped. GitLab is synced both ways
+  (`OPEN` reopens, `ADDRESSED` re-resolves).
+  A human reply can close the finding when the model returns `status:
+  addressed`. Notes from the review PAT are ignored.
 
 - **Live timeout now reaches GitLab and OpenAI.** Configure `timeoutSeconds` is read per
   HTTP request instead of once when the RestClient bean is built. Anthropic already rebuilt

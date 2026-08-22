@@ -27,6 +27,36 @@ public final class VerdictParser {
         this.mapper = mapper;
     }
 
+    public record ReplyVerdict(boolean addressed, String reply) {
+    }
+
+    /**
+     * Thread replies prefer JSON {@code {status, reply}}. Bare prose is posted as-is and
+     * never closes the finding.
+     */
+    public ReplyVerdict parseReply(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return new ReplyVerdict(false, "");
+        }
+        String json = extractJson(raw.trim());
+        if (json != null) {
+            try {
+                JsonNode root = mapper.readTree(json);
+                if (root.isObject() && (root.has("status") || root.has("reply"))) {
+                    String reply = text(root.path("reply"));
+                    if (reply == null) {
+                        reply = raw.trim();
+                    }
+                    String status = text(root.path("status"));
+                    return new ReplyVerdict("addressed".equalsIgnoreCase(status), reply);
+                }
+            } catch (Exception e) {
+                log.debug("reply was not a parseable verdict: {}", e.getMessage());
+            }
+        }
+        return new ReplyVerdict(false, raw.trim());
+    }
+
     /** @return null when the text could not be read as a verdict — caller must fail closed */
     public ReviewModel.Verdict parse(String raw) {
         if (raw == null || raw.isBlank()) {

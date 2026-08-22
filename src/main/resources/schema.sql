@@ -132,6 +132,9 @@ CREATE TABLE IF NOT EXISTS reviews (
     commit_count        INTEGER,
     assignees           TEXT,                        -- Name (@user), one per line
     reviewers           TEXT,
+    detailed_merge_status TEXT,                      -- GitLab: need_rebase | mergeable | …
+    diverged_commits_count INTEGER,                  -- source commits behind the target
+    has_conflicts       INTEGER,                     -- 1 when GitLab reports conflicts
 
     -- This constraint IS the idempotency mechanism: a redelivered webhook for the same
     -- head commit collides here and we return the existing review instead of re-reviewing.

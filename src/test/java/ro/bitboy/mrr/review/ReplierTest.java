@@ -63,6 +63,20 @@ class ReplierTest {
                 .extracting(r -> r.response())
                 .isEqualTo("Because the caller ignores the return.");
         assertThat(gitlab.replies).containsExactly("disc-1:Because the caller ignores the return.");
+        assertThat(gitlab.resolved).isEmpty();
+        assertThat(store.openFindings(project.id(), 7)).hasSize(1);
+    }
+
+    @Test
+    void anAddressedReplyResolvesTheFindingThread() {
+        model = new RecordingModel(List.of(Result.of(
+                "{\"status\":\"addressed\",\"reply\":\"The reader is closed now.\"}", "end_turn")));
+
+        replier().reply(project.id(), 7, "disc-1", null, "fixed in HEAD", "ada");
+
+        assertThat(gitlab.replies).containsExactly("disc-1:The reader is closed now.");
+        assertThat(gitlab.resolved).contains("disc-1:true");
+        assertThat(store.openFindings(project.id(), 7)).isEmpty();
     }
 
     @Test

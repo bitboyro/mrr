@@ -25,6 +25,8 @@ class WebhookPayloadTest {
                 "description": "Fixes the crash in the report job.",
                 "source_branch": "fix/div-zero", "target_branch": "main",
                 "state": "opened", "action": "update", "draft": false,
+                "detailed_merge_status": "need_rebase",
+                "has_conflicts": false,
                 "url": "https://gitlab.com/eng/calc/-/merge_requests/42",
                 "last_commit": {
                   "id": "cafe1234deadbeef",
@@ -59,6 +61,11 @@ class WebhookPayloadTest {
         // The webhook carries only a numeric author_id, so the MR author waits for the API.
         assertThat(mr.authorName()).isNull();
         assertThat(mr.authorUsername()).isNull();
+
+        assertThat(mr.detailedMergeStatus()).isEqualTo("need_rebase");
+        assertThat(mr.hasConflicts()).isFalse();
+        assertThat(mr.behindTarget()).isTrue();
+        assertThat(mr.conflicts()).isFalse();
     }
 
     @Test
@@ -120,5 +127,16 @@ class WebhookPayloadTest {
 
         assertThat(enriched.title()).isEqualTo("Guard against divide by zero");
         assertThat(enriched.sourceBranch()).isEqualTo("fix/div-zero");
+    }
+
+    @Test
+    void fallsBackToMergeStatusWhenDetailedStatusIsMissing() throws Exception {
+        MergeRequestInfo mr = WebhookPayload.mergeRequestInfo(MAPPER.readTree("""
+                {"object_kind":"merge_request",
+                 "object_attributes":{"iid":1,"action":"open","last_commit":{"id":"a"},
+                   "merge_status":"cannot_be_merged","has_conflicts":true}}
+                """));
+        assertThat(mr.detailedMergeStatus()).isEqualTo("cannot_be_merged");
+        assertThat(mr.conflicts()).isTrue();
     }
 }

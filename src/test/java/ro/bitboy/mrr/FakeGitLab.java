@@ -18,6 +18,7 @@ public final class FakeGitLab extends GitLabClient {
     public List<MergeRequest> openMrs = List.of();
     public Optional<MergeRequest> oneMr = Optional.empty();
     public Discussion nextDiscussion = new Discussion("ov-1", "note-1");
+    public String tokenUser = "mrr-bot";
 
     public final List<String> posted = new ArrayList<>();
     public final List<String> replies = new ArrayList<>();
@@ -95,6 +96,11 @@ public final class FakeGitLab extends GitLabClient {
     @Override
     public List<DiscussionView> listDiscussions(Project project, long mrIid) {
         return List.copyOf(discussions);
+    }
+
+    @Override
+    public String tokenUsername(Project project) {
+        return tokenUser;
     }
 
     @Override

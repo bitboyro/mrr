@@ -48,6 +48,7 @@ public final class TestStores {
                 "opened", "open", false, "fix/div-zero", "main",
                 "Alan Turing", "alan", "Ada Lovelace", "ada",
                 "Guard against divide by zero", "Grace Hopper", "grace@example.com",
-                Instant.parse("2026-08-14T07:15:30Z"), "[\"backend\"]", 3, null, null, null);
+                Instant.parse("2026-08-14T07:15:30Z"), "[\"backend\"]", 3, null, null, null,
+                null, null, null);
     }
 }

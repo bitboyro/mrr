@@ -136,6 +136,9 @@ public class SchemaPatch {
         addColumn("reviews", "commit_count", "INTEGER");
         addColumn("reviews", "assignees", "TEXT");
         addColumn("reviews", "reviewers", "TEXT");
+        addColumn("reviews", "detailed_merge_status", "TEXT");
+        addColumn("reviews", "diverged_commits_count", "INTEGER");
+        addColumn("reviews", "has_conflicts", "INTEGER");
         addColumn("reviews", "input_tokens", "INTEGER NOT NULL DEFAULT 0");
         addColumn("reviews", "output_tokens", "INTEGER NOT NULL DEFAULT 0");
         addColumn("reviews", "cache_read_tokens", "INTEGER NOT NULL DEFAULT 0");

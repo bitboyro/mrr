@@ -5,6 +5,9 @@ import org.junit.jupiter.api.Test;
 import ro.bitboy.mrr.model.Finding;
 import ro.bitboy.mrr.model.ReviewModel;
 
+import java.time.Instant;
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -156,6 +159,35 @@ class VerdictParserTest {
     void memoryIsOptionalSoOldVerdictsStillParse() {
         ReviewModel.Verdict v = parser.parse("{\"summary\":\"s\",\"findings\":[],\"prior\":[]}");
         assertThat(v.memory()).isNull();
+    }
+
+    @Test
+    void completePriorsFillsMissingIdsAsStillPresent() {
+        ReviewModel.Verdict v = parser.parse(
+                "{\"summary\":\"s\",\"findings\":[],\"prior\":[{\"id\":\"a\",\"status\":\"addressed\"}]}");
+        Finding openA = new Finding("a", "r", "p", 1, "A.java", 1, Finding.Severity.MINOR,
+                "t", "b", "d", "n", false, Finding.State.OPEN, Instant.now(), null);
+        Finding openB = new Finding("b", "r", "p", 1, "B.java", 1, Finding.Severity.MINOR,
+                "t", "b", "d", "n", false, Finding.State.OPEN, Instant.now(), null);
+        ReviewModel.Verdict completed = v.completePriors(List.of(openA, openB));
+        assertThat(completed.priorVerdicts()).hasSize(2);
+        assertThat(completed.priorVerdicts().get(0).addressed()).isTrue();
+        assertThat(completed.priorVerdicts().get(1).findingId()).isEqualTo("b");
+        assertThat(completed.priorVerdicts().get(1).addressed()).isFalse();
+    }
+
+    @Test
+    void parseReplyReadsAddressedJsonAndLeavesProseOpen() {
+        assertThat(parser.parseReply("{\"status\":\"addressed\",\"reply\":\"Fixed in HEAD.\"}"))
+                .satisfies(r -> {
+                    assertThat(r.addressed()).isTrue();
+                    assertThat(r.reply()).isEqualTo("Fixed in HEAD.");
+                });
+        assertThat(parser.parseReply("The guard is still missing."))
+                .satisfies(r -> {
+                    assertThat(r.addressed()).isFalse();
+                    assertThat(r.reply()).isEqualTo("The guard is still missing.");
+                });
     }
 
     @Test

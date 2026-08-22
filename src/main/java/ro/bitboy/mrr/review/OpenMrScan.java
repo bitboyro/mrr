@@ -177,7 +177,8 @@ public class OpenMrScan implements ApplicationRunner {
         MergeRequestInfo info = new MergeRequestInfo(
                 mr.title(), mr.webUrl(), mr.state(), "scan", mr.draft(),
                 null, null, null, null, "mrr", "startup-scan",
-                null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null,
+                null, null, null);
         Store.Claim claim = store.claimReview(project.id(), mr.iid(), mr.sha(),
                 "{\"source\":\"startup_scan\"}", info);
         Review review = claim.review();
