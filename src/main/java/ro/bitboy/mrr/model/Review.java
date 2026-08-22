@@ -30,7 +30,7 @@ public record Review(
         @Schema(description = "GitLab id of the thread holding it. Both are needed to edit.",
                 nullable = true) String discussionId,
         @Schema(description = "Why it failed, when it did.", nullable = true) String error,
-        @Schema(description = "QUOTA | RATE_LIMIT | AUTH | PROVIDER | MCP | GITLAB | REFUSAL. "
+        @Schema(description = "QUOTA | RATE_LIMIT | AUTH | PROVIDER | OUTPUT | MCP | GITLAB | REFUSAL. "
                 + "Set when the review failed before posting.", nullable = true)
         FailureKind errorKind,
         Instant createdAt,

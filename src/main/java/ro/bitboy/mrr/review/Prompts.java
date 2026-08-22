@@ -144,6 +144,8 @@ final class Prompts {
             - `prior` must contain exactly one entry per previously-reported finding listed
               below, using its id verbatim. Mark `addressed` only when the new code actually
               fixes it — if you are unsure, say `still_present`.
+            - A leftover related problem is a new `findings` entry. Do not keep the old id
+              `still_present` if the reported problem itself is gone.
             - Do not repeat a previously-reported finding in `findings`. It belongs in `prior`.
             - `memory` is always required. It becomes this merge request's memory card. Do not
               copy the summary verbatim — `change` is what landed, `impact` is how the rest of
@@ -221,20 +223,33 @@ final class Prompts {
     }
 
     /**
-     * One window of a large MR. No {@code prior} — the merge turn judges those once,
-     * with every slice in hand.
+     * One window of a large MR. Priors whose file is in this slice are judged here;
+     * the rest wait for another slice or the merge turn.
      */
     static String userSlice(GitLabClient.Diff diff, DiffWindows.Slice slice,
                             List<AgentDocument> documents, int maxDocumentChars,
                             String userContext) {
+        return userSlice(diff, slice, documents, maxDocumentChars, userContext, List.of());
+    }
+
+    static String userSlice(GitLabClient.Diff diff, DiffWindows.Slice slice,
+                            List<AgentDocument> documents, int maxDocumentChars,
+                            String userContext, List<Finding> priorOpen) {
         GitLabClient.Diff view = diff.forSlice(slice.paths(), slice.text(), slice.clipped());
-        return "This is slice " + slice.index() + " of " + slice.of()
+        List<Finding> local = priorsIn(priorOpen, slice.paths());
+        String header = "This is slice " + slice.index() + " of " + slice.of()
                 + ". Review ONLY the files in this slice. Return the JSON object for this "
-                + "slice. Set `prior` to []. Findings must be about these files only. "
-                + "`summary` may cover only this slice — a later merge turn writes the "
-                + "merge-request-wide summary, judges previously reported findings, and "
-                + "writes `memory`.\n\n"
-                + user(view, List.of(), documents, maxDocumentChars, userContext);
+                + "slice. Findings must be about these files only. `summary` may cover "
+                + "only this slice — a later merge turn writes the merge-request-wide "
+                + "summary and `memory`.\n";
+        if (local.isEmpty()) {
+            header += "Set `prior` to []. Findings reported against other files "
+                    + "are judged on their slice or the merge turn.\n\n";
+        } else {
+            header += "Judge the previously-reported findings listed below (they belong "
+                    + "to files in this slice) in `prior`. Use each id verbatim.\n\n";
+        }
+        return header + user(view, local, documents, maxDocumentChars, userContext);
     }
 
     /**
@@ -276,9 +291,10 @@ final class Prompts {
 
                     ## Previously reported, still open
 
-                    Judge each against the partial reviews and return a verdict for every \
-                    one of them in `prior`. Mark `addressed` only where the new code \
-                    genuinely fixes it.
+                    Judge each against the current patches below (not only the slice \
+                    summaries) and return a verdict for every one of them in `prior`. \
+                    Mark `addressed` when the reported problem is gone. A leftover \
+                    related bug is a new finding, not `still_present` on the old id.
 
                     """);
             for (Finding f : priorOpen) {
@@ -291,6 +307,8 @@ final class Prompts {
                 }
                 sb.append("  finding: ").append(f.title()).append('\n');
             }
+            sb.append('\n');
+            sb.append(priorEvidence(diff, priorOpen, maxDocumentChars));
         }
         sb.append("\nFiles changed (").append(diff.files().size()).append("):\n");
         diff.files().forEach(f -> sb.append("- ").append(f).append('\n'));
@@ -364,6 +382,75 @@ final class Prompts {
         return sb.toString();
     }
 
+    /**
+     * {@code maxChars} is the budget for the whole evidence block, not per finding.
+     * Later findings are dropped once it is exhausted.
+     */
+    static String priorEvidence(GitLabClient.Diff diff, List<Finding> priorOpen, int maxChars) {
+        if (priorOpen == null || priorOpen.isEmpty()) {
+            return "";
+        }
+        int budget = maxChars > 0 ? maxChars : 1_500;
+        String heading = "## Current patches for previously reported findings\n\n";
+        StringBuilder sb = new StringBuilder(heading);
+        budget -= heading.length();
+        for (Finding finding : priorOpen) {
+            if (budget <= 0) {
+                sb.append("[prior evidence truncated]\n");
+                break;
+            }
+            StringBuilder chunk = new StringBuilder();
+            chunk.append("### ").append(finding.id());
+            if (finding.title() != null) {
+                chunk.append(" — ").append(finding.title());
+            }
+            chunk.append('\n');
+            GitLabClient.FilePatch patch = patchFor(diff, finding.filePath());
+            if (patch == null) {
+                chunk.append("No patch for this path in the current merge-request diff.\n\n");
+            } else {
+                chunk.append(patch.asText()).append('\n');
+            }
+            String text = chunk.toString();
+            if (text.length() <= budget) {
+                sb.append(text);
+                budget -= text.length();
+                continue;
+            }
+            // Do not start a half header when there is no room for a useful chunk.
+            int headerLen = text.indexOf('\n') + 1;
+            if (headerLen <= 0 || budget < headerLen + 32) {
+                sb.append("[prior evidence truncated]\n");
+                break;
+            }
+            sb.append(within(text, budget));
+            sb.append("\n[prior evidence truncated]\n");
+            break;
+        }
+        return sb.toString();
+    }
+
+    static List<Finding> priorsIn(List<Finding> priorOpen, List<String> paths) {
+        if (priorOpen == null || priorOpen.isEmpty() || paths == null || paths.isEmpty()) {
+            return List.of();
+        }
+        return priorOpen.stream()
+                .filter(f -> f.filePath() != null && paths.contains(f.filePath()))
+                .toList();
+    }
+
+    private static GitLabClient.FilePatch patchFor(GitLabClient.Diff diff, String path) {
+        if (diff == null || path == null || path.isBlank()) {
+            return null;
+        }
+        for (GitLabClient.FilePatch patch : diff.patches()) {
+            if (path.equals(patch.path())) {
+                return patch;
+            }
+        }
+        return null;
+    }
+
     private static String badge(Finding.Severity severity) {
         return switch (severity) {
             case BLOCKER -> "[Blocker]";
@@ -373,9 +460,21 @@ final class Prompts {
     }
 
     private static String truncate(String text, int maxChars) {
-        if (maxChars <= 0 || text.length() <= maxChars) {
+        return within(text, maxChars);
+    }
+
+    /** Fits {@code text} into {@code remaining} characters, including a cutoff marker. */
+    private static String within(String text, int remaining) {
+        if (text == null || remaining <= 0) {
+            return "";
+        }
+        if (text.length() <= remaining) {
             return text;
         }
-        return text.substring(0, maxChars) + "\n\n[truncated]";
+        String marker = "\n\n[truncated]";
+        if (remaining <= marker.length()) {
+            return marker.substring(0, remaining);
+        }
+        return text.substring(0, remaining - marker.length()) + marker;
     }
 }

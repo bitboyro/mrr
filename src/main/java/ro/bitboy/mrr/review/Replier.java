@@ -3,6 +3,7 @@ package ro.bitboy.mrr.review;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import ro.bitboy.mrr.MrrProperties;
@@ -48,14 +49,16 @@ public class Replier {
             You are the code reviewer that raised the finding quoted below, replying to a
             developer's response in the merge-request thread.
 
-            Answer only what they asked, about this specific code. Be brief — a few sentences.
-            Plain Markdown, no headings.
+            Reply with a single JSON object and nothing else:
 
-            If they are right that you were wrong, say so plainly and without hedging. If the
-            finding still stands, explain the concrete case that breaks, not the principle. If
-            they are asking how to fix it, show the fix.
+            { "status": "addressed | still_present", "reply": "a few sentences of Markdown" }
 
-            Do not restate the finding. They can see it. Do not thank them for their feedback.
+            `status` is `addressed` only when the current code no longer has the reported
+            problem — the developer was right, or they already fixed it. Otherwise
+            `still_present`. `reply` is what is posted on the thread: brief, no headings,
+            no restating the finding, no thanks.
+
+            If they ask how to fix it, show the fix in `reply` and keep `still_present`.
             """;
 
     private final Store store;
@@ -65,6 +68,7 @@ public class Replier {
     private final Function<Project, ReviewModel> models;
     private final ExecutorService workers;
     private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
+    private final VerdictParser parser;
 
     @Autowired
     public Replier(Store store, GitLabClient gitlab, ReviewModelFactory models,
@@ -85,6 +89,7 @@ public class Replier {
         this.agent = new Agent();
         this.models = models;
         this.workers = workers;
+        this.parser = new VerdictParser(new ObjectMapper());
     }
 
     public void submit(String projectId, long mrIid, String discussionId, String sourceNoteId,
@@ -186,7 +191,8 @@ public class Replier {
             return;
         }
 
-        String posted = answer.markdown().trim();
+        VerdictParser.ReplyVerdict verdict = parser.parseReply(answer.markdown());
+        String posted = verdict.reply();
         Reply draft = new Reply(
                 Ids.newId(), projectId, mrIid, discussionId,
                 finding == null ? null : finding.id(), sourceNoteId,
@@ -195,6 +201,7 @@ public class Replier {
             gitlab.replyToDiscussion(project, mrIid, discussionId, posted);
             store.createReply(draft);
             store.saveReplyUsage(draft.id(), answer.usage());
+            closeIfAddressed(project, mrIid, discussionId, finding, verdict);
             store.clearProjectError(project.id());
             log.info("replied on thread {} of {}!{}", discussionId, project.name(), mrIid);
             return;
@@ -202,11 +209,13 @@ public class Replier {
         if (!store.claimUnpostedReply(draft)) {
             return;
         }
-        deliver(project, mrIid, discussionId, draft.id(), posted, sourceNoteId, answer.usage());
+        deliver(project, mrIid, discussionId, draft.id(), posted, sourceNoteId,
+                answer.usage(), finding, verdict);
     }
 
     private void deliver(Project project, long mrIid, String discussionId, String replyId,
-                         String posted, String sourceNoteId, ReviewModel.Usage usage) {
+                         String posted, String sourceNoteId, ReviewModel.Usage usage,
+                         Finding finding, VerdictParser.ReplyVerdict verdict) {
         try {
             gitlab.replyToDiscussion(project, mrIid, discussionId, posted);
         } catch (RuntimeException e) {
@@ -221,8 +230,28 @@ public class Replier {
         if (usage != null) {
             store.saveReplyUsage(replyId, usage);
         }
+        closeIfAddressed(project, mrIid, discussionId, finding, verdict);
         store.clearProjectError(project.id());
         log.info("replied on thread {} of {}!{}", discussionId, project.name(), mrIid);
+    }
+
+    private void closeIfAddressed(Project project, long mrIid, String discussionId,
+                                  Finding finding, VerdictParser.ReplyVerdict verdict) {
+        if (verdict == null || !verdict.addressed() || finding == null) {
+            return;
+        }
+        try {
+            if (finding.discussionId() != null) {
+                gitlab.resolveDiscussion(project, mrIid, finding.discussionId());
+            }
+            if (finding.state() == Finding.State.OPEN) {
+                store.markAddressed(finding.id());
+            }
+            log.info("finding {} addressed on reply — thread resolved", finding.id());
+        } catch (Exception e) {
+            log.warn("could not resolve thread {} after reply: {}",
+                    discussionId, e.getMessage());
+        }
     }
 
     @PreDestroy

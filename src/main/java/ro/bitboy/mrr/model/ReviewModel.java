@@ -1,5 +1,7 @@
 package ro.bitboy.mrr.model;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -154,6 +156,30 @@ public interface ReviewModel {
 
         public Verdict(String summary, List<NewFinding> findings, List<PriorVerdict> priorVerdicts) {
             this(summary, findings, priorVerdicts, null);
+        }
+
+        /**
+         * One verdict per still-open finding, in store order. Missing or invented ids do
+         * not close a thread — they become {@code still_present}.
+         */
+        public Verdict completePriors(List<Finding> priorOpen) {
+            if (priorOpen == null || priorOpen.isEmpty()) {
+                return this;
+            }
+            Map<String, PriorVerdict> byId = new LinkedHashMap<>();
+            for (PriorVerdict prior : priorVerdicts) {
+                if (prior.findingId() != null && !prior.findingId().isBlank()) {
+                    byId.putIfAbsent(prior.findingId(), prior);
+                }
+            }
+            List<PriorVerdict> next = new ArrayList<>();
+            for (Finding finding : priorOpen) {
+                PriorVerdict existing = byId.get(finding.id());
+                next.add(existing != null
+                        ? existing
+                        : new PriorVerdict(finding.id(), false, "missing from model prior"));
+            }
+            return new Verdict(summary, findings, next, memory);
         }
     }
 

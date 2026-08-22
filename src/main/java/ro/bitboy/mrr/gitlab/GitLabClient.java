@@ -127,21 +127,33 @@ public class GitLabClient {
     }
 
     /**
-     * Commit count, assignees, and reviewers as GitLab has them now. Used to stamp the
-     * review snapshot and to backfill an older cycle the first time it is opened.
+     * Commit count, assignees, reviewers, and whether the source is behind the target.
+     * Used to stamp the review snapshot and to backfill an older cycle the first time
+     * it is opened. {@code diverged_commits_count} is omitted unless we ask for it.
      */
     public GitMeta gitMeta(Project project, long mrIid) {
-        JsonNode mr = exchange(project, HttpMethod.GET, "/merge_requests/" + mrIid, null);
+        JsonNode mr = exchange(project, HttpMethod.GET,
+                "/merge_requests/" + mrIid + "?include_diverged_commits_count=true", null);
         Integer count = null;
         try {
             count = commitCount(project, mrIid);
         } catch (RuntimeException e) {
             log.warn("commit count failed for {}!{} — {}", project.name(), mrIid, e.getMessage());
         }
+        String status = textOrNull(mr.path("detailed_merge_status"));
+        if (status == null) {
+            status = textOrNull(mr.path("merge_status"));
+        }
+        Integer diverged = mr.path("diverged_commits_count").isIntegralNumber()
+                ? mr.path("diverged_commits_count").asInt() : null;
+        Boolean conflicts = mr.hasNonNull("has_conflicts") ? mr.path("has_conflicts").asBoolean() : null;
         return new GitMeta(
                 count,
                 people(mr.path("assignees")),
-                people(mr.path("reviewers")));
+                people(mr.path("reviewers")),
+                status,
+                diverged,
+                conflicts);
     }
 
     public int commitCount(Project project, long mrIid) {
@@ -195,7 +207,13 @@ public class GitLabClient {
         return out;
     }
 
-    public record GitMeta(Integer commitCount, List<String> assignees, List<String> reviewers) {
+    public record GitMeta(Integer commitCount, List<String> assignees, List<String> reviewers,
+                          String detailedMergeStatus, Integer divergedCommitsCount,
+                          Boolean hasConflicts) {
+        public GitMeta(Integer commitCount, List<String> assignees, List<String> reviewers) {
+            this(commitCount, assignees, reviewers, null, null, null);
+        }
+
         public String assigneesText() {
             return assignees == null || assignees.isEmpty() ? null : String.join("\n", assignees);
         }
@@ -410,6 +428,30 @@ public class GitLabClient {
 
     public void unapprove(Project project, long mrIid) {
         exchange(project, HttpMethod.POST, "/merge_requests/" + mrIid + "/unapprove", Map.of());
+    }
+
+    /**
+     * Username of the PAT that posts reviews. Used to ignore mrr's own note webhooks
+     * so a reply does not queue another reply.
+     */
+    public String tokenUsername(Project project) {
+        String base = project.gitlabUrl() == null ? "" : project.gitlabUrl().replaceAll("/+$", "");
+        if (base.isBlank()) {
+            return null;
+        }
+        String url = base + "/api/v4/user";
+        try {
+            JsonNode body = http.get()
+                    .uri(URI.create(url))
+                    .header("PRIVATE-TOKEN", project.gitlabToken())
+                    .retrieve()
+                    .body(JsonNode.class);
+            return body == null ? null : textOrNull(body.path("username"));
+        } catch (Exception e) {
+            log.warn("could not read GitLab token user for {}: {}",
+                    project.name(), e.getMessage());
+            return null;
+        }
     }
 
     /**

@@ -8,8 +8,11 @@ diff, sends it to a model with your project's review instructions, and posts the
 as a comment on the MR.
 
 Each finding gets **its own thread, anchored to the line in the diff**. When a later commit
-fixes one, mrr **resolves that thread** rather than posting "this is fixed now". Reply to a
-finding and it answers.
+fixes one, the next review must mark that finding `addressed` (exact id). mrr then
+**resolves that thread** and keeps GitLab in sync — a later comment cannot leave an
+addressed thread open. Reply on a finding if you disagree; if the model agrees it is
+fixed, that reply closes the thread. Do not post “Closing this” notes or resolve by
+hand: GitLab resolve does not mark addressed, and mrr’s own notes are ignored.
 
 Everything is kept: the raw webhook payload, the exact prompt, the model's response. Multiple
 users can register their own projects, and an MCP server lets an agent inspect and amend

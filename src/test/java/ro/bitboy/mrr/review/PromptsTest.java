@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import ro.bitboy.mrr.gitlab.GitLabClient;
 import ro.bitboy.mrr.model.AgentDocument;
 import ro.bitboy.mrr.model.AgentSkill;
+import ro.bitboy.mrr.model.Finding;
 
 import java.time.Instant;
 import java.util.List;
@@ -99,15 +100,64 @@ class PromptsTest {
     }
 
     @Test
-    void aSlicePromptOmitsPriorAndNamesTheWindow() {
+    void aSlicePromptOmitsPriorsFromOtherFiles() {
         GitLabClient.Diff diff = new GitLabClient.Diff(
                 "Fix npe", "desc", "fix", "main", "https://gl/mr/1",
                 "Ada", "ada", List.of("A.java", "B.java"),
                 "--- A.java\n+a\n--- B.java\n+b\n", false);
         DiffWindows.Slice slice = new DiffWindows.Slice(1, 2, List.of("A.java"), "--- A.java\n+a\n", false);
-        String user = Prompts.userSlice(diff, slice, List.of(), 20_000, null);
-        assertThat(user).contains("slice 1 of 2", "ONLY the files", "--- A.java");
-        assertThat(user).doesNotContain("--- B.java", "Previously reported");
+        Finding other = new Finding("f-b", "r", "p", 1, "B.java", 1, Finding.Severity.MAJOR,
+                "other file", "body", "d", "n", true, Finding.State.OPEN, Instant.now(), null);
+        String user = Prompts.userSlice(diff, slice, List.of(), 20_000, null, List.of(other));
+        assertThat(user).contains("slice 1 of 2", "ONLY the files", "--- A.java", "Set `prior` to []");
+        assertThat(user).doesNotContain("--- B.java", "f-b")
+                .doesNotContain("## Previously reported, still open");
+    }
+
+    @Test
+    void aSlicePromptJudgesPriorsWhoseFileIsInTheWindow() {
+        GitLabClient.Diff diff = new GitLabClient.Diff(
+                "Fix npe", "desc", "fix", "main", "https://gl/mr/1",
+                "Ada", "ada", List.of("A.java", "B.java"),
+                "--- A.java\n+a\n--- B.java\n+b\n", false);
+        DiffWindows.Slice slice = new DiffWindows.Slice(1, 2, List.of("A.java"), "--- A.java\n+a\n", false);
+        Finding local = new Finding("f-a", "r", "p", 1, "A.java", 2, Finding.Severity.MAJOR,
+                "npe", "body", "d", "n", true, Finding.State.OPEN, Instant.now(), null);
+        String user = Prompts.userSlice(diff, slice, List.of(), 20_000, null, List.of(local));
+        assertThat(user).contains("Previously reported", "f-a", "npe");
+        assertThat(user).doesNotContain("Set `prior` to []");
+    }
+
+    @Test
+    void synthesizeIncludesCurrentPatchesForPriors() {
+        GitLabClient.Diff diff = new GitLabClient.Diff(
+                "Fix npe", "desc", "fix", "main", "https://gl/mr/1",
+                "Ada", "ada", List.of("A.java"),
+                "--- A.java\n+fixed\n", false);
+        Finding prior = new Finding("f-a", "r", "p", 1, "A.java", 2, Finding.Severity.MAJOR,
+                "npe", "body", "d", "n", true, Finding.State.OPEN, Instant.now(), null);
+        DiffWindows.Slice slice = new DiffWindows.Slice(1, 1, List.of("A.java"), "--- A.java\n+fixed\n", false);
+        String user = Prompts.synthesize(diff, List.of(prior), List.of(), 20_000, null,
+                List.of(slice), List.of("{\"summary\":\"ok\"}"), 2_000);
+        assertThat(user).contains("Current patches for previously reported findings",
+                "f-a", "+fixed", "leftover related bug");
+    }
+
+    @Test
+    void priorEvidenceSharesOneBudgetAcrossAllFindings() {
+        String blob = "--- A.java\n+" + "a".repeat(400) + "\n";
+        GitLabClient.Diff diff = new GitLabClient.Diff(
+                "Fix npe", "desc", "fix", "main", "https://gl/mr/1",
+                "Ada", "ada", List.of("A.java"), blob, false);
+        List<Finding> priors = List.of(
+                finding("f-1", "first"),
+                finding("f-2", "second"),
+                finding("f-3", "third"));
+        int budget = 500;
+        String evidence = Prompts.priorEvidence(diff, priors, budget);
+        assertThat(evidence.length()).isLessThanOrEqualTo(budget + 40);
+        assertThat(evidence).contains("f-1", "[prior evidence truncated]");
+        assertThat(evidence).doesNotContain("f-3");
     }
 
     @Test
@@ -116,6 +166,11 @@ class PromptsTest {
         assertThat(Prompts.isOverview("  ### mrr review")).isTrue();
         assertThat(Prompts.isOverview("**[Major]** missing test")).isFalse();
         assertThat(Prompts.isOverview(null)).isFalse();
+    }
+
+    private static Finding finding(String id, String title) {
+        return new Finding(id, "r", "p", 1, "A.java", 2, Finding.Severity.MAJOR,
+                title, "body", "d", "n", true, Finding.State.OPEN, Instant.now(), null);
     }
 
     private static AgentSkill skill(String name, String body, boolean enabled) {

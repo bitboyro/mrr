@@ -15,6 +15,12 @@ public enum FailureKind {
     /** Model HTTP client could not complete a request (network, 5xx, malformed). */
     PROVIDER,
     /**
+     * The model call finished, but the assistant text was not a usable JSON verdict
+     * (blank, prose, or missing {@code summary}). Distinct from {@link #PROVIDER}:
+     * the endpoint was reached.
+     */
+    OUTPUT,
+    /**
      * An MCP client the agent uses (none today; Covrigi and memory later) could not be reached.
      * Same fail-closed rule: show in the UI, post nothing.
      */
@@ -43,6 +49,7 @@ public enum FailureKind {
             case RATE_LIMIT -> "Model API rate-limited. Nothing was posted.";
             case AUTH -> "Model API key was rejected. Nothing was posted.";
             case PROVIDER -> "Model provider could not be reached. Nothing was posted.";
+            case OUTPUT -> "The model finished without a usable JSON verdict. Nothing was posted.";
             case MCP -> "An MCP client the agent needs is unavailable. Nothing was posted.";
             case GITLAB -> "GitLab could not be reached. Nothing was posted.";
             case REFUSAL -> "The model declined to review. Nothing was posted.";

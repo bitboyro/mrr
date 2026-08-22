@@ -151,6 +151,22 @@ class StoreTest {
     }
 
     @Test
+    void updateMergeRequestInfoPersistsHowFarTheBranchIsBehind() {
+        Project project = store.createProject(project(alice.id(), "alice-app"));
+        String id = store.claimReview(project.id(), 7, "abc123", "{}", mrInfo()).review().id();
+
+        store.updateMergeRequestInfo(id, mrInfo().withGitMeta(
+                4, "Ada Lovelace (@ada)", null, "need_rebase", 3, false));
+
+        MergeRequestInfo mr = store.findReview(id).orElseThrow().mr();
+        assertThat(mr.commitCount()).isEqualTo(4);
+        assertThat(mr.detailedMergeStatus()).isEqualTo("need_rebase");
+        assertThat(mr.divergedCommitsCount()).isEqualTo(3);
+        assertThat(mr.hasConflicts()).isFalse();
+        assertThat(mr.behindTarget()).isTrue();
+    }
+
+    @Test
     void reviewLifecycleReachesATerminalState() {
         Project project = store.createProject(project(alice.id(), "alice-app"));
         String id = store.claimReview(project.id(), 1, "sha", "{}", mrInfo()).review().id();
@@ -724,7 +740,8 @@ class StoreTest {
                 "opened", "open", false, "fix/div-zero", "main",
                 "Alan Turing", "alan", "Ada Lovelace", "ada",
                 "Guard against divide by zero", "Grace Hopper", "grace@example.com",
-                Instant.parse("2026-08-14T07:15:30Z"), "[\"backend\"]", 3, null, null, null);
+                Instant.parse("2026-08-14T07:15:30Z"), "[\"backend\"]", 3, null, null, null,
+                null, null, null);
     }
 
     private Project project(String ownerId, String name) {

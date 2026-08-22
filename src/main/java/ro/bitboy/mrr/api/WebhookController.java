@@ -24,6 +24,7 @@ import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Review;
 import ro.bitboy.mrr.model.MrStatus;
+import ro.bitboy.mrr.gitlab.GitLabClient;
 import ro.bitboy.mrr.review.Replier;
 import ro.bitboy.mrr.review.Reviewer;
 import ro.bitboy.mrr.store.Store;
@@ -66,14 +67,16 @@ public class WebhookController {
     private final Reviewer reviewer;
     private final Replier replier;
     private final MemoryService memory;
+    private final GitLabClient gitlab;
     private final ObjectMapper mapper;
 
     public WebhookController(Store store, Reviewer reviewer, Replier replier,
-                             MemoryService memory, ObjectMapper mapper) {
+                             MemoryService memory, GitLabClient gitlab, ObjectMapper mapper) {
         this.store = store;
         this.reviewer = reviewer;
         this.replier = replier;
         this.memory = memory;
+        this.gitlab = gitlab;
         this.mapper = mapper;
     }
 
@@ -219,12 +222,17 @@ public class WebhookController {
             return ignore(project, mrIid, "note_missing_discussion_or_mr");
         }
 
+        String author = WebhookPayload.noteAuthorUsername(body);
+        if (ownNote(project, author)) {
+            return ignore(project, mrIid, "own_note");
+        }
+
         return store.findByDiscussion(project.id(), mrIid, discussionId)
                 .map(owned -> {
                     log.info("reply queued on thread {} of {}!{}", discussionId, project.name(), mrIid);
                     replier.submit(project.id(), mrIid, discussionId,
                             WebhookPayload.noteId(body),
-                            WebhookPayload.noteBody(body), WebhookPayload.noteAuthorUsername(body));
+                            WebhookPayload.noteBody(body), author);
                     return ResponseEntity.accepted().body(new Ignored("reply_queued"));
                 })
                 .orElseGet(() -> ignore(project, mrIid, "note_on_a_thread_mrr_does_not_own"));
@@ -241,6 +249,18 @@ public class WebhookController {
             log.info("webhook ignored for {} — {}", project.name(), reason);
         }
         return ResponseEntity.ok(new Ignored(reason));
+    }
+
+    private boolean ownNote(Project project, String author) {
+        if (gitlab == null || author == null || author.isBlank()) {
+            return false;
+        }
+        try {
+            String bot = gitlab.tokenUsername(project);
+            return bot != null && bot.equalsIgnoreCase(author);
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private JsonNode parse(Project project, String rawBody) {

@@ -57,7 +57,8 @@ class MemoryServiceTest {
     void reviewerWritesAnMrCardWithoutLibrarian() {
         MergeRequestInfo mr = new MergeRequestInfo("Add batch", "https://gl/mr/3", "opened",
                 "open", false, "feat", "main", "Ada", "ada", "Ada", "ada",
-                "msg", "Ada", "ada@x", Instant.now(), "[\"backend\"]", 2, null, null, null);
+                "msg", "Ada", "ada@x", Instant.now(), "[\"backend\"]", 2, null, null, null,
+                null, null, null);
         ReviewModel.Verdict verdict = new ReviewModel.Verdict("summary", List.of(), List.of(),
                 new ReviewModel.MemoryNote("Adds a batch reporter.", "Touches the nightly job."));
 
@@ -117,7 +118,7 @@ class MemoryServiceTest {
                 "NPE", "body", null, null, false, Finding.State.OPEN, Instant.now(), null);
         memory.upsertMrCard(projectId, 2, new MergeRequestInfo("Guard NPE", null, "opened",
                         "open", false, "a", "main", null, null, null, null, null, null, null, null,
-                        null, 1, null, null, null),
+                        null, 1, null, null, null, null, null, null),
                 "sha", new ReviewModel.Verdict("the summary", List.of(), List.of(), null),
                 List.of(finding), null);
         assertThat(memory.list(projectId, null, "Guard", 10)).hasSize(1);

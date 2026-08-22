@@ -74,8 +74,9 @@ public class MergeRequestController {
     }
 
     /**
-     * Older reviews were stored before commit count / assignees / reviewers existed.
-     * Fill those in from GitLab the first time this cycle is opened; later polls read SQLite.
+     * Older reviews were stored before commit count, assignees, or how far the
+     * branch is behind the target. Fill those in from GitLab the first time this
+     * cycle is opened; later polls read SQLite.
      */
     private List<Review> backfillGitMeta(Principal caller, String projectId, long iid,
                                         List<Review> reviews) {
@@ -83,7 +84,7 @@ public class MergeRequestController {
             return reviews;
         }
         MergeRequestInfo mr = reviews.getFirst().mr();
-        if (mr == null || mr.commitCount() != null) {
+        if (mr == null || (mr.commitCount() != null && mr.divergedCommitsCount() != null)) {
             return reviews;
         }
         String key = projectId + ":" + iid;
@@ -97,7 +98,9 @@ public class MergeRequestController {
             }
             GitLabClient.GitMeta meta = gitlab.gitMeta(project, iid);
             store.updateMergeRequestInfo(reviews.getFirst().id(),
-                    mr.withGitMeta(meta.commitCount(), meta.assigneesText(), meta.reviewersText()));
+                    mr.withGitMeta(meta.commitCount(), meta.assigneesText(), meta.reviewersText(),
+                            meta.detailedMergeStatus(), meta.divergedCommitsCount(),
+                            meta.hasConflicts()));
             return store.listReviews(caller, projectId, iid, 200)
                     .stream().map(Review::summary).toList();
         } catch (Exception e) {
