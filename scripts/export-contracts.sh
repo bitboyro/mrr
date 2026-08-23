@@ -3,8 +3,9 @@
 # Regenerates docs/openapi.json and docs/mcp-tools.json from a running mrr.
 #
 # Both are generated rather than hand-written, so they cannot drift from the annotations.
-# Run this after changing a controller signature, an @Operation, or an @Tool description,
-# and commit the result alongside the code change.
+# `mvn verify` already regenerates the openapi half against an instance it boots itself;
+# this script is the manual path, and the only way to refresh mcp-tools.json, which needs
+# a token and an MCP session. Commit the result alongside the code change.
 #
 #   ./scripts/export-contracts.sh                    # against localhost:8130
 #   MRR_URL=https://mrr.example.com MRR_TOKEN=mrr_… ./scripts/export-contracts.sh
@@ -22,16 +23,7 @@ if ! curl -sf --max-time 10 "$MRR_URL/health" >/dev/null; then
 fi
 
 # ── OpenAPI ─────────────────────────────────────────────────────────────────────────
-# The server URL is rewritten to a placeholder: it reflects whichever instance generated
-# the file, and a tunnel hostname churning in git is pure noise.
-echo "openapi   -> docs/openapi.json"
-curl -sf "$MRR_URL/v3/api-docs" | python3 -c "
-import json, sys
-spec = json.load(sys.stdin)
-spec['servers'] = [{'url': 'https://mrr.example.com', 'description': 'This mrr instance'}]
-json.dump(spec, sys.stdout, indent=2, sort_keys=True)
-print()
-" > "$OUT/openapi.json"
+MRR_URL="$MRR_URL" "$(dirname "$0")/export-openapi.sh"
 
 # ── MCP tools ───────────────────────────────────────────────────────────────────────
 # Read from a live tools/list rather than parsed out of the source, so the exported

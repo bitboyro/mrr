@@ -37,6 +37,17 @@
         <anthropic.version>2.34.0</anthropic.version>
         <sqlite.version>3.46.1.3</sqlite.version>
         <springdoc.version>2.8.5</springdoc.version>
+        <exec-plugin.version>3.5.0</exec-plugin.version>
+        <!--
+          docs/openapi.json is exported from a live instance during `mvn verify`: the spec
+          springdoc serves is the only one that reflects the running app, so there is nothing
+          to keep in sync by hand. scripts/generate-openapi.sh owns that instance start to
+          finish, because a Maven phase that fails aborts the lifecycle and would strand a
+          server started by the plugin. The port is the build's own, away from 8130/8131
+          where a real instance may be sitting. -Dopenapi.skip=true opts out.
+        -->
+        <openapi.port>8137</openapi.port>
+        <openapi.skip>false</openapi.skip>
     </properties>
 
     <dependencyManagement>
@@ -103,6 +114,27 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>${exec-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>export-openapi</id>
+                        <phase>integration-test</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <skip>${openapi.skip}</skip>
+                            <executable>${project.basedir}/scripts/generate-openapi.sh</executable>
+                            <environmentVariables>
+                                <OPENAPI_PORT>${openapi.port}</OPENAPI_PORT>
+                            </environmentVariables>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

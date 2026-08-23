@@ -1,6 +1,116 @@
 {
   "components": {
     "schemas": {
+      "AgentDocument": {
+        "description": "A named document in the project's documents folder.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "example": "architecture.md",
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "AgentSkill": {
+        "description": "A named skill. Enabled ones that match the MR source branch are concatenated into the system prompt.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "branchPattern": {
+            "description": "Glob or Java regex against the MR source branch. Blank = every branch. `hotfix` is exact, `hotfix/*` is a prefix, `release-\\d+` is a regex.",
+            "example": "hotfix/*",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "libraryId": {
+            "description": "Library row this attachment points at.",
+            "type": "string"
+          },
+          "name": {
+            "example": "security",
+            "type": "string"
+          },
+          "position": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "projectId": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "AgentTrace": {
+        "description": "The agent conversation after the initial prompt: turns, tool calls, and tool results.",
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            },
+            "type": "array"
+          },
+          "maxTurns": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "turns": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "Change": {
+        "description": "Change one logger. `level` blank or INHERIT clears the override.",
+        "properties": {
+          "level": {
+            "description": "TRACE, DEBUG, INFO, WARN, ERROR, FATAL, OFF, or INHERIT",
+            "example": "DEBUG",
+            "type": "string"
+          },
+          "name": {
+            "example": "ro.bitboy.mrr",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ContextUpsert": {
+        "description": "Notes the reviewer should treat as facts about this merge request.",
+        "properties": {
+          "context": {
+            "description": "Markdown or plain text. Blank clears.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "CreateToken": {
         "description": "Token request.",
         "properties": {
@@ -58,6 +168,60 @@
         },
         "type": "object"
       },
+      "Cycle": {
+        "description": "One merge request's cycle: live status, every review, every finding, every reply.",
+        "properties": {
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/Finding"
+            },
+            "type": "array"
+          },
+          "replies": {
+            "items": {
+              "$ref": "#/components/schemas/Reply"
+            },
+            "type": "array"
+          },
+          "reviews": {
+            "items": {
+              "$ref": "#/components/schemas/Review"
+            },
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MrStatus"
+          }
+        },
+        "type": "object"
+      },
+      "Discussion": {
+        "properties": {
+          "discussionId": {
+            "type": "string"
+          },
+          "noteId": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "DocumentUpsert": {
+        "description": "Create or update a document. On update, omitted fields are kept.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "name": {
+            "example": "architecture.md",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "ErrorResponse": {
         "description": "The shape every error in this API takes.",
         "properties": {
@@ -78,6 +242,517 @@
         },
         "type": "object"
       },
+      "Event": {
+        "description": "One step of the loop. `role=assistant` is a model turn; `role=tool` is a tool result fed back on the next turn.",
+        "properties": {
+          "elapsedMs": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "result": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "stopReason": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "toolCalls": {
+            "items": {
+              "$ref": "#/components/schemas/ToolCallRef"
+            },
+            "type": "array"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "turn": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "FilePatch": {
+        "properties": {
+          "diff": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Finding": {
+        "description": "One finding, and the merge-request thread that carries it.\n\nA finding outlives the review that produced it: when a later commit fixes the problem, mrr resolves the thread the earlier review opened rather than posting \"this is now fixed\" as a new comment.",
+        "properties": {
+          "approvedBy": {
+            "description": "GitLab username of the human who resolved the thread, when the state is APPROVED. Null for OPEN and for ADDRESSED.",
+            "example": "romanbotnari",
+            "type": "string"
+          },
+          "body": {
+            "description": "The full finding as posted, in Markdown.",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "discussionId": {
+            "description": "The GitLab thread carrying this finding.",
+            "type": "string"
+          },
+          "filePath": {
+            "description": "File it was found in.",
+            "example": "src/main/java/ro/bitboy/testrepo/ReportService.java",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "inline": {
+            "description": "True when the thread attached to a specific diff line; false when the position was rejected and it fell back to the summary thread.",
+            "type": "boolean"
+          },
+          "line": {
+            "description": "Line in the new file. Null when the model gave no line, or the line was not part of the diff.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "mrIid": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "noteId": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "resolvedAt": {
+            "description": "When it stopped standing \u2014 a later commit addressed it, or a human resolved the thread.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "reviewId": {
+            "description": "The review that first reported it.",
+            "type": "string"
+          },
+          "severity": {
+            "description": "How bad it is, as judged by the reviewer.",
+            "enum": [
+              "BLOCKER",
+              "MAJOR",
+              "MINOR"
+            ],
+            "type": "string"
+          },
+          "state": {
+            "description": "OPEN \u2014 still standing as of the most recent review.\nADDRESSED \u2014 a later commit fixed it; mrr resolved the thread.\nAPPROVED \u2014 a human resolved the thread on GitLab, accepting the finding as it stands. mrr records who and keeps the thread closed.",
+            "enum": [
+              "OPEN",
+              "ADDRESSED",
+              "APPROVED"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "description": "One-line statement of the problem.",
+            "example": "Off-by-one overruns the array on every row",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "GitlabInstance": {
+        "description": "Named GitLab host (URL only). No token.",
+        "properties": {
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "example": "gitlab.com",
+            "type": "string"
+          },
+          "url": {
+            "example": "https://gitlab.com",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "GitlabUpsert": {
+        "description": "Create or update a GitLab host. On update, omitted fields are kept.",
+        "properties": {
+          "name": {
+            "example": "gitlab.com",
+            "type": "string"
+          },
+          "url": {
+            "example": "https://gitlab.com",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "InstanceInfo": {
+        "description": "Live public base URL. Used to build GitLab webhook URLs.",
+        "properties": {
+          "baseUrl": {
+            "example": "https://mrr.example.com",
+            "type": "string"
+          },
+          "webhookUrlTemplate": {
+            "example": "https://mrr.example.com/webhooks/gitlab/{projectId}",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "InstanceStats": {
+        "properties": {
+          "failuresByKind": {
+            "additionalProperties": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "findingsAddressed": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "findingsApproved": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "findingsOpen": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "inFlight": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "meanReadyDurationSeconds": {
+            "format": "double",
+            "type": "number"
+          },
+          "mrsProcessed": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "pendingOrProcessing": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectRow"
+            },
+            "type": "array"
+          },
+          "reviewsByState": {
+            "additionalProperties": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "reviewsTotal": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "tokens": {
+            "$ref": "#/components/schemas/TokenTotals"
+          },
+          "tokensLast7Days": {
+            "$ref": "#/components/schemas/TokenTotals"
+          }
+        },
+        "type": "object"
+      },
+      "LibrarySkill": {
+        "description": "A reusable skill body, owned by the user behind the API token.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ownerId": {
+            "type": "string"
+          },
+          "ownerName": {
+            "description": "Owner display name. Null on write.",
+            "type": "string"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LibraryUpsert": {
+        "description": "Create or update a library skill. On update, omitted fields are kept.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "name": {
+            "example": "security",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Line": {
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "level": {
+            "type": "string"
+          },
+          "logger": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "thrown": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LlmProvider": {
+        "description": "Named LLM endpoint (no API key).",
+        "properties": {
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "example": "claude-opus-5",
+            "type": "string"
+          },
+          "modelBaseUrl": {
+            "description": "OPENAI_COMPAT only. Null means OpenAI itself, or unused for ANTHROPIC.",
+            "example": "http://ollama:11434/v1",
+            "type": "string"
+          },
+          "name": {
+            "example": "Anthropic Opus",
+            "type": "string"
+          },
+          "provider": {
+            "description": "Which adapter reviews this project. ANTHROPIC uses the official Anthropic SDK. OPENAI_COMPAT speaks the chat-completions shape and so reaches OpenAI, Ollama, vLLM, llama.cpp, and most gateways \u2014 pick the one you want with `modelBaseUrl`.",
+            "enum": [
+              "ANTHROPIC",
+              "OPENAI_COMPAT"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "LlmUpsert": {
+        "description": "Create or update an LLM endpoint. On update, omitted fields are kept. No API key.",
+        "properties": {
+          "model": {
+            "example": "claude-opus-5",
+            "type": "string"
+          },
+          "modelBaseUrl": {
+            "example": "http://ollama:11434/v1",
+            "type": "string"
+          },
+          "name": {
+            "example": "Anthropic Opus",
+            "type": "string"
+          },
+          "provider": {
+            "description": "Which adapter reviews this project. ANTHROPIC uses the official Anthropic SDK. OPENAI_COMPAT speaks the chat-completions shape and so reaches OpenAI, Ollama, vLLM, llama.cpp, and most gateways \u2014 pick the one you want with `modelBaseUrl`.",
+            "enum": [
+              "ANTHROPIC",
+              "OPENAI_COMPAT"
+            ],
+            "example": "ANTHROPIC",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "MemoryDocument": {
+        "description": "One OKF memory document. Canonical body is a markdown file; this is the index plus body.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "PROJECT",
+              "MERGE_REQUEST",
+              "DOCUMENT",
+              "COLLECTION"
+            ],
+            "type": "string"
+          },
+          "mrIid": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "sourceSha": {
+            "type": "string"
+          },
+          "space": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "MemoryRun": {
+        "description": "One librarian initialize or refresh. Same shape as a review so the UI can reuse Trail.",
+        "properties": {
+          "agentTurns": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          },
+          "finishedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "INITIALIZE",
+              "REFRESH"
+            ],
+            "type": "string"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "response": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "PENDING",
+              "RUNNING",
+              "READY",
+              "FAILED"
+            ],
+            "type": "string"
+          },
+          "trace": {
+            "$ref": "#/components/schemas/AgentTrace"
+          }
+        },
+        "type": "object"
+      },
+      "MergeRequest": {
+        "properties": {
+          "draft": {
+            "type": "boolean"
+          },
+          "iid": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "sha": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "webUrl": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "MergeRequestInfo": {
         "description": "The merge request as GitLab described it when this review ran.\n\nA snapshot, not a live view: retitle the MR and push again and you get a second review carrying the new title, with the first left untouched. That history is the point \u2014 it is what lets you ask why a review said what it said.\n\nNote the three different people. `author` owns the MR. `actor` triggered this particular delivery. `commitAuthor` wrote the head commit. On a rebase or a cherry-pick these are routinely three different names.",
         "properties": {
@@ -91,6 +766,10 @@
             "type": "string"
           },
           "actorUsername": {
+            "type": "string"
+          },
+          "assignees": {
+            "description": "Assignees, one `Name (@user)` per line.",
             "type": "string"
           },
           "authorName": {
@@ -112,9 +791,24 @@
             "description": "Who wrote the head commit.",
             "type": "string"
           },
+          "commitCount": {
+            "description": "Commits on the MR when this review ran.",
+            "format": "int32",
+            "type": "integer"
+          },
           "commitMessage": {
             "description": "Message of the head commit.",
             "type": "string"
+          },
+          "detailedMergeStatus": {
+            "description": "GitLab `detailed_merge_status`, or `merge_status` when that is all the payload had. `need_rebase` means the source is behind the target.",
+            "example": "need_rebase",
+            "type": "string"
+          },
+          "divergedCommitsCount": {
+            "description": "Commits the source branch is behind the target. GitLab only returns this when asked; null means we have not seen a count.",
+            "format": "int32",
+            "type": "integer"
           },
           "draft": {
             "description": "Null when GitLab did not say.",
@@ -125,11 +819,19 @@
             "format": "int32",
             "type": "integer"
           },
+          "hasConflicts": {
+            "description": "True when GitLab reports conflicts with the target.",
+            "type": "boolean"
+          },
           "labels": {
             "description": "Label names as a JSON array.",
             "example": [
               "backend"
             ],
+            "type": "string"
+          },
+          "reviewers": {
+            "description": "Reviewers GitLab lists on the MR, same shape as assignees.",
             "type": "string"
           },
           "sourceBranch": {
@@ -157,9 +859,143 @@
         },
         "type": "object"
       },
-      "Project": {
-        "description": "A registered GitLab project. The three secrets \u2014 `gitlabToken`, `webhookSecret`, and `modelKey` \u2014 are write-only: accepted on create and update, always masked on read.",
+      "MrCommit": {
         "properties": {
+          "authorName": {
+            "type": "string"
+          },
+          "authoredDate": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "sha": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "MrStatus": {
+        "description": "Live status of one merge request. Distinct from a Review, which is a snapshot of one commit. `mrrApproved` is true only when mrr itself approved \u2014 never inferred from a human clicking Approve in GitLab. `MERGED` / `CLOSED` follow GitLab's MR state, not finding checkboxes.",
+        "properties": {
+          "currentStatus": {
+            "enum": [
+              "REVIEWING",
+              "NEEDS_WORK",
+              "CLEAN",
+              "FAILED",
+              "CANCELLED",
+              "MERGED",
+              "CLOSED"
+            ],
+            "type": "string"
+          },
+          "latestHeadSha": {
+            "type": "string"
+          },
+          "latestReviewId": {
+            "type": "string"
+          },
+          "mrIid": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "mrrApproved": {
+            "type": "boolean"
+          },
+          "mrrApprovedSha": {
+            "type": "string"
+          },
+          "openFindings": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "title": {
+            "description": "GitLab title from the latest review, when we have one.",
+            "type": "string"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "userContext": {
+            "description": "Owner-written notes included in the next review of this MR. Blank means none.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Page": {
+        "description": "A page of merge-request cycles, newest iid first.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MrStatus"
+            },
+            "type": "array"
+          },
+          "limit": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "offset": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "total": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "Principal": {
+        "properties": {
+          "admin": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "ADMIN",
+              "USER"
+            ],
+            "type": "string"
+          },
+          "userId": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Project": {
+        "description": "A registered GitLab project. Secrets \u2014 `gitlabToken`, `gitlabOperatorToken`, `webhookSecret`, and `modelKey` \u2014 are write-only: accepted on create and update, always masked on read.",
+        "properties": {
+          "agentMaxTurns": {
+            "description": "Maximum model turns per review, including the first. 1 is a single shot with no tools, which is the default and preserves original behaviour.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "agentTools": {
+            "description": "Tool names the reviewer may call: `read_file`, `search_memory`, `read_memory`, `write_memory`. Empty means no tools are advertised. The MR card is always written from the verdict, tools or not.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "autoApprove": {
+            "description": "When true, mrr Approves the GitLab MR after a review that leaves zero open findings, and Unapproves if a later commit reintroduces one. The PAT must be allowed to approve. Default false.",
+            "type": "boolean"
+          },
           "createdAt": {
             "format": "date-time",
             "type": "string"
@@ -168,13 +1004,18 @@
             "description": "False makes mrr acknowledge this project's webhooks and skip them.",
             "type": "boolean"
           },
+          "gitlabOperatorToken": {
+            "description": "Optional PAT for merging and posting an overall thread from mrr. Kept separate so the review bot never needs Merge. Masked on read.",
+            "example": "****ab12",
+            "type": "string"
+          },
           "gitlabProjectId": {
             "description": "Numeric id or `group/project` path.",
             "example": "bitboy.ro/test-repo",
             "type": "string"
           },
           "gitlabToken": {
-            "description": "Masked on read.",
+            "description": "Review-loop PAT. Masked on read.",
             "example": "****v38q",
             "type": "string"
           },
@@ -184,6 +1025,50 @@
             "type": "string"
           },
           "id": {
+            "type": "string"
+          },
+          "lastError": {
+            "type": "string"
+          },
+          "lastErrorAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "lastErrorKind": {
+            "description": "Why the last review or reply failed before posting, if it did. Cleared on the next successful model call.",
+            "enum": [
+              "QUOTA",
+              "RATE_LIMIT",
+              "AUTH",
+              "PROVIDER",
+              "OUTPUT",
+              "MCP",
+              "GITLAB",
+              "REFUSAL",
+              "UNKNOWN"
+            ],
+            "type": "string"
+          },
+          "librarianEnabled": {
+            "description": "Optional librarian addon. When true, Initialize/Refresh is available. Disable never deletes memory files.",
+            "type": "boolean"
+          },
+          "memoryHeadSha": {
+            "description": "Default-branch tip the last librarian run observed.",
+            "type": "string"
+          },
+          "memoryRefreshedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "memoryStatus": {
+            "description": "NONE | READY | RUNNING | FAILED. Independent of librarianEnabled.",
+            "enum": [
+              "NONE",
+              "READY",
+              "RUNNING",
+              "FAILED"
+            ],
             "type": "string"
           },
           "model": {
@@ -217,7 +1102,7 @@
             "type": "string"
           },
           "skill": {
-            "description": "Review instructions used as the system prompt. Null uses mrr's built-in reviewer prompt.",
+            "description": "Legacy single instruction blob. Prefer the skill set at `/api/projects/{id}/skills`. Used only when that set is empty.",
             "type": "string"
           },
           "skipDrafts": {
@@ -228,6 +1113,33 @@
             "description": "Masked on read. Readable only in the create response.",
             "example": "****e091",
             "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ProjectRow": {
+        "properties": {
+          "inputTokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "mrs": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "outputTokens": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "reviews": {
+            "format": "int64",
+            "type": "integer"
           }
         },
         "type": "object"
@@ -251,9 +1163,55 @@
         },
         "type": "object"
       },
+      "Reply": {
+        "description": "One reply mrr posted on a finding thread. `prompt` and `trace` are omitted from list/cycle responses \u2014 fetch `GET /api/replies/{id}` for the full transcript.",
+        "properties": {
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "discussionId": {
+            "type": "string"
+          },
+          "findingId": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "mrIid": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "prompt": {
+            "description": "What was sent to the model. Null in list responses.",
+            "type": "string"
+          },
+          "response": {
+            "description": "The answer that was posted.",
+            "type": "string"
+          },
+          "sourceNoteId": {
+            "description": "GitLab note id this reply answered. Used to ignore webhook redeliveries.",
+            "type": "string"
+          },
+          "trace": {
+            "$ref": "#/components/schemas/AgentTrace"
+          }
+        },
+        "type": "object"
+      },
       "Review": {
         "description": "One review of one commit on one merge request.\n\nKeyed on `(projectId, mrIid, headSha)` \u2014 that triple is what makes redelivered webhooks free. The `mr` block is a snapshot taken when the review ran, not a live view of the merge request.",
         "properties": {
+          "agentTurns": {
+            "description": "How many model turns actually ran. 0 until the agent starts. Kept on list responses.",
+            "format": "int32",
+            "type": "integer"
+          },
           "createdAt": {
             "format": "date-time",
             "type": "string"
@@ -264,6 +1222,21 @@
           },
           "error": {
             "description": "Why it failed, when it did.",
+            "type": "string"
+          },
+          "errorKind": {
+            "description": "QUOTA | RATE_LIMIT | AUTH | PROVIDER | OUTPUT | MCP | GITLAB | REFUSAL. Set when the review failed before posting.",
+            "enum": [
+              "QUOTA",
+              "RATE_LIMIT",
+              "AUTH",
+              "PROVIDER",
+              "OUTPUT",
+              "MCP",
+              "GITLAB",
+              "REFUSAL",
+              "UNKNOWN"
+            ],
             "type": "string"
           },
           "finishedAt": {
@@ -300,7 +1273,7 @@
             "type": "string"
           },
           "prompt": {
-            "description": "Exactly what was sent to the model, system prompt included. Null in list responses.",
+            "description": "The initial system + user prompt sent to the model. Null in list responses. Tool calls live on `trace`, not here.",
             "type": "string"
           },
           "response": {
@@ -316,6 +1289,159 @@
               "FAILED",
               "CANCELLED"
             ],
+            "type": "string"
+          },
+          "trace": {
+            "$ref": "#/components/schemas/AgentTrace",
+            "description": "The conversation after the initial prompt: assistant turns, tool calls, and truncated tool results. Null in list responses."
+          }
+        },
+        "type": "object"
+      },
+      "SettingsPatch": {
+        "description": "Partial update. Null fields are left unchanged.",
+        "properties": {
+          "anthropicEffort": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": "string"
+          },
+          "librarianMaxTurns": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "maxDiffChars": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "maxDiffChunks": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "maxDocumentChars": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "maxFileChars": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "maxMemoryChars": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "maxModelTokens": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "maxTraceChars": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "scanIntervalMs": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "timeoutSeconds": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "workers": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SettingsView": {
+        "description": "Effective live settings, where each value came from, and restart-only env.",
+        "properties": {
+          "live": {
+            "additionalProperties": {
+              "type": "object"
+            },
+            "type": "object"
+          },
+          "restartOnly": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "sources": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "SkillUpsert": {
+        "description": "Create or update a skill. On create, send `name`+`body` or `libraryId`. On update, omitted fields are kept. Send an empty `branchPattern` to clear a branch restriction.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "branchPattern": {
+            "description": "Glob or Java regex against the MR source branch. Blank = every branch. `hotfix` exact, `hotfix/*` prefix, `release-\\d+` regex.",
+            "example": "hotfix/*",
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "libraryId": {
+            "description": "Attach this library skill instead of creating a new body.",
+            "type": "string"
+          },
+          "name": {
+            "example": "security",
+            "type": "string"
+          },
+          "position": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "Snapshot": {
+        "properties": {
+          "buffered": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/Line"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "State": {
+        "properties": {
+          "configuredLevel": {
+            "type": "string"
+          },
+          "effectiveLevel": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ThreadUpsert": {
+        "description": "An overall GitLab discussion on the merge request, not a finding reply.",
+        "properties": {
+          "body": {
+            "description": "Markdown or plain text.",
+            "example": "Ship it after CI.",
             "type": "string"
           }
         },
@@ -341,12 +1467,72 @@
         },
         "type": "object"
       },
+      "TokenTotals": {
+        "properties": {
+          "cacheRead": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "input": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "output": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "ToolCallRef": {
+        "properties": {
+          "arguments": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "Upsert": {
         "description": "Project registration or update. On update, omitted fields are kept.",
         "properties": {
+          "agentMaxTurns": {
+            "description": "Maximum model turns per review. 1 (default) is a single shot. Raise this together with `agentTools` to let the reviewer call read_file.",
+            "example": 8,
+            "format": "int32",
+            "type": "integer"
+          },
+          "agentTools": {
+            "description": "Tool names the reviewer may call. `read_file`, `search_memory`, `read_memory`, `write_memory`. Empty (default) advertises none. The MR card is always written from the verdict.",
+            "example": [
+              "read_file"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "autoApprove": {
+            "description": "When true, mrr Approves the GitLab MR after a review that leaves zero open findings, and Unapproves if a later commit reintroduces one. Default false.",
+            "type": "boolean"
+          },
           "enabled": {
             "description": "Set false to make mrr ignore this project's webhooks without deleting it.",
             "type": "boolean"
+          },
+          "gitlabInstanceId": {
+            "description": "Catalog GitLab host. When set, copies that URL onto the project and `gitlabUrl` is ignored. The project keeps its own copy afterwards.",
+            "type": "string"
+          },
+          "gitlabOperatorToken": {
+            "description": "Optional second PAT used only when you merge or post an overall thread from the mrr MR page. Needs Merge request: Merge (and Create for a new thread). Write-only. Blank on update keeps the current value.",
+            "example": "glpat-yyyyyyyyyyyyyyyyyyyy",
+            "type": "string"
           },
           "gitlabProjectId": {
             "description": "Numeric id or `group/project` path \u2014 both work.",
@@ -354,13 +1540,21 @@
             "type": "string"
           },
           "gitlabToken": {
-            "description": "PAT used to read the diff and post the review. Needs `api` scope, or fine-grained `read_code` + `read_merge_request` + `update_merge_request`. Write-only.",
+            "description": "PAT used to read the diff, post the review, and optionally Approve. Needs `api` scope, or fine-grained `read_code` + `read_merge_request` + `update_merge_request`. Approving also needs permission to approve merge requests. Write-only. Do not grant Merge on this token.",
             "example": "glpat-xxxxxxxxxxxxxxxxxxxx",
             "type": "string"
           },
           "gitlabUrl": {
-            "description": "Your GitLab's base URL. This is what makes self-hosted work.",
+            "description": "Your GitLab's base URL. This is what makes self-hosted work. Required on create unless `gitlabInstanceId` is set.",
             "example": "https://gitlab.com",
+            "type": "string"
+          },
+          "librarianEnabled": {
+            "description": "Enable the optional librarian addon. Disable never deletes memory.",
+            "type": "boolean"
+          },
+          "llmProviderId": {
+            "description": "Catalog LLM endpoint. When set, copies provider, model, and modelBaseUrl onto the project; those fields are ignored. The project keeps its own copy afterwards.",
             "type": "string"
           },
           "model": {
@@ -384,7 +1578,7 @@
             "type": "string"
           },
           "provider": {
-            "description": "Which adapter reviews this project.",
+            "description": "Which adapter reviews this project. Required on create unless `llmProviderId` is set.",
             "enum": [
               "ANTHROPIC",
               "OPENAI_COMPAT"
@@ -393,7 +1587,7 @@
             "type": "string"
           },
           "skill": {
-            "description": "Review instructions, used as the system prompt. Omit for mrr's built-in reviewer prompt.",
+            "description": "Legacy single instruction blob. On create, becomes the first enabled skill named `reviewer`. Prefer POST `/api/projects/{id}/skills`.",
             "example": "Focus on concurrency bugs and error handling.",
             "type": "string"
           },
@@ -446,7 +1640,7 @@
     }
   },
   "info": {
-    "description": "AI code review for GitLab merge requests.\n\nA merge request is opened or pushed to, GitLab calls the webhook, mrr pulls the diff, sends it to a model with that project's review instructions, and posts the review back to the MR as a resolvable discussion thread. Every payload, prompt, and response is kept.\n\n## Authentication\n\nEvery endpoint under `/api` needs an API token. `/webhooks/gitlab/{projectId}` does **not** \u2014 GitLab cannot hold an mrr token, so it authenticates with the per-project secret in `X-Gitlab-Token` instead. `/health` is open.\n\n## Authorization\n\nThree rules govern the whole API:\n\n1. Only an `ADMIN` token can create users or mint tokens. A `USER` token may list    and revoke its own tokens and nothing else.\n2. Projects are owned. A `USER` sees and edits only its own; an `ADMIN` sees all.\n3. Asking for a project you do not own returns **404, not 403** \u2014 a 403 would    confirm that the id exists.\n\n## Reviews are asynchronous\n\nAnything that calls a model returns `202 Accepted` with a `Location` header to poll. A review moves `PENDING \u2192 PROCESSING \u2192 READY | FAILED`; `READY` and `FAILED` are terminal, so stop polling when you see one.\n\nReviews are keyed on `(project, mr_iid, head_sha)`. A redelivered webhook, or an `update` event that changed only a label, returns the review that already exists rather than spending tokens on a duplicate. A new push is a new head SHA and so a new review.\n\n## Secrets\n\nGitLab tokens, model keys, and webhook secrets are write-only. They are accepted on create and update, and always masked on read (`****ab12`). The webhook secret is returned exactly once, in the response to `POST /api/projects`.\n",
+    "description": "AI code review for GitLab merge requests.\n\nA merge request is opened or pushed to, GitLab calls the webhook, mrr pulls the diff, sends it to a model with that project's review instructions, and posts the review back to the MR as a resolvable discussion thread. Every payload, prompt, trace, and response is kept.\n\n## Authentication\n\nEvery endpoint under `/api` needs an API token. `/webhooks/gitlab/{projectId}` does **not** \u2014 GitLab cannot hold an mrr token, so it authenticates with the per-project secret in `X-Gitlab-Token` instead. `/health` is open.\n\n## Authorization\n\nThree rules govern the whole API:\n\n1. Only an `ADMIN` token can create users or mint tokens. A `USER` token may list    and revoke its own tokens and nothing else.\n2. Projects are owned. A `USER` sees and edits only its own; an `ADMIN` sees all.\n3. Asking for a project you do not own returns **404, not 403** \u2014 a 403 would    confirm that the id exists.\n\n## Reviews are asynchronous\n\nAnything that calls a model returns `202 Accepted` with a `Location` header to poll. A review moves `PENDING \u2192 PROCESSING \u2192 READY | FAILED`; `READY` and `FAILED` are terminal, so stop polling when you see one.\n\nReviews are keyed on `(project, mr_iid, head_sha)`. A redelivered webhook, or an `update` event that changed only a label, returns the review that already exists rather than spending tokens on a duplicate. A new push is a new head SHA and so a new review.\n\n## Secrets\n\nGitLab tokens, model keys, and webhook secrets are write-only. They are accepted on create and update, and always masked on read (`****ab12`). The webhook secret is returned exactly once, in the response to `POST /api/projects`.\n",
     "license": {
       "name": "Proprietary"
     },
@@ -455,10 +1649,437 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/gitlab-instances": {
+      "get": {
+        "operationId": "listGitlab",
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/GitlabInstance"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "List GitLab instances",
+        "tags": [
+          "Catalogs"
+        ]
+      },
+      "post": {
+        "operationId": "createGitlab",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GitlabUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitlabInstance"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitlabInstance"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Add a GitLab instance",
+        "tags": [
+          "Catalogs"
+        ]
+      }
+    },
+    "/api/gitlab-instances/{id}": {
+      "delete": {
+        "operationId": "deleteGitlab",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Delete a GitLab instance",
+        "tags": [
+          "Catalogs"
+        ]
+      },
+      "put": {
+        "description": "Omitted fields are kept. Existing projects that copied this URL are not rewritten.",
+        "operationId": "updateGitlab",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GitlabUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/GitlabInstance"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Update a GitLab instance",
+        "tags": [
+          "Catalogs"
+        ]
+      }
+    },
+    "/api/instance": {
+      "get": {
+        "operationId": "instance",
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceInfo"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Public base URL and webhook URL pattern",
+        "tags": [
+          "Catalogs"
+        ]
+      }
+    },
+    "/api/llm-providers": {
+      "get": {
+        "operationId": "listLlm",
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/LlmProvider"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "List LLM providers",
+        "tags": [
+          "Catalogs"
+        ]
+      },
+      "post": {
+        "operationId": "createLlm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LlmUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmProvider"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmProvider"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Add an LLM provider",
+        "tags": [
+          "Catalogs"
+        ]
+      }
+    },
+    "/api/llm-providers/{id}": {
+      "delete": {
+        "operationId": "deleteLlm",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Delete an LLM provider",
+        "tags": [
+          "Catalogs"
+        ]
+      },
+      "put": {
+        "description": "Omitted fields are kept. Existing projects that copied these values are not rewritten.",
+        "operationId": "updateLlm",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LlmUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmProvider"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Update an LLM provider",
+        "tags": [
+          "Catalogs"
+        ]
+      }
+    },
+    "/api/loggers": {
+      "get": {
+        "description": "ROOT and `ro.bitboy.mrr`. `configuredLevel` is null when the logger inherits.",
+        "operationId": "list",
+        "responses": {
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/State"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Current log levels",
+        "tags": [
+          "Loggers"
+        ]
+      },
+      "put": {
+        "description": "Takes effect immediately. `level` of `INHERIT` (or omit/blank) clears an override so the logger follows its parent again.",
+        "operationId": "set",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Change"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "400": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/State"
+                }
+              }
+            },
+            "description": "Unknown level name"
+          },
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/State"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Set a logger's level",
+        "tags": [
+          "Loggers"
+        ]
+      }
+    },
+    "/api/logs": {
+      "delete": {
+        "operationId": "clearLogs",
+        "responses": {
+          "204": {
+            "description": "Cleared"
+          },
+          "403": {
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Clear the in-memory log ring",
+        "tags": [
+          "Loggers"
+        ]
+      },
+      "get": {
+        "description": "In-memory ring of the last 2000 lines this process has logged. `after=0` (default) is the tail; pass the last `seq` you have to poll only newer lines. DEBUG bodies are truncated at 16k characters here \u2014 the console still has the full line.",
+        "operationId": "logs",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "format": "int32",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Recent log lines",
+        "tags": [
+          "Loggers"
+        ]
+      }
+    },
+    "/api/me": {
+      "get": {
+        "description": "Used by the web UI after a token is pasted. No secrets.",
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Principal"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Who the presented token belongs to",
+        "tags": [
+          "Users and tokens"
+        ]
+      }
+    },
     "/api/projects": {
       "get": {
         "description": "Your own, or all of them for an ADMIN. Secrets masked.",
-        "operationId": "list",
+        "operationId": "list_2",
         "responses": {
           "200": {
             "content": {
@@ -481,7 +2102,7 @@
       },
       "post": {
         "description": "The caller becomes the owner. A webhook secret is generated unless you supply one.\n\n**The response contains the only readable copy of the webhook secret.** Paste it, with `webhookUrl`, into the project's *Settings \u2192 Webhooks* in GitLab and tick **Merge request events**. Every later read masks it.",
-        "operationId": "create",
+        "operationId": "create_1",
         "requestBody": {
           "content": {
             "application/json": {
@@ -523,7 +2144,7 @@
     "/api/projects/{id}": {
       "delete": {
         "description": "Deletes its review history too. Comments already posted to GitLab stay.",
-        "operationId": "delete",
+        "operationId": "delete_1",
         "parameters": [
           {
             "in": "path",
@@ -556,7 +2177,7 @@
       },
       "get": {
         "description": "Secrets masked.",
-        "operationId": "get",
+        "operationId": "get_1",
         "parameters": [
           {
             "in": "path",
@@ -586,7 +2207,7 @@
       },
       "put": {
         "description": "A partial update: omitted fields keep their current value. That applies to the secrets too, so you can change the model without re-sending the GitLab token. Send `skill` to change the review instructions; the next review picks them up.",
-        "operationId": "update",
+        "operationId": "update_1",
         "parameters": [
           {
             "in": "path",
@@ -625,10 +2246,1150 @@
         ]
       }
     },
+    "/api/projects/{id}/documents": {
+      "get": {
+        "operationId": "listDocuments",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AgentDocument"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "List this project's documents",
+        "tags": [
+          "Agent context"
+        ]
+      },
+      "post": {
+        "operationId": "createDocument",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDocument"
+                }
+              }
+            },
+            "description": "Created"
+          }
+        },
+        "summary": "Add a document",
+        "tags": [
+          "Agent context"
+        ]
+      }
+    },
+    "/api/projects/{id}/documents/{documentId}": {
+      "delete": {
+        "operationId": "deleteDocument",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "documentId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        },
+        "summary": "Delete a document",
+        "tags": [
+          "Agent context"
+        ]
+      },
+      "put": {
+        "operationId": "updateDocument",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "documentId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDocument"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Update a document",
+        "tags": [
+          "Agent context"
+        ]
+      }
+    },
+    "/api/projects/{id}/memory": {
+      "get": {
+        "description": "Summaries without bodies. `q` matches title, subject, and tags.",
+        "operationId": "list_3",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "space",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MemoryDocument"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "List or search memory documents",
+        "tags": [
+          "Memory"
+        ]
+      },
+      "post": {
+        "operationId": "create_2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Upsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryDocument"
+                }
+              }
+            },
+            "description": "Created"
+          }
+        },
+        "summary": "Create a memory document",
+        "tags": [
+          "Memory"
+        ]
+      }
+    },
+    "/api/projects/{id}/memory/documents/{docId}": {
+      "delete": {
+        "operationId": "delete_2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "docId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        },
+        "tags": [
+          "Memory"
+        ]
+      },
+      "get": {
+        "operationId": "get_2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "docId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryDocument"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Memory"
+        ]
+      },
+      "put": {
+        "operationId": "update_2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "docId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Upsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryDocument"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Update a memory document. Omitted fields are kept.",
+        "tags": [
+          "Memory"
+        ]
+      }
+    },
+    "/api/projects/{id}/memory/mrs/{iid}": {
+      "get": {
+        "operationId": "getMr",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryDocument"
+                }
+              }
+            },
+            "description": "No such document, or not yours"
+          }
+        },
+        "summary": "Fetch one memory document, including body",
+        "tags": [
+          "Memory"
+        ]
+      }
+    },
+    "/api/projects/{id}/memory/refresh": {
+      "post": {
+        "description": "Requires librarianEnabled. Returns immediately; poll the run while RUNNING.",
+        "operationId": "refresh",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryRun"
+                }
+              }
+            },
+            "description": "Queued"
+          },
+          "409": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryRun"
+                }
+              }
+            },
+            "description": "Librarian off, or a run is already in flight"
+          }
+        },
+        "summary": "Initialize or refresh project memory",
+        "tags": [
+          "Memory"
+        ]
+      }
+    },
+    "/api/projects/{id}/memory/runs": {
+      "get": {
+        "operationId": "listRuns",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MemoryRun"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "List librarian runs, newest first",
+        "tags": [
+          "Memory"
+        ]
+      }
+    },
+    "/api/projects/{id}/memory/runs/{runId}": {
+      "get": {
+        "operationId": "getRun",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "runId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryRun"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Fetch one librarian run, including prompt and trail",
+        "tags": [
+          "Memory"
+        ]
+      }
+    },
+    "/api/projects/{id}/skills": {
+      "get": {
+        "operationId": "listSkills",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AgentSkill"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "List this project's skills",
+        "tags": [
+          "Agent context"
+        ]
+      },
+      "post": {
+        "description": "Send `name`+`body` to create (or reuse) a library row owned by the project owner and attach it, or send `libraryId` to attach an existing one.",
+        "operationId": "createSkill",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentSkill"
+                }
+              }
+            },
+            "description": "Created"
+          }
+        },
+        "summary": "Add a skill",
+        "tags": [
+          "Agent context"
+        ]
+      }
+    },
+    "/api/projects/{id}/skills/{skillId}": {
+      "delete": {
+        "operationId": "deleteSkill",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "skillId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        },
+        "summary": "Delete a skill",
+        "tags": [
+          "Agent context"
+        ]
+      },
+      "put": {
+        "description": "Partial: omitted fields keep their current value. Flip `enabled` to take a skill out of the next review without deleting it.",
+        "operationId": "updateSkill",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "skillId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentSkill"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Update a skill",
+        "tags": [
+          "Agent context"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests": {
+      "get": {
+        "description": "Newest iid first. Optional status and title/iid filters. Paginated.",
+        "operationId": "list_5",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 40,
+              "format": "int32",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "No such project, or not yours"
+          }
+        },
+        "summary": "List merge-request cycles for a project",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}": {
+      "get": {
+        "description": "Live status, every review of that iid (summaries), every finding, and thread-reply summaries.",
+        "operationId": "get_4",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Cycle"
+                }
+              }
+            },
+            "description": "No such project, MR, or not yours"
+          }
+        },
+        "summary": "Fetch one merge-request cycle",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}/commits": {
+      "get": {
+        "description": "Live from GitLab, using the review PAT.",
+        "operationId": "commits",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MrCommit"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "No such project, MR, or not yours"
+          }
+        },
+        "summary": "List commits on this merge request",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}/commits/{sha}/diff": {
+      "get": {
+        "description": "View-only, one file per request \u2014 this is what a file's unveil calls. Fetched from GitLab when asked, not stored, and not a place to comment. `path` is a query parameter because paths contain slashes.",
+        "operationId": "commitFilePatch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sha",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/FilePatch"
+                }
+              }
+            },
+            "description": "No such project, MR, commit file, or not yours"
+          }
+        },
+        "summary": "One file's patch from one commit",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}/commits/{sha}/files": {
+      "get": {
+        "description": "Paths only \u2014 no patch bodies. Expanding a commit in the UI costs one small response however large the commit is; a patch arrives only when that file is unveiled.",
+        "operationId": "commitFiles",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sha",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "No such project, MR, or not yours"
+          }
+        },
+        "summary": "Paths a commit touched",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}/context": {
+      "put": {
+        "description": "Owner-written context included in the next review (the next push, or a re-run). Does not start a review by itself. Send an empty `context` to clear. The cycle must already exist \u2014 mrr has to have seen this MR.",
+        "operationId": "setContext",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContextUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/MrStatus"
+                }
+              }
+            },
+            "description": "No such project, MR, or not yours"
+          }
+        },
+        "summary": "Set notes for this merge request",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}/discussions": {
+      "post": {
+        "description": "Uses `gitlabOperatorToken`, so the comment is the operator's identity rather than the review bot. A new GitLab discussion, not a reply on a finding. The review PAT is never used here.",
+        "operationId": "postThread",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "400": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Discussion"
+                }
+              }
+            },
+            "description": "No operator token, or empty body"
+          },
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Discussion"
+                }
+              }
+            },
+            "description": "No such project, MR, or not yours"
+          }
+        },
+        "summary": "Post an overall thread on the merge request",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}/merge": {
+      "post": {
+        "description": "Uses `gitlabOperatorToken` against GitLab `PUT \u2026/merge`. Marks the local cycle MERGED even if the webhook is slow. The review bot token is never sent.",
+        "operationId": "merge",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergeRequest"
+                }
+              }
+            },
+            "description": "No operator token"
+          },
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergeRequest"
+                }
+              }
+            },
+            "description": "No such project, MR, or not yours"
+          }
+        },
+        "summary": "Merge the request from mrr",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/replies/{id}": {
+      "get": {
+        "description": "Includes the prompt sent to the model and the agent trace.",
+        "operationId": "getReply",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reply"
+                }
+              }
+            },
+            "description": "No such reply, project, or not yours"
+          }
+        },
+        "summary": "Fetch one thread reply in full",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
     "/api/reviews": {
       "get": {
-        "description": "Summaries: the merge-request snapshot without the payload, prompt, and response, each of which routinely runs to tens of kilobytes. Use `GET /api/reviews/{id}` for those.",
-        "operationId": "list_1",
+        "description": "Summaries: the merge-request snapshot and `agentTurns` without the payload, prompt, response, or trace, each of which routinely runs to tens of kilobytes. Use `GET /api/reviews/{id}` for those.",
+        "operationId": "list_4",
         "parameters": [
           {
             "in": "query",
@@ -636,6 +3397,15 @@
             "required": false,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "mrIid",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
             }
           },
           {
@@ -669,8 +3439,8 @@
     },
     "/api/reviews/{id}": {
       "get": {
-        "description": "Includes the raw webhook payload, the full prompt, and the model's response. This is the poll target named in the `Location` header the webhook returns \u2014 stop polling once `state` is `READY` or `FAILED`.\n\nA `FAILED` review may still carry a `response`: the model succeeded and delivery to GitLab did not.",
-        "operationId": "get_1",
+        "description": "Includes the raw webhook payload, the initial prompt, the agent trace (turns, tool calls, truncated tool results), and the model's response. This is the poll target named in the `Location` header the webhook returns \u2014 stop polling once `state` is `READY` or `FAILED`.\n\nA `FAILED` review may still carry a `response`: the model succeeded and delivery to GitLab did not.",
+        "operationId": "get_3",
         "parameters": [
           {
             "in": "path",
@@ -748,6 +3518,219 @@
         "summary": "Re-run a finished review",
         "tags": [
           "Reviews"
+        ]
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "operationId": "get",
+        "responses": {
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsView"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Effective instance settings",
+        "tags": [
+          "Configure"
+        ]
+      },
+      "put": {
+        "description": "Omitted fields are left as they are. Values are clamped the same way as boot defaults. No restart.",
+        "operationId": "put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsView"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Save live settings",
+        "tags": [
+          "Configure"
+        ]
+      }
+    },
+    "/api/settings/reset": {
+      "post": {
+        "operationId": "reset",
+        "responses": {
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsView"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Clear saved settings and return to env / application.yml",
+        "tags": [
+          "Configure"
+        ]
+      }
+    },
+    "/api/skills": {
+      "get": {
+        "operationId": "list_1",
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/LibrarySkill"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "List library skills",
+        "tags": [
+          "Skill library"
+        ]
+      },
+      "post": {
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LibraryUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibrarySkill"
+                }
+              }
+            },
+            "description": "Created"
+          }
+        },
+        "summary": "Add a library skill",
+        "tags": [
+          "Skill library"
+        ]
+      }
+    },
+    "/api/skills/{id}": {
+      "delete": {
+        "operationId": "delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "409": {
+            "description": "Still attached to a project"
+          }
+        },
+        "summary": "Delete a library skill",
+        "tags": [
+          "Skill library"
+        ]
+      },
+      "put": {
+        "operationId": "update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LibraryUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibrarySkill"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Update a library skill",
+        "tags": [
+          "Skill library"
+        ]
+      }
+    },
+    "/api/stats": {
+      "get": {
+        "description": "Token totals are from this version forward \u2014 older rows are zero.",
+        "operationId": "stats",
+        "responses": {
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceStats"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Instance stats",
+        "tags": [
+          "Configure"
         ]
       }
     },
@@ -961,7 +3944,7 @@
     },
     "/webhooks/gitlab/{projectId}": {
       "post": {
-        "description": "Register this URL in GitLab under *Settings \u2192 Webhooks* with **Merge request events** ticked, using the secret returned when the project was created.\n\nReturns immediately. Fetching the diff and calling a model happen on a background worker, because GitLab times deliveries out and retries them \u2014 blocking here would mean re-reviewing.\n\nOnly `open`, `reopen`, and `update` actions are reviewed; merges, closes, and approvals are acknowledged with 200 and ignored.\n\nDeduplicated on `(project, mr_iid, last_commit.id)`. A redelivery, or an `update` that changed only a label, returns the existing review with `created: false` and spends nothing.",
+        "description": "Register this URL in GitLab under *Settings \u2192 Webhooks* with **Merge request events** ticked, using the secret returned when the project was created.\n\nReturns immediately. Fetching the diff and calling a model happen on a background worker, because GitLab times deliveries out and retries them \u2014 blocking here would mean re-reviewing.\n\nOnly `open`, `reopen`, and `update` actions are reviewed. `merge` and `close` cancel any in-flight review and mark the cycle MERGED or CLOSED so the UI follows GitLab. Approvals are acknowledged and ignored.\n\nDeduplicated on `(project, mr_iid, last_commit.id)`. A redelivery, or an `update` that changed only a label, returns the existing review with `created: false` and spends nothing.",
         "operationId": "receive",
         "parameters": [
           {
@@ -1074,16 +4057,44 @@
       "name": "Users and tokens"
     },
     {
+      "description": "Live status of merge requests mrr has reviewed. Distinct from a Review, which is one commit: this is where the MR stands now \u2014 reviewing, needs work, or clean.",
+      "name": "Merge requests"
+    },
+    {
+      "description": "Named GitLab hosts (URL only) and LLM endpoints (no API key). `GET /api/instance` is the live public base URL used to build webhook URLs. Writes are admin-only; any authenticated user can list.",
+      "name": "Catalogs"
+    },
+    {
+      "description": "Named instruction documents owned by the caller (or, for ADMIN, every user). Attaching a library skill to a project does not copy the body \u2014 edits here apply on the next review of every attached project. Delete is 409 while a project still uses the skill.",
+      "name": "Skill library"
+    },
+    {
       "description": "Where GitLab delivers merge-request events. The only endpoint that does not take an mrr API token \u2014 GitLab has no way to hold one.",
       "name": "Webhook"
+    },
+    {
+      "description": "Per-project OKF memory. Reviewers always write mrs/{iid}.md. The librarian addon, when enabled, writes project/ via Initialize or Refresh. Disable never deletes files.",
+      "name": "Memory"
     },
     {
       "description": "The registry of GitLab projects mrr reviews. One row carries everything needed to review that project: where its GitLab lives, the token to read it with, which model to use, and the review instructions to use as the system prompt.\n\nOwned. A USER sees only its own; an ADMIN sees all. Asking for someone else's returns 404, not 403.",
       "name": "Projects"
     },
     {
+      "description": "Runtime log levels and the in-memory log ring. Admin only. Levels are not persisted: a restart restores `logging.level` from config. Set `ro.bitboy.mrr` to DEBUG to log full agent message bodies. `GET /api/logs` is the tail.",
+      "name": "Loggers"
+    },
+    {
       "description": "Liveness. Used by the container healthcheck.",
       "name": "Health"
+    },
+    {
+      "description": "Skills and documents the reviewer may use for a project. Enable or disable each one without a code change \u2014 the next review picks the set up. A skill may also be scoped to source branches by glob or regex.",
+      "name": "Agent context"
+    },
+    {
+      "description": "Instance settings overlay (SQLite) and usage stats. Saving takes effect on the next review, scan tick, or model call. Restart-only fields are listed read-only. Token totals start when this version began recording usage.",
+      "name": "Configure"
     }
   ]
 }
