@@ -8,6 +8,8 @@ import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.model.MergeRequestInfo;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.store.Store;
+import ro.bitboy.mrr.secret.PlaintextSecretBox;
+import ro.bitboy.mrr.secret.SecretBox;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -19,10 +21,15 @@ public final class TestStores {
     }
 
     public static Store sqlite(Path dir) {
+        return sqlite(dir, new PlaintextSecretBox());
+    }
+
+    /** For the tests that care what actually lands in the column. */
+    public static Store sqlite(Path dir, SecretBox secrets) {
         var dataSource = new SimpleDriverDataSource(
                 new org.sqlite.JDBC(), "jdbc:sqlite:" + dir.resolve("mrr-test.db"));
         new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(dataSource);
-        return new Store(JdbcClient.create(dataSource));
+        return new Store(JdbcClient.create(dataSource), secrets);
     }
 
     public static MrrProperties properties() {

@@ -1,5 +1,6 @@
 package ro.bitboy.mrr.review;
 
+import ro.bitboy.mrr.secret.PlaintextSecretBox;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -39,7 +40,7 @@ class ReviewToolsTest {
                 new org.sqlite.JDBC(), "jdbc:sqlite:" + tempDir.resolve("mrr-test.db"));
         new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(dataSource);
         JdbcClient db = JdbcClient.create(dataSource);
-        Store store = new Store(db);
+        Store store = new Store(db, new PlaintextSecretBox());
         var properties = new MrrProperties("/tmp/x", "http://localhost",
                 tempDir.resolve("memory").toString(), null);
         memory = new MemoryService(new MemoryStore(db, properties));

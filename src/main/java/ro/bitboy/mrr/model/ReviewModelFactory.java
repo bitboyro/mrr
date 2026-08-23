@@ -4,6 +4,7 @@ import jakarta.annotation.PreDestroy;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import ro.bitboy.mrr.RuntimeSettings;
+import ro.bitboy.mrr.auth.Ids;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -71,9 +72,13 @@ public class ReviewModelFactory {
         }, delay, TimeUnit.SECONDS);
     }
 
+    /**
+     * Hashes the model key rather than embedding it: this string is a long-lived map key, and
+     * a rotated key must still miss the cache. The hash gives both.
+     */
     private static String key(Project project, int timeoutSeconds) {
         String base = project.modelBaseUrl() == null ? "" : project.modelBaseUrl();
-        String secret = project.modelKey() == null ? "" : project.modelKey();
+        String secret = project.modelKey() == null ? "" : Ids.sha256(project.modelKey());
         return project.provider() + "|" + base + "|" + project.model() + "|" + secret
                 + "|" + timeoutSeconds;
     }

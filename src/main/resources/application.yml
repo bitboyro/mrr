@@ -29,6 +29,13 @@ server:
   port: ${SERVER_PORT:8130}
 
 mrr:
+  # Encryption for the per-project credentials (GitLab PATs, webhook secret, model key).
+  # Unset means they are stored in plaintext and mrr warns loudly on every boot.
+  # Set key or key-file, never both — startup fails rather than guess between them.
+  # Generate one with:  openssl rand -base64 32
+  secret:
+    key: ${MRR_SECRET_KEY:}
+    key-file: ${MRR_SECRET_KEY_FILE:}
   # Where the bootstrap root token is written on first boot, alongside the console banner.
   root-token-file: ${MRR_ROOT_TOKEN_FILE:/data/root-token.txt}
   # Public base URL, used only to print the webhook URL when a project is registered.

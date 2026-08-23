@@ -56,9 +56,11 @@ enough to justify the class it cost.
 ### Storage ✅
 
 - SQLite at `/data/mrr.db`, `JdbcClient` + `schema.sql`, no JPA.
-- Secrets (GitLab PAT, model key, webhook secret) are **plaintext** in the file — a deliberate,
-  flagged tradeoff for a private volume. Encryption is a drop-in `SecretBox` class later, no
-  schema migration needed. ⛔ not built.
+- Secrets (GitLab PATs, model key, webhook secret) are encrypted at rest with AES-256-GCM
+  via `SecretBox` when `MRR_SECRET_KEY` / `MRR_SECRET_KEY_FILE` is set, and plaintext with a
+  boot warning when it is not. ✅ Ciphertext lives in the same `TEXT` columns, so the choice
+  of database is independent of it. No migration path by design: a key change means re-entering
+  the credentials.
 
 ### GitLab integration ✅
 
@@ -370,7 +372,7 @@ markdown, same on-disk shape as DRD OKF). SQLite `memory_documents` is the list/
 | Item | Status | Note |
 |---|---|---|
 | Feedback / comment threads as a first-class user feature | ⛔ | Distinct from the reply-to-finding feature, which is agent-to-thread |
-| Secret encryption at rest | ⛔ flagged, not built | Plaintext in SQLite; drop-in `SecretBox`, no migration needed |
+| Secret encryption at rest | ✅ | AES-256-GCM via `SecretBox`; opt-in by key, no migration by design |
 | Restart recovery for in-flight reviews | ⛔ | Same-process scan re-queues non-terminal rows after boot (`inFlight` is empty). Not a crash-safe DB lease; two instances on one file are unsupported. Librarian `RUNNING` is not reclaimed. |
 | Tag / release events | ⛔ discussed, not designed | Needs a decision on output target (no comment thread exists for a tag) before any schema work |
 | `tools/list` per-caller filtering | ⛔ blocked on the MCP SDK, not on mrr | Documented as a known limitation instead |

@@ -1,5 +1,6 @@
 package ro.bitboy.mrr.memory;
 
+import ro.bitboy.mrr.secret.PlaintextSecretBox;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -40,7 +41,7 @@ class MemoryServiceTest {
                 new org.sqlite.JDBC(), "jdbc:sqlite:" + tempDir.resolve("mrr-test.db"));
         new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(dataSource);
         JdbcClient db = JdbcClient.create(dataSource);
-        store = new Store(db);
+        store = new Store(db, new PlaintextSecretBox());
         var properties = new MrrProperties("/tmp/x", "http://localhost",
                 tempDir.resolve("memory").toString(), null);
         memory = new MemoryService(new MemoryStore(db, properties));

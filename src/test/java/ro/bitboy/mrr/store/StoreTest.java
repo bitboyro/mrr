@@ -1,5 +1,6 @@
 package ro.bitboy.mrr.store;
 
+import ro.bitboy.mrr.secret.PlaintextSecretBox;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -62,7 +63,7 @@ class StoreTest {
         new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(dataSource);
 
         db = JdbcClient.create(dataSource);
-        store = new Store(db);
+        store = new Store(db, new PlaintextSecretBox());
         admin = store.createUser("admin", Role.ADMIN);
         alice = store.createUser("alice", Role.USER);
         bob = store.createUser("bob", Role.USER);

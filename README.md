@@ -359,6 +359,8 @@ that a review was wrong.
 | `MRR_BASE_URL` | `http://localhost:8130` | Public URL, used to print webhook URLs |
 | `MRR_DB_PATH` | `/data/mrr.db` | SQLite file |
 | `MRR_ROOT_TOKEN_FILE` | `/data/root-token.txt` | Where the bootstrap token is written |
+| `MRR_SECRET_KEY` | *(unset)* | Base64 or hex 32-byte key; encrypts the per-project credentials |
+| `MRR_SECRET_KEY_FILE` | *(unset)* | Same, read from a file — keeps the key out of the environment |
 | `MRR_REVIEW_WORKERS` | `2` | Concurrent reviews |
 | `MRR_MAX_DIFF_CHARS` | `200000` | Per-turn diff window; larger MRs are sliced |
 | `MRR_MAX_DIFF_CHUNKS` | `8` | Cap on review slices for one MR |
@@ -377,10 +379,39 @@ restart (`MRR_BASE_URL`, scan interval, workers, caps, model tokens, effort). `S
 
 There are no model or GitLab credentials in the environment — those are per project.
 
+### Encrypting the stored credentials
+
+Each project's GitLab PATs, webhook secret, and model key are stored in `mrr.db`. Set a key
+and they are encrypted at rest with AES-256-GCM; leave it unset and they are stored in
+plaintext, which mrr warns about on every boot.
+
+```bash
+openssl rand -base64 32          # put the result in MRR_SECRET_KEY
+```
+
+Prefer `MRR_SECRET_KEY_FILE` where you can — a path keeps the key out of `docker inspect` and
+the process environment. Either way the key must live somewhere other than the `/data` volume
+it protects, or you have locked the door and taped the key to it.
+
+Set **one of the two**, never both: mrr refuses to start when `MRR_SECRET_KEY` and
+`MRR_SECRET_KEY_FILE` are both non-empty. Nothing in the process can tell which one sealed the
+database, and picking for you is how a leftover env var quietly outranks the key file you just
+restored.
+
+**Back the key up before you use it.** There is no migration and no recovery: mrr does not read
+plaintext rows once a key is set, and it cannot open rows sealed with a key you no longer have.
+In both cases the fix is the same — re-enter each project's credentials. Rotating to a new key
+means the same thing, so treat the key as permanent.
+
+Encryption protects the database *file*: backups, snapshots, a copy you `scp` somewhere, a
+disk that leaves the building. It does not protect against someone who can read the running
+process's memory or environment on the box itself.
+
 ## Known limits
 
-- **Secrets are stored in plaintext** in the SQLite file. Fine for a private volume; treat
-  `/data` accordingly. Encryption is a drop-in change with no schema migration.
+- **The key and the data can sit on the same box.** Encryption at rest hardens copies of
+  `/data`, not a live host compromise. If you need that separation, the `SecretBox` interface
+  is the place to add a KMS-backed implementation.
 - **A review in flight is per process.** `submit` is single-flight in this JVM. After a
   restart the startup scan will queue any still-`PENDING`/`PROCESSING` row of this instance;
   two mrr processes on one database are unsupported. A librarian run left `RUNNING` across a

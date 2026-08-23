@@ -23,6 +23,7 @@ import ro.bitboy.mrr.model.Review;
 import ro.bitboy.mrr.model.ReviewModel;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.User;
+import ro.bitboy.mrr.secret.SecretBox;
 import ro.bitboy.mrr.web.ApiException;
 import ro.bitboy.mrr.web.Urls;
 
@@ -42,14 +43,21 @@ import java.util.Optional;
  *
  * <p>Timestamps are ISO-8601 TEXT because SQLite has no date type. Queries stay
  * dialect-neutral so a Postgres swap remains a config change.
+ *
+ * <p>The four project secret columns pass through {@link SecretBox} on the way in and out —
+ * this class is the only place that happens, and {@code toProject} is an instance method
+ * rather than a static one for exactly that reason. Sealed values are opaque text, so no
+ * query may filter or join on them; none does.
  */
 @Component
 public class Store {
 
     private final JdbcClient db;
+    private final SecretBox secrets;
 
-    public Store(JdbcClient db) {
+    public Store(JdbcClient db, SecretBox secrets) {
         this.db = db;
+        this.secrets = secrets;
     }
 
     // ── users ────────────────────────────────────────────────────────────────────────
@@ -140,9 +148,11 @@ public class Store {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)
                 .params(p.id(), p.ownerId(), p.name(), p.enabled() ? 1 : 0, p.gitlabUrl(),
-                        p.gitlabProjectId(), p.gitlabToken(), p.gitlabOperatorToken(),
-                        p.webhookSecret(), p.provider().name(),
-                        p.modelBaseUrl(), p.model(), p.modelKey(), p.skill(), p.skipDrafts() ? 1 : 0,
+                        p.gitlabProjectId(), secrets.seal(p.gitlabToken()),
+                        secrets.seal(p.gitlabOperatorToken()),
+                        secrets.seal(p.webhookSecret()), p.provider().name(),
+                        p.modelBaseUrl(), p.model(), secrets.seal(p.modelKey()), p.skill(),
+                        p.skipDrafts() ? 1 : 0,
                         p.agentMaxTurns(), toolsCsv(p.agentTools()), p.autoApprove() ? 1 : 0,
                         p.librarianEnabled() ? 1 : 0, p.createdAt().toString())
                 .update();
@@ -159,9 +169,10 @@ public class Store {
                 WHERE id = ?
                 """)
                 .params(p.name(), p.enabled() ? 1 : 0, p.gitlabUrl(), p.gitlabProjectId(),
-                        p.gitlabToken(), p.gitlabOperatorToken(), p.webhookSecret(),
+                        secrets.seal(p.gitlabToken()), secrets.seal(p.gitlabOperatorToken()),
+                        secrets.seal(p.webhookSecret()),
                         p.provider().name(), p.modelBaseUrl(),
-                        p.model(), p.modelKey(), p.skill(), p.skipDrafts() ? 1 : 0,
+                        p.model(), secrets.seal(p.modelKey()), p.skill(), p.skipDrafts() ? 1 : 0,
                         p.agentMaxTurns(), toolsCsv(p.agentTools()), p.autoApprove() ? 1 : 0,
                         p.librarianEnabled() ? 1 : 0, p.id())
                 .update();
@@ -169,7 +180,7 @@ public class Store {
 
     public Optional<Project> findProject(String id) {
         return db.sql("SELECT * FROM projects WHERE id = ?").param(id)
-                .query(Store::toProject).optional();
+                .query(this::toProject).optional();
     }
 
     /**
@@ -188,19 +199,19 @@ public class Store {
     /** Admins list everything; everyone else lists only their own. */
     public List<Project> listProjects(Principal caller) {
         return caller.isAdmin()
-                ? db.sql("SELECT * FROM projects ORDER BY created_at").query(Store::toProject).list()
+                ? db.sql("SELECT * FROM projects ORDER BY created_at").query(this::toProject).list()
                 : db.sql("SELECT * FROM projects WHERE owner_id = ? ORDER BY created_at")
-                        .param(caller.userId()).query(Store::toProject).list();
+                        .param(caller.userId()).query(this::toProject).list();
     }
 
     public List<Project> listEnabledProjects() {
         return db.sql("SELECT * FROM projects WHERE enabled = 1 ORDER BY created_at")
-                .query(Store::toProject).list();
+                .query(this::toProject).list();
     }
 
     public List<Project> listProjectsWithMemoryStatus(MemoryStatus status) {
         return db.sql("SELECT * FROM projects WHERE memory_status = ? ORDER BY created_at")
-                .param(status.name()).query(Store::toProject).list();
+                .param(status.name()).query(this::toProject).list();
     }
 
     public boolean deleteProject(String id) {
@@ -1366,14 +1377,16 @@ public class Store {
                 Role.valueOf(rs.getString("role")), instant(rs.getString("created_at")));
     }
 
-    private static Project toProject(ResultSet rs, int n) throws SQLException {
+    private Project toProject(ResultSet rs, int n) throws SQLException {
         return new Project(
                 rs.getString("id"), rs.getString("owner_id"), rs.getString("name"),
                 rs.getInt("enabled") == 1, rs.getString("gitlab_url"), rs.getString("gitlab_project_id"),
-                rs.getString("gitlab_token"), rs.getString("gitlab_operator_token"),
-                rs.getString("webhook_secret"),
+                secrets.open(rs.getString("gitlab_token")),
+                secrets.open(rs.getString("gitlab_operator_token")),
+                secrets.open(rs.getString("webhook_secret")),
                 Project.Provider.valueOf(rs.getString("provider")), rs.getString("model_base_url"),
-                rs.getString("model"), rs.getString("model_key"), rs.getString("skill"),
+                rs.getString("model"), secrets.open(rs.getString("model_key")),
+                rs.getString("skill"),
                 rs.getInt("skip_drafts") == 1,
                 rs.getInt("agent_max_turns") == 0 ? 1 : rs.getInt("agent_max_turns"),
                 toolsList(rs.getString("agent_tools")),
