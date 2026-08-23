@@ -10,6 +10,10 @@ services:
       # Public URL GitLab will call. Must be reachable from your GitLab instance —
       # localhost works only if GitLab runs on this same machine.
       MRR_BASE_URL: ${MRR_BASE_URL:-http://localhost:8130}
+      # Encrypts the per-project credentials at rest. Unset = plaintext, with a boot warning.
+      # openssl rand -base64 32
+      MRR_SECRET_KEY: ${MRR_SECRET_KEY:-}
+      MRR_SECRET_KEY_FILE: ${MRR_SECRET_KEY_FILE:-}
       MRR_REVIEW_WORKERS: ${MRR_REVIEW_WORKERS:-2}
       MRR_SCAN_INTERVAL_MS: ${MRR_SCAN_INTERVAL_MS:-120000}
       MRR_MAX_DIFF_CHARS: ${MRR_MAX_DIFF_CHARS:-200000}

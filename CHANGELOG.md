@@ -8,6 +8,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Secrets encrypted at rest.** The four per-project credentials — both GitLab PATs, the
+  webhook secret, and the model key — are sealed with AES-256-GCM before they reach the
+  database when `MRR_SECRET_KEY` or `MRR_SECRET_KEY_FILE` is set. Generate a key with
+  `openssl rand -base64 32`. Unset, mrr stores them in plaintext exactly as before and warns
+  about it on every boot.
+
+  The cipher lives behind a `SecretBox` interface with two implementations chosen once at
+  startup, so a KMS-backed third is a new class and one branch in `SecretBoxConfig`. Sealed
+  values are `TEXT` in the same columns as the plaintext they replace, which keeps the
+  encryption independent of the database — SQLite now, an external Postgres later, unchanged.
+
+  Supply `MRR_SECRET_KEY` or `MRR_SECRET_KEY_FILE`, never both — startup fails on the pair
+  instead of preferring one, since nothing in the process can tell which key sealed the
+  database and a leftover env var would otherwise outrank a freshly restored key file.
+
+  **There is no migration, deliberately.** Both directions fail loudly rather than handing
+  GitLab an unusable token: with a key set mrr refuses to read plaintext rows, and with the key
+  removed it refuses to return sealed ones. Either way you re-enter the project credentials. Back the key up, and keep it
+  off the `/data` volume it protects. AES-GCM uses a fresh IV per write, so the same secret
+  seals to a different string every time and no query may compare these columns with `=`.
+
 - **Operator PAT.** Optional second GitLab token on a project, used only to merge an MR or
   post an overall thread from the mrr MR page. The review bot PAT stays without Merge.
   Commit diffs are view-only and load in three steps: commits when the section is opened,

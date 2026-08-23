@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS projects (
     -- GitLab: base_url is what makes self-hosted work. Never hardcode gitlab.com.
     gitlab_url        TEXT NOT NULL,
     gitlab_project_id TEXT NOT NULL,
+    -- The four secret columns. Sealed by SecretBox when a key is configured, so their
+    -- contents are opaque and never comparable with = in SQL. Nothing queries by them.
     gitlab_token      TEXT NOT NULL,
     gitlab_operator_token TEXT,                      -- optional; merge + human comments from mrr
     webhook_secret    TEXT NOT NULL,

@@ -10,9 +10,10 @@ import java.util.List;
  * nothing in mrr may assume gitlab.com.
  *
  * <p>{@code gitlabToken}, {@code gitlabOperatorToken}, {@code webhookSecret}, and
- * {@code modelKey} are stored in plaintext in the SQLite file. That is a deliberate,
- * flagged tradeoff for a private volume; encrypting them later is one class and needs
- * no schema change.
+ * {@code modelKey} are encrypted at rest by {@link ro.bitboy.mrr.secret.SecretBox} when a key
+ * is configured, and stored in plaintext when one is not. Either way this record always holds
+ * the cleartext — {@link ro.bitboy.mrr.store.Store} is the only place that seals and opens
+ * them, and {@link #redacted()} is what keeps them off the API.
  */
 @Schema(description = """
         A registered GitLab project. Secrets — `gitlabToken`, `gitlabOperatorToken`, \
