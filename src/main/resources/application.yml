@@ -1,6 +1,15 @@
 spring:
   application:
     name: mrr
+  web:
+    resources:
+      cache:
+        cachecontrol:
+          # index.html above all: it maps stable URLs to hashed chunk names, so a cached copy
+          # pins the browser to the previous deploy. no-cache is "revalidate", not "do not
+          # store" — the browser keeps the file and gets a 304 while it is unchanged. The
+          # hashed assets opt out of this in StaticCacheConfig and are cached for a year.
+          no-cache: true
   datasource:
     url: jdbc:sqlite:${MRR_DB_PATH:/data/mrr.db}
     driver-class-name: org.sqlite.JDBC

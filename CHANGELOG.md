@@ -47,6 +47,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A deploy is visible on the next load, without a hard reload.** The static export was served
+  with no cache directive on `index.html`, so browsers applied heuristic freshness and reused it
+  for hours. That file maps stable URLs to content-hashed chunk names, so a cached copy pins the
+  browser to the previous deploy's chunks — and a stale UI against an upgraded API fails in ways
+  that look like bugs in the API. `index.html` and everything unhashed is now `no-cache`, which
+  means revalidate rather than "do not store": the browser keeps the file and gets a 304 while it
+  has not changed. Assets under `/_next/static/` carry a hash in the filename, so they are
+  `immutable` for a year instead of being re-fetched. A CDN in front honours the origin
+  directive, so this needs no dashboard change.
+
 - **A path that matches nothing returns 404, not 500.** `NoResourceFoundException` fell through
   to the catch-all handler, so every mistyped URL was answered with `internal_error` and logged
   at ERROR with a stack trace. A public instance is probed for `.env` and `.git/HEAD` within
