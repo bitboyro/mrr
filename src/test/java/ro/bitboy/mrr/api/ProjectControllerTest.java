@@ -235,7 +235,7 @@ class ProjectControllerTest {
                                                    String llmProviderId, Project.Provider provider,
                                                    String model, String modelBaseUrl) {
         return new ProjectController.Upsert(
-                "calc", true, gitlabInstanceId, gitlabUrl, "group/calc", "glpat-x", null,
+                "calc", true, gitlabInstanceId, gitlabUrl, "group/calc", "glpat-x", null, null,
                 llmProviderId, provider, modelBaseUrl, model, "sk-x", null,
                 false, 1, List.of(), false, false);
     }

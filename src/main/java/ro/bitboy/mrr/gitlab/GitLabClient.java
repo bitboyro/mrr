@@ -156,6 +156,97 @@ public class GitLabClient {
                 conflicts);
     }
 
+    /**
+     * Commits on the MR, as GitLab lists them. Paged; a huge MR is still bounded
+     * so a click in the UI cannot walk the whole history.
+     */
+    public List<MrCommit> mrCommits(Project project, long mrIid) {
+        List<MrCommit> result = new ArrayList<>();
+        for (JsonNode n : pagedArray(project, "/merge_requests/" + mrIid + "/commits")) {
+            String sha = textOrNull(n.path("id"));
+            if (sha == null) {
+                continue;
+            }
+            result.add(new MrCommit(
+                    sha,
+                    n.path("title").asText(""),
+                    textOrNull(n.path("author_name")),
+                    textOrNull(n.path("authored_date")) != null
+                            ? textOrNull(n.path("authored_date"))
+                            : textOrNull(n.path("created_at")),
+                    n.path("message").asText("")));
+        }
+        return result;
+    }
+
+    /**
+     * The paths a commit touched — no patch bodies. This is what the UI lists, so
+     * expanding a commit costs one small response however large the commit is.
+     */
+    public List<String> commitFiles(Project project, String sha) {
+        List<String> paths = new ArrayList<>();
+        for (JsonNode change : commitChanges(project, sha)) {
+            String path = pathOf(change);
+            if (!path.isBlank()) {
+                paths.add(path);
+            }
+        }
+        return paths;
+    }
+
+    /**
+     * One file's patch, fetched when that file is unveiled. GitLab has no per-file
+     * commit-diff endpoint, so the commit's diff is read and filtered here: the cost
+     * stays between mrr and GitLab instead of being pushed at the browser. Caps the
+     * patch so a generated blob cannot freeze the page.
+     */
+    public Optional<FilePatch> commitFilePatch(Project project, String sha, String path) {
+        if (path == null || path.isBlank()) {
+            throw ApiException.badRequest("path is required");
+        }
+        for (JsonNode change : commitChanges(project, sha)) {
+            if (!path.equals(pathOf(change))) {
+                continue;
+            }
+            String patch = change.path("diff").asText("");
+            if (patch.length() > 200_000) {
+                patch = patch.substring(0, 200_000) + "\n\n[diff truncated by mrr]";
+            }
+            return Optional.of(new FilePatch(path, patch));
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Every change in a commit. Paged: GitLab returns 20 files a page by default, so an
+     * unpaged read quietly stops at the first slice of a large commit — a file past it
+     * would be missing from the list and unopenable.
+     */
+    private List<JsonNode> commitChanges(Project project, String sha) {
+        if (sha == null || sha.isBlank() || sha.contains("..") || sha.contains("/")) {
+            throw ApiException.badRequest("commit sha is missing or not a git object id");
+        }
+        return pagedArray(project,
+                "/repository/commits/" + URLEncoder.encode(sha, StandardCharsets.UTF_8) + "/diff");
+    }
+
+    private static String pathOf(JsonNode change) {
+        return change.path("new_path").asText(change.path("old_path").asText(""));
+    }
+
+    /**
+     * Merges the MR as the project's operator PAT. Distinct from the review bot token.
+     */
+    public MergeRequest merge(Project project, long mrIid) {
+        JsonNode body = exchange(project, HttpMethod.PUT,
+                "/merge_requests/" + mrIid + "/merge", Map.of());
+        return toMergeRequest(body);
+    }
+
+    public record MrCommit(String sha, String title, String authorName, String authoredDate,
+                           String message) {
+    }
+
     public int commitCount(Project project, long mrIid) {
         String url = apiRoot(project) + "/merge_requests/" + mrIid + "/commits?per_page=1";
         try {
@@ -352,7 +443,23 @@ public class GitLabClient {
                 first.path("body").asText(""),
                 resolvable,
                 resolved,
+                resolvedBy(notes),
                 first.path("system").asBoolean(false));
+    }
+
+    /**
+     * Who pressed Resolve. GitLab hangs {@code resolved_by} off each resolvable note rather
+     * than off the discussion, so take the first one that carries it — resolving a thread
+     * stamps every resolvable note in it with the same user.
+     */
+    private static String resolvedBy(JsonNode notes) {
+        for (JsonNode note : notes) {
+            String username = textOrNull(note.path("resolved_by").path("username"));
+            if (username != null) {
+                return username;
+            }
+        }
+        return null;
     }
 
     /** The three SHAs GitLab demands before it will anchor a comment to a line. */
@@ -370,8 +477,10 @@ public class GitLabClient {
     public record Discussion(String discussionId, String noteId) {
     }
 
+    /** {@code resolvedBy} is the GitLab username that resolved it, null when it is open. */
     public record DiscussionView(String discussionId, String noteId, String body,
-                                 boolean resolvable, boolean resolved, boolean system) {
+                                 boolean resolvable, boolean resolved, String resolvedBy,
+                                 boolean system) {
     }
 
     public record DiffRefs(String baseSha, String startSha, String headSha) {

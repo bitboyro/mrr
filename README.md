@@ -11,8 +11,9 @@ Each finding gets **its own thread, anchored to the line in the diff**. When a l
 fixes one, the next review must mark that finding `addressed` (exact id). mrr then
 **resolves that thread** and keeps GitLab in sync — a later comment cannot leave an
 addressed thread open. Reply on a finding if you disagree; if the model agrees it is
-fixed, that reply closes the thread. Do not post “Closing this” notes or resolve by
-hand: GitLab resolve does not mark addressed, and mrr’s own notes are ignored.
+fixed, that reply closes the thread. Disagree with the finding itself? **Resolve the thread
+in GitLab** — mrr records that as `APPROVED` against your username and stops raising it.
+Do not post “Closing this” notes; mrr’s own notes are ignored.
 
 Everything is kept: the raw webhook payload, the exact prompt, the model's response. Multiple
 users can register their own projects, and an MCP server lets an agent inspect and amend
@@ -116,7 +117,8 @@ required on create.
 | `gitlabInstanceId` | Optional. Copy URL from a Configure catalog row; `gitlabUrl` is then ignored |
 | `gitlabUrl` | Required on create unless `gitlabInstanceId` is set |
 | `gitlabProjectId` | Numeric id or `group/project` path — both work |
-| `gitlabToken` | GitLab PAT for this project. See [GitLab setup](#gitlab-setup) |
+| `gitlabToken` | GitLab PAT for the review loop. See [GitLab setup](#gitlab-setup) |
+| `gitlabOperatorToken` | Optional second PAT. Merge and overall threads from the mrr UI. Blank on update keeps the current value |
 | `llmProviderId` | Optional. Copy provider, model, and `modelBaseUrl` from a Configure catalog row |
 | `provider` | `ANTHROPIC` or `OPENAI_COMPAT`. Required on create unless `llmProviderId` is set |
 | `modelBaseUrl` | Only for `OPENAI_COMPAT` — e.g. `http://ollama:11434/v1`, a vLLM or llama.cpp endpoint, or omit for OpenAI |
@@ -142,8 +144,13 @@ Prefer a **bot user** or project access token, not a person's account.
 | Repository: Read | `read_file` (`GET …/repository/files/…/raw`) |
 | Code: Read | Read the diff |
 
-That is the review loop. Do **not** grant branch/commit write, Merge, or webhook scopes —
-mrr never pushes or merges, and the hook is created in the GitLab UI.
+That is the review loop. Do **not** grant branch/commit write, Merge, or webhook scopes on
+this token — mrr never pushes with it, and the hook is created in the GitLab UI.
+
+**Operator PAT** (optional, a second field on the project): used only when you merge or post
+an overall thread from the mrr MR page. GitLab attributes those actions to this identity, not
+the review bot. Fine-grained: **Merge request: Merge** and **Merge request: Create**. Classic:
+`api`, and the user must be allowed to merge.
 
 **Merge request: Approve** only if `autoApprove` is on. The token identity must also be
 allowed to approve that project (approval rules, CODEOWNERS). Update is not enough; without
@@ -161,11 +168,13 @@ double-fire.
 and the matching names in `agentTools`. First-party OpenAI `gpt-5.4` / `gpt-5.6-*` then use
 `/v1/responses`; Ollama, vLLM, llama.cpp, and other `modelBaseUrl`s stay on chat completions.
 
-Skills and documents are a **set you enable per project**, same idea as MCP tools. Skill
-*bodies* live in a **per-user library** (two tokens for one user share it). Creating a skill
-on a project writes the library then attaches it; **From library** attaches an existing
-row. Editing the body updates every attached project. Detach does not delete the library
-row. Manage them in the UI on the project page or `/configure`, or:
+Skills and documents are a **set you enable per project**, same idea as MCP tools. A
+language-agnostic starting point is bundled at `src/main/resources/skills/mr-review.md`
+(not enabled until you add it on a project). Skill *bodies* live in a **per-user
+library** (two tokens for one user share it). Creating a skill on a project writes the
+library then attaches it; **From library** attaches an existing row. Editing the body
+updates every attached project. Detach does not delete the library row. Manage them in
+the UI on the project page or `/configure`, or:
 
 ```
 GET/POST    /api/skills
@@ -247,6 +256,11 @@ The endpoints you'll actually use:
 | `GET /api/me` | who the token belongs to |
 | `GET/POST/PUT/DELETE /api/projects[/{id}]` | owner-scoped |
 | `GET /api/projects/{id}/merge-requests[/{iid}]` | live MR cycle status, timeline, findings, reply summaries |
+| `GET /api/projects/{id}/merge-requests/{iid}/commits` | live commit list from GitLab |
+| `GET /api/projects/{id}/merge-requests/{iid}/commits/{sha}/files` | paths a commit touched, no patch bodies |
+| `GET /api/projects/{id}/merge-requests/{iid}/commits/{sha}/diff?path=…` | one file's patch (view only) |
+| `POST /api/projects/{id}/merge-requests/{iid}/discussions` | overall GitLab thread, operator PAT |
+| `POST /api/projects/{id}/merge-requests/{iid}/merge` | merge in GitLab, operator PAT |
 | `PUT /api/projects/{id}/merge-requests/{iid}/context` | owner notes included in the next review |
 | `GET/POST /api/projects/{id}/memory` | list/search or create a memory document |
 | `GET /api/projects/{id}/memory/mrs/{iid}` | this MR's card |
@@ -301,12 +315,20 @@ unresolves the live overview again.
 
 On the next commit mrr hands the model the findings still open on that MR and asks it to
 judge each one against the new diff. Anything it marks addressed gets its **thread resolved**;
-anything still standing stays open (and is **reopened** on GitLab if someone resolved it
-there); genuinely new problems get new threads. The model resolves the identity, so a fix
-still counts when the code moved or was rewritten.
+anything still standing stays open; genuinely new problems get new threads. The model
+resolves the identity, so a fix still counts when the code moved or was rewritten.
 
 Only an explicit `addressed` verdict resolves a thread — leaving one open costs nothing,
 auto-resolving a live bug costs a lot.
+
+**A human Resolve is an approval.** Press Resolve on a finding thread and mrr marks that
+finding `APPROVED`, storing the GitLab username of whoever pressed it. It stops counting
+against the MR, it is never handed to the model again, and the thread is left closed rather
+than reopened on the next scan. This is deliberately not `ADDRESSED`: nobody is claiming a
+commit fixed it, so the two are separate states and the approver is on the record. mrr’s own
+PAT never counts — it resolves threads itself, and reading those back would let it sign off
+on its own findings. mrr notices within one scan interval (two minutes by default), so you
+do not need to push to make it stick.
 
 **Duplicate deliveries are free.** Reviews are keyed on
 `(project, mr_iid, head_sha)` — a redelivered hook, or a label edit that fires `update`
@@ -314,9 +336,9 @@ without changing code, returns the existing review instead of spending tokens. A
 a new head SHA and so a new review.
 
 **GitLab is source of truth for whether the MR still exists.** Open / merged / closed come
-from GitLab (webhook, plus a scan every two minutes for missed hooks). Findings stay mrr's:
-a human Resolve does not mark a finding addressed. After merge the cycle shows MERGED even
-if findings were still open.
+from GitLab (webhook, plus a scan every two minutes for missed hooks). Findings stay mrr's,
+with one deliberate exception: a human Resolve closes a finding as `APPROVED`. After merge
+the cycle shows MERGED even if findings were still open.
 
 ## MCP
 
@@ -377,6 +399,18 @@ There are no model or GitLab credentials in the environment — those are per pr
 mvn test                                     # unit tests
 mvn spring-boot:run -Dspring-boot.run.jvmArguments="-DMRR_DB_PATH=./mrr.db"
 ```
+
+A **live instance** that must keep reviewing while you switch branches should not
+run from `target/mrr.jar` or `data/mrr.db`. After `mvn -DskipTests package`:
+
+```bash
+./scripts/start-instance.sh            # Ghostty + tmux, port 8131, copy under ~/.mrr
+./scripts/start-instance.sh --refresh  # recopy the jar; restart if the session is up
+./scripts/start-instance.sh --stop
+```
+
+The pane at the bottom prints the public URL, root token, and webhook URLs.
+A new quick-tunnel hostname must be pasted into GitLab each start.
 
 Java 21, Spring Boot 3.4, SQLite, and the Anthropic SDK. No Spring Security, no JPA, no
 Actuator — see the comments in `pom.xml` for why.

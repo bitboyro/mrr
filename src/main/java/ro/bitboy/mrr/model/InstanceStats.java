@@ -13,6 +13,7 @@ public record InstanceStats(
         TokenTotals tokensLast7Days,
         long findingsOpen,
         long findingsAddressed,
+        long findingsApproved,
         Double meanReadyDurationSeconds,
         Map<String, Long> failuresByKind,
         List<ProjectRow> projects

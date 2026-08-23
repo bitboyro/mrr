@@ -8,10 +8,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Operator PAT.** Optional second GitLab token on a project, used only to merge an MR or
+  post an overall thread from the mrr MR page. The review bot PAT stays without Merge.
+  Commit diffs are view-only and load in three steps: commits when the section is opened,
+  a commit's file paths when it is expanded, and a single file's patch when that file is
+  unveiled. No patch body is sent to the browser before you ask for it. The commit's file
+  list is paged, so a commit touching more than one page of files is listed in full.
+
+- **Resolving a thread in GitLab now closes the finding.** A hand-resolve
+  becomes a new finding state, `APPROVED`, carrying the GitLab username of
+  whoever pressed Resolve (`findings.approved_by`). The finding stops counting
+  against the MR, is never handed to the model again, and its thread is left
+  closed instead of being reopened on the next scan — which is what used to
+  happen. `APPROVED` is kept separate from `ADDRESSED` on purpose: nobody is
+  claiming a commit fixed it, so time-to-fix stays measurable and the approver
+  is on the record. mrr's own PAT never counts as an approver, so it cannot
+  sign off on its own findings. Picked up by the two-minute scan, so no push
+  is needed.
+
 - **Branch behind the target.** The review snapshot now stores GitLab's
   `detailed_merge_status`, how many commits the source is behind, and
   `has_conflicts`. The cycle and review pages show a warning when the
   branch needs a rebase, and a red pill when it conflicts.
+
+- **Bundled `mr-review` skill.** Language-agnostic review instructions ship at
+  `src/main/resources/skills/mr-review.md`. Not auto-enabled — add it on a
+  project like any other skill.
+
+- **Insulated local instance.** `./scripts/start-instance.sh` copies the jar to
+  `~/.mrr`, serves it on port 8131, opens Ghostty + tmux with mrr and a
+  Cloudflare quick tunnel, and prints the URLs and root token to paste.
 
 ### Fixed
 

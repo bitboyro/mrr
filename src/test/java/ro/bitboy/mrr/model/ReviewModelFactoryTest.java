@@ -48,7 +48,8 @@ class ReviewModelFactoryTest {
 
     private static Project withModel(Project p, String model) {
         return new Project(p.id(), p.ownerId(), p.name(), p.enabled(), p.gitlabUrl(),
-                p.gitlabProjectId(), p.gitlabToken(), p.webhookSecret(), p.provider(),
+                p.gitlabProjectId(), p.gitlabToken(), p.gitlabOperatorToken(),
+                p.webhookSecret(), p.provider(),
                 p.modelBaseUrl(), model, p.modelKey(), p.skill(), p.skipDrafts(),
                 p.agentMaxTurns(), p.agentTools(), p.autoApprove(), p.librarianEnabled(),
                 p.memoryHeadSha(), p.memoryStatus(), p.memoryRefreshedAt(),

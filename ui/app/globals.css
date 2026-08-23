@@ -166,6 +166,18 @@ details.fold > summary {
 }
 details.fold[open] > summary { margin-bottom: 8px; }
 
+.commit-files { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.diff-file button { text-align: left; font-family: var(--font-mono); font-size: 12px; width: 100%; }
+pre.diff-view {
+  max-height: 480px;
+  margin: 8px 0 0;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+pre.diff-view .add { color: var(--ok); }
+pre.diff-view .del { color: var(--danger); }
+pre.diff-view .hunk { color: var(--minor); }
+
 .tabs { display: flex; gap: 4px; margin: 8px 0 20px; border-bottom: 1px solid var(--line); }
 .tabs button {
   background: none;
@@ -220,6 +232,7 @@ details.fold[open] > summary { margin-bottom: 8px; }
 .card.finding.major { border-left-color: var(--major); }
 .card.finding.minor { border-left-color: var(--minor); }
 .card.finding.addressed { border-left-color: var(--ok); opacity: 0.78; }
+.card.finding.approved { border-left-color: var(--ok); opacity: 0.78; }
 @media (max-width: 720px) {
   .mr-row { grid-template-columns: 48px minmax(0, 1fr) auto; }
   .mr-row .hid { display: none; }

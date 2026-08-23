@@ -136,13 +136,96 @@ class ReviewerTest {
                 "disc-find", "n-2", true, Finding.State.ADDRESSED, Instant.now(), Instant.now()));
         store.upsertMrStatus(project.id(), 7, MrStatus.Status.CLEAN, reviewId, "sha-addr", 0);
         gitlab.discussions.add(new ro.bitboy.mrr.gitlab.GitLabClient.DiscussionView(
-                "ov-1", "note-1", "### mrr review", true, true, false));
+                "ov-1", "note-1", "### mrr review", true, true, gitlab.tokenUser, false));
         gitlab.discussions.add(new ro.bitboy.mrr.gitlab.GitLabClient.DiscussionView(
-                "disc-find", "n-2", "**[Major]** leak", true, false, false));
+                "disc-find", "n-2", "**[Major]** leak", true, false, null, false));
 
         reviewer().alignGitlab(project, 7);
 
         assertThat(gitlab.resolved).contains("disc-find:true");
+    }
+
+    /**
+     * The point of the feature: pressing Resolve in GitLab closes the finding, records who
+     * pressed it, and the thread is left alone instead of being reopened on the next scan.
+     */
+    @Test
+    void alignGitlabAdoptsAHandResolveAsAnApproval() {
+        String reviewId = claim("sha-open");
+        store.markReady(reviewId, "ov-1", "note-1");
+        store.saveOverview(project.id(), 7, "ov-1", "note-1");
+        Finding open = store.createFinding(new Finding(Ids.newId(), reviewId, project.id(), 7,
+                "A.java", 1, Finding.Severity.MAJOR, "leak", "close it",
+                "disc-find", "n-2", true, Finding.State.OPEN, Instant.now(), null));
+        store.upsertMrStatus(project.id(), 7, MrStatus.Status.NEEDS_WORK, reviewId, "sha-open", 1);
+        gitlab.discussions.add(new ro.bitboy.mrr.gitlab.GitLabClient.DiscussionView(
+                "ov-1", "note-1", "### mrr review", true, false, null, false));
+        gitlab.discussions.add(new ro.bitboy.mrr.gitlab.GitLabClient.DiscussionView(
+                "disc-find", "n-2", "**[Major]** leak", true, false, null, false));
+        gitlab.resolveAs("disc-find", "romanbotnari");
+
+        reviewer().alignGitlab(project, 7);
+
+        Finding after = store.findingsOfMr(project.id(), 7).getFirst();
+        assertThat(after.state()).isEqualTo(Finding.State.APPROVED);
+        assertThat(after.approvedBy()).isEqualTo("romanbotnari");
+        assertThat(after.resolvedAt()).isNotNull();
+        assertThat(store.openFindings(project.id(), 7)).isEmpty();
+        assertThat(gitlab.resolved).doesNotContain("disc-find:false");
+        assertThat(store.findMrStatus(project.id(), 7).orElseThrow().currentStatus())
+                .isEqualTo(MrStatus.Status.CLEAN);
+        assertThat(open.state()).isEqualTo(Finding.State.OPEN);
+    }
+
+    /**
+     * mrr resolves threads with its own PAT. Reading one of those back as an approval would
+     * let it sign off on its own findings.
+     */
+    @Test
+    void alignGitlabDoesNotTreatMrrsOwnResolveAsAnApproval() {
+        String reviewId = claim("sha-own");
+        store.markReady(reviewId, "ov-1", "note-1");
+        store.saveOverview(project.id(), 7, "ov-1", "note-1");
+        store.createFinding(new Finding(Ids.newId(), reviewId, project.id(), 7,
+                "A.java", 1, Finding.Severity.MAJOR, "leak", "close it",
+                "disc-find", "n-2", true, Finding.State.OPEN, Instant.now(), null));
+        store.upsertMrStatus(project.id(), 7, MrStatus.Status.NEEDS_WORK, reviewId, "sha-own", 1);
+        gitlab.discussions.add(new ro.bitboy.mrr.gitlab.GitLabClient.DiscussionView(
+                "disc-find", "n-2", "**[Major]** leak", true, true, gitlab.tokenUser, false));
+
+        reviewer().alignGitlab(project, 7);
+
+        Finding after = store.findingsOfMr(project.id(), 7).getFirst();
+        assertThat(after.state()).isEqualTo(Finding.State.OPEN);
+        assertThat(after.approvedBy()).isNull();
+        assertThat(gitlab.resolved).contains("disc-find:false");
+    }
+
+    /**
+     * The lookup that tells mrr's own PAT apart from a person is a network call. When it
+     * fails mrr cannot tell the two apart — and the resolve is still adopted, because
+     * dropping it would reopen the thread under a human who already signed it off.
+     */
+    @Test
+    void alignGitlabAdoptsAHandResolveWhenTheTokenUserLookupFails() {
+        String reviewId = claim("sha-nouser");
+        store.markReady(reviewId, "ov-1", "note-1");
+        store.saveOverview(project.id(), 7, "ov-1", "note-1");
+        store.createFinding(new Finding(Ids.newId(), reviewId, project.id(), 7,
+                "A.java", 1, Finding.Severity.MAJOR, "leak", "close it",
+                "disc-find", "n-2", true, Finding.State.OPEN, Instant.now(), null));
+        store.upsertMrStatus(project.id(), 7, MrStatus.Status.NEEDS_WORK, reviewId, "sha-nouser", 1);
+        gitlab.discussions.add(new ro.bitboy.mrr.gitlab.GitLabClient.DiscussionView(
+                "disc-find", "n-2", "**[Major]** leak", true, false, null, false));
+        gitlab.resolveAs("disc-find", "romanbotnari");
+        gitlab.tokenUserFailure = new IllegalStateException("GitLab GET /user failed with 401");
+
+        reviewer().alignGitlab(project, 7);
+
+        Finding after = store.findingsOfMr(project.id(), 7).getFirst();
+        assertThat(after.state()).isEqualTo(Finding.State.APPROVED);
+        assertThat(after.approvedBy()).isEqualTo("romanbotnari");
+        assertThat(gitlab.resolved).doesNotContain("disc-find:false");
     }
 
     @Test

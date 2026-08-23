@@ -45,7 +45,7 @@ class ReviewToolsTest {
         memory = new MemoryService(new MemoryStore(db, properties));
         var user = store.createUser("alice", Role.USER);
         Project project = store.createProject(new Project(Ids.newId(), user.id(), "calc", true,
-                "https://gitlab.com", "g/calc", "glpat-x", Ids.newSecret(),
+                "https://gitlab.com", "g/calc", "glpat-x", null, Ids.newSecret(),
                 Project.Provider.ANTHROPIC, null, "claude-opus-5", "sk-x",
                 null, false, 1, List.of(), false, false, null, null, null, null, null, null, Instant.now()));
         projectId = project.id();

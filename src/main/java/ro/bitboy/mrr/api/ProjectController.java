@@ -87,7 +87,8 @@ public class ProjectController {
         Project project = new Project(
                 Ids.newId(), caller.userId(), request.name().trim(), true,
                 gitlabUrl, request.gitlabProjectId(),
-                request.gitlabToken(), secret, llm.provider(), llm.modelBaseUrl(),
+                request.gitlabToken(), blankToNull(request.gitlabOperatorToken()), secret,
+                llm.provider(), llm.modelBaseUrl(),
                 llm.model(), request.modelKey(), request.skill(),
                 Boolean.TRUE.equals(request.skipDrafts()),
                 request.agentMaxTurns() == null ? 1 : Math.max(1, request.agentMaxTurns()),
@@ -142,6 +143,7 @@ public class ProjectController {
                 gitlabUrl,
                 orKeep(request.gitlabProjectId(), existing.gitlabProjectId()),
                 orKeep(request.gitlabToken(), existing.gitlabToken()),
+                orKeep(request.gitlabOperatorToken(), existing.gitlabOperatorToken()),
                 orKeep(request.webhookSecret(), existing.webhookSecret()),
                 llm.provider(),
                 llm.modelBaseUrl(),
@@ -231,6 +233,10 @@ public class ProjectController {
         return candidate == null || candidate.isBlank() ? existing : candidate;
     }
 
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
+    }
+
     @Schema(description = "Project registration or update. On update, omitted fields are kept.")
     public record Upsert(
             @Schema(description = "Display name.", example = "test-repo") String name,
@@ -247,8 +253,12 @@ public class ProjectController {
             @Schema(description = "PAT used to read the diff, post the review, and optionally Approve. "
                     + "Needs `api` scope, or fine-grained `read_code` + `read_merge_request` + "
                     + "`update_merge_request`. Approving also needs permission to approve merge requests. "
-                    + "Write-only.",
+                    + "Write-only. Do not grant Merge on this token.",
                     example = "glpat-xxxxxxxxxxxxxxxxxxxx") String gitlabToken,
+            @Schema(description = "Optional second PAT used only when you merge or post an overall "
+                    + "thread from the mrr MR page. Needs Merge request: Merge (and Create for a "
+                    + "new thread). Write-only. Blank on update keeps the current value.",
+                    example = "glpat-yyyyyyyyyyyyyyyyyyyy") String gitlabOperatorToken,
             @Schema(description = "Shared secret GitLab sends as `X-Gitlab-Token`. Generated if omitted. Write-only.")
             String webhookSecret,
             @Schema(description = "Catalog LLM endpoint. When set, copies provider, model, and "
