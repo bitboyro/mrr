@@ -611,129 +611,145 @@ function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
   return (
     <div className="howto">
       {onLogin && <img src="/logo.png" alt="mrr" className="login-mark" />}
-      <p className="tag">Is it mr. reviewer? Or merge request reviewer? Nobody knows for sure.</p>
-      <h1>How to set up mrr</h1>
+      <h1>Hello, I’m mrr 😼</h1>
       <p className="lead">
-        The service is running. This is everything after that: a token, a GitLab project, a webhook,
-        then what a review looks like.
+        I read your merge requests and comment on them just like your colleagues would —
+        faster, and I never forget to look.
       </p>
-      {onLogin && <TokenForm onLogin={onLogin} />}
+      <p>Setup takes about five minutes.</p>
 
-      <h2>1. Root token</h2>
+      <h2>1. Log in</h2>
       <pre className="token-box">{`┌─ mrr  root admin token ────────────────────────────────────┐
 │  mrr_…                                                     │
 └────────────────────────────────────────────────────────────┘`}</pre>
       <p>
-        Printed <strong>once</strong> on first boot. Also <code>/data/root-token.txt</code>.
-        DB stores a hash.{onLogin ? " Paste it above." : ""}
+        First boot prints a root token — it’s also saved at <code>/data/root-token.txt</code>.
+        Paste it on the login screen. There’s no password.
       </p>
-
-      <h2>2. Users</h2>
-      <p>Optional. Admin → one USER token per person. Don’t share root.</p>
-
-      <h2>3. New project</h2>
+      {onLogin && <TokenForm onLogin={onLogin} />}
       <p>
-        <strong>Projects → New Project.</strong> GitLab URL, project id or{" "}
-        <code>group/project</code>, token.
+        Later, from Admin, you can issue one user token per person so nobody has to share root.
       </p>
+
+      <h2>2. Add your project</h2>
+      <p><strong>Projects → New Project.</strong> You’ll need:</p>
+      <ul>
+        <li>Your GitLab URL</li>
+        <li>The project ID, or <code>group/project</code></li>
+        <li>
+          A GitLab token — a <strong>project access token</strong> is the easy answer:
+          bot user, Developer role, <code>api</code> scope
+        </li>
+        <li>
+          Your model provider — Anthropic, or OpenAI-compatible with a base URL for
+          Ollama / vLLM
+        </li>
+      </ul>
+      <p>That’s it. mrr scans your open merge requests and gets to work.</p>
+      <p className="muted">
+        For the first review, try max turns 1 with tools off — quickest way to confirm
+        everything’s wired up.
+      </p>
+
+      <h2>3. Add a webhook (recommended, not required)</h2>
+      <p>
+        mrr checks for new commits on its own, so reviews will show up regardless. The webhook
+        just makes them instant.
+      </p>
+      <p>
+        After you create the project, copy the URL and secret — shown once — into{" "}
+        <strong>GitLab → Settings → Webhooks</strong>, and tick:
+      </p>
+      <ul>
+        <li><strong>Merge request events</strong></li>
+        <li><strong>Comments</strong> — only if you want mrr to answer replies on its own threads</li>
+      </ul>
+      <p>
+        <code>MRR_BASE_URL</code> has to be reachable from GitLab. If it ever changes, edit the
+        existing hook rather than adding a second one — two hooks means every review runs twice.
+      </p>
+
+      <h2>What a review looks like</h2>
+      <ul>
+        <li><strong>One overview comment</strong> (<code>### mrr review</code>), edited in place rather than reposted</li>
+        <li><strong>One thread per finding</strong></li>
+        <li><strong>On new commits:</strong> fixed findings resolve themselves, open ones stay put, new problems get new threads</li>
+        <li>
+          <strong>Resolve a thread in GitLab</strong> and mrr marks the finding approved against
+          your username — the two stay in sync either way
+        </li>
+      </ul>
+      <p>
+        One thing that surprises people: editing a title or label without pushing won’t trigger
+        a new review (or spend tokens). Drafts get reviewed unless you turn on{" "}
+        <strong>Skip drafts</strong>.
+      </p>
+
+      <h2>Which GitLab token?</h2>
       <table>
-        <thead><tr><th>Token</th><th></th></tr></thead>
+        <thead><tr><th>Token</th><th>Notes</th></tr></thead>
         <tbody>
           <tr>
-            <td>Project access token</td>
-            <td>Preferred — bot user. Developer + <code>api</code>. gitlab.com: Premium/Ultimate. Self-hosted Free: yes.</td>
+            <td>Project or group access token</td>
+            <td>
+              Preferred. Bot user, Developer + <code>api</code>. On gitlab.com needs
+              Premium/Ultimate; self-hosted Free is fine.
+            </td>
           </tr>
-          <tr><td>Group access token</td><td>Same as project.</td></tr>
-          <tr><td>Fine-grained PAT</td><td>One project. Permissions below.</td></tr>
-          <tr><td>Classic PAT</td><td><code>api</code>. User must be Developer on the project.</td></tr>
-        </tbody>
-      </table>
-      <p className="muted">Not deploy tokens or CI job tokens. mrr sends <code>PRIVATE-TOKEN</code>.</p>
-
-      <h3>Fine-grained PAT — always</h3>
-      <table>
-        <thead><tr><th>Permission</th><th></th></tr></thead>
-        <tbody>
-          <tr><td>Merge Request: Read</td><td>List, metadata, diff</td></tr>
-          <tr><td>Merge Request: Create</td><td>Post overview and finding threads, reply</td></tr>
-          <tr><td>Merge Request: Update</td><td>Edit overview, resolve / reopen</td></tr>
-        </tbody>
-      </table>
-      <h3>If the feature is on</h3>
-      <table>
-        <thead><tr><th>Permission</th><th></th></tr></thead>
-        <tbody>
-          <tr><td>Merge Request: Approve</td><td>Auto-approve. Token identity must also be allowed to approve (rules, CODEOWNERS).</td></tr>
-          <tr><td>Repository: Read</td><td><code>read_file</code>, librarian, per-commit diffs</td></tr>
-          <tr><td>Commit: Read</td><td>Librarian tip SHA, commit diffs</td></tr>
-          <tr><td>Project: Read</td><td>Librarian metadata</td></tr>
-        </tbody>
-      </table>
-      <p>
-        Do not grant Merge, repo write, Code: Push, or webhook scopes on the <strong>review</strong> PAT.
-        mrr never pushes, and the hook is created in the GitLab UI.
-      </p>
-      <h3>Operator PAT — optional, for merge and comments from mrr</h3>
-      <p>
-        A second token on the project, used only when you merge or post an overall thread
-        from the MR page. Keep Merge off the bot. This PAT is the identity GitLab will show
-        on those actions.
-      </p>
-      <table>
-        <thead><tr><th>Permission</th><th></th></tr></thead>
-        <tbody>
-          <tr><td>Merge Request: Merge</td><td>Merge from the MR page</td></tr>
-          <tr><td>Merge Request: Create</td><td>Overall thread from the MR page</td></tr>
+          <tr>
+            <td>Fine-grained PAT</td>
+            <td>Scoped to a single project. Permissions below.</td>
+          </tr>
+          <tr>
+            <td>Classic PAT</td>
+            <td><code>api</code> scope, and the user needs Developer on the project.</td>
+          </tr>
         </tbody>
       </table>
       <p className="muted">
-        Provider: <code>ANTHROPIC</code> or <code>OPENAI_COMPAT</code> (set base URL for Ollama / vLLM).
-        First review: max turns 1, tools off.
+        Deploy tokens and CI job tokens won’t work — mrr sends the token as{" "}
+        <code>PRIVATE-TOKEN</code>.
       </p>
 
-      <h2>4. Webhook</h2>
+      <h3>Fine-grained permissions</h3>
       <p>
-        After Create, copy URL + secret <strong>once</strong> → GitLab <em>Settings → Webhooks</em>.
+        Always: <code>Merge Request: Read</code>, <code>Create</code>, <code>Update</code>.
       </p>
+      <p>Only if you turn the matching feature on:</p>
       <ul>
-        <li>Merge request events</li>
-        <li>Comments — if mrr should answer replies on its threads</li>
+        <li>
+          <code>Merge Request: Approve</code> — for auto-approve. The token’s identity also has
+          to be allowed to approve under your approval rules and CODEOWNERS.
+        </li>
+        <li>
+          <code>Repository: Read</code>, <code>Commit: Read</code>, <code>Project: Read</code> —
+          for <code>read_file</code> and the librarian.
+        </li>
       </ul>
       <p>
-        <code>MRR_BASE_URL</code> must be reachable from GitLab. If it changes, edit the existing
-        hook — two hooks double-fire.
+        Please don’t grant Merge, repo write, <code>Code: Push</code>, <code>Code: Read</code>,
+        or webhook scopes. mrr never pushes, never merges, and never creates the hook itself.
       </p>
 
-      <h2>5. Review</h2>
-      <p>Open an MR, or wait — boot scans open MRs. UI polls.</p>
+      <h2>Optional extras</h2>
       <ul>
-        <li>One <code>### mrr review</code> overview, edited in place</li>
-        <li>One thread per finding</li>
-        <li>Later commits: the model must return <code>prior</code> for every still-open id. <code>addressed</code> resolves that thread; a leftover related bug is a new finding</li>
-        <li>Resolve a thread in GitLab and mrr marks that finding <code>APPROVED</code>, recording your username. It stops counting against the MR and the thread is left closed</li>
-        <li>GitLab follows mrr: open findings stay unresolved; closed ones — <code>ADDRESSED</code> by a commit, <code>APPROVED</code> by a person — stay resolved (re-resolved if a comment reopened them)</li>
-        <li>A reply on a finding can close it when the model returns <code>status: addressed</code>. Do not comment “Closing this”</li>
-      </ul>
-      <p className="muted">
-        <code>APPROVED</code> means a person signed the finding off, not that a commit fixed
-        it — mrr never invents that verdict for itself. Notes from the review PAT are
-        ignored, so mrr’s own resolves never read as approvals. Title/label edits without a
-        new SHA don’t spend tokens. Drafts are reviewed unless Skip drafts is on.
-      </p>
-
-      <h2>6. Optional</h2>
-      <ul>
-        <li>Skills / documents — Reviewer tab, next review</li>
-        <li>Memory card written on READY. Reviewer reads it only with <code>search_memory</code> / <code>read_memory</code></li>
-        <li>Librarian (off) — Initialize / Refresh of <code>project/</code> only; disable never deletes files</li>
-        <li>Auto-approve — needs Merge Request: Approve</li>
+        <li><strong>Skills / documents</strong> — add them in the Reviewer tab; they apply from the next review on.</li>
+        <li>
+          <strong>Memory</strong> — a card is written when a review reaches READY. The reviewer
+          only reads it if it calls <code>search_memory</code> or <code>read_memory</code>.
+        </li>
+        <li>
+          <strong>Librarian</strong> (off by default) — Initialize and Refresh only touch{" "}
+          <code>project/</code>. Disabling it never deletes files.
+        </li>
+        <li><strong>Auto-approve</strong> — needs <code>Merge Request: Approve</code>.</li>
       </ul>
 
-      <h2>7. Nothing on GitLab</h2>
+      <h2>Nothing showed up on GitLab</h2>
       <p>
-        FAILED (quota, rate limit, unreachable, refusal) → mrr does <strong>not</strong> post. Re-run.
-        Restart leaves in-flight rows PROCESSING — re-run those too.
-        Secrets are plaintext in SQLite under <code>/data</code>.
+        If a review FAILED — quota, rate limit, unreachable provider, model refusal — mrr posts
+        nothing at all rather than posting something partial. Just re-run it. A restart also
+        leaves in-flight reviews stuck in PROCESSING; re-run those too.
       </p>
     </div>
   );
