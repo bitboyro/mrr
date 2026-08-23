@@ -12,4 +12,10 @@ docs/CURRENT-RUN.md
 ui/node_modules/
 ui/.next/
 ui/out/
+ui/*.tsbuildinfo
 src/main/resources/static/_next/
+# Desktop screenshots dropped at the repo root by accident.
+/*.png
+/*.PNG
+/*.jpg
+/*.jpeg

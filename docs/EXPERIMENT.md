@@ -33,7 +33,9 @@ flowchart LR
 
 Every commit is a row in [`reviews`](../src/main/resources/schema.sql) keyed on
 `(project, mr_iid, head_sha)`. Findings live across reviews; `OPEN` →
-`ADDRESSED` plus `resolved_at` is the built-in time-to-fix. Replies, `inline`,
+`ADDRESSED` plus `resolved_at` is the built-in time-to-fix, and `OPEN` →
+`APPROVED` plus `approved_by` is the built-in disagreement rate — a named human
+closed it without a fix. Replies, `inline`,
 severity, `files_changed`, `agent_turns`, and `created_at` / `finished_at` are
 already there.
 
@@ -72,9 +74,13 @@ because of the review.
   commenting on stale SHAs and the loop is fiction.
 - **Commits-to-clean** — pushes on an MR until `mr_status.current_status =
   CLEAN` (or merge with leftovers).
-- **Time-to-address** — `findings.resolved_at - findings.created_at`, and
-  **commits-to-address** (how many later `head_sha`s before that finding
-  flips).
+- **Time-to-address** — `findings.resolved_at - findings.created_at` over
+  `ADDRESSED` rows only, and **commits-to-address** (how many later `head_sha`s
+  before that finding flips). `APPROVED` rows set `resolved_at` too but were
+  never fixed, so leaving them in understates the real time-to-fix.
+- **Disagreement rate** — `APPROVED` over all closed findings, sliced by
+  severity and by `approved_by`. A reviewer who resolves every BLOCKER by hand
+  is telling you something about the prompt.
 - **WIP vs ready** — draft reviews vs non-draft. Reviewing every draft push
   measures noise on unfinished work; `skipDrafts: true` measures the gate at
   "I think this is done."
@@ -135,7 +141,8 @@ Each review row is "this MR at this commit": timestamps, `head_sha`,
 `files_changed`, `mr_draft`, `agent_turns`, `error_kind`, the prompt (diff +
 the skills and documents as they stood *then*), the response, and the trace
 (`read_file` calls, per-turn `elapsedMs`). Findings carry severity, path,
-line, `inline`, `OPEN` / `ADDRESSED`, `created_at`, `resolved_at`. Replies
+line, `inline`, `OPEN` / `ADDRESSED` / `APPROVED`, `created_at`,
+`resolved_at`, `approved_by`. Replies
 are the argument transcript.
 
 From that, without any live log:
@@ -144,8 +151,9 @@ From that, without any live log:
 |---|---|
 | Review latency | `finished_at - created_at` |
 | Overlap / did you wait | next review's `created_at` vs this one's `finished_at` on the same MR |
-| Time-to-address, commits-to-address | `resolved_at`, then count later `head_sha`s on that `mr_iid` |
-| Action rate | `ADDRESSED` vs still `OPEN` when the MR left `opened` |
+| Time-to-address, commits-to-address | `resolved_at` on `ADDRESSED` rows, then count later `head_sha`s on that `mr_iid` |
+| Action rate | `ADDRESSED` vs `APPROVED` vs still `OPEN` when the MR left `opened` |
+| Who overrides what | `approved_by` × `severity` |
 | Location hit rate, severity mix, zero-finding reviews | columns as they are |
 | Findings per `files_changed` | group by review |
 | First vs later commits | new findings on review 1 of an MR vs review 2+ |

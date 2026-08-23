@@ -39,9 +39,23 @@ public record Finding(
         boolean inline,
         State state,
         Instant createdAt,
-        @Schema(description = "When a later commit addressed it.", nullable = true)
-        Instant resolvedAt
+        @Schema(description = "When it stopped standing \u2014 a later commit addressed it, or a "
+                + "human resolved the thread.", nullable = true)
+        Instant resolvedAt,
+        @Schema(description = "GitLab username of the human who resolved the thread, when the "
+                + "state is APPROVED. Null for OPEN and for ADDRESSED.",
+                example = "romanbotnari", nullable = true)
+        String approvedBy
 ) {
+
+    /** A fresh finding: nobody has approved it yet. */
+    public Finding(String id, String reviewId, String projectId, long mrIid, String filePath,
+                   Integer line, Severity severity, String title, String body,
+                   String discussionId, String noteId, boolean inline, State state,
+                   Instant createdAt, Instant resolvedAt) {
+        this(id, reviewId, projectId, mrIid, filePath, line, severity, title, body,
+                discussionId, noteId, inline, state, createdAt, resolvedAt, null);
+    }
 
     @Schema(description = "How bad it is, as judged by the reviewer.")
     public enum Severity {
@@ -66,9 +80,17 @@ public record Finding(
 
     @Schema(description = """
             OPEN — still standing as of the most recent review.
-            ADDRESSED — a later commit fixed it; mrr resolved the thread.""")
+            ADDRESSED — a later commit fixed it; mrr resolved the thread.
+            APPROVED — a human resolved the thread on GitLab, accepting the finding as it \
+            stands. mrr records who and keeps the thread closed.""")
     public enum State {
         OPEN,
-        ADDRESSED
+        ADDRESSED,
+        APPROVED;
+
+        /** OPEN is the only state that still counts against the merge request. */
+        public boolean isClosed() {
+            return this != OPEN;
+        }
     }
 }

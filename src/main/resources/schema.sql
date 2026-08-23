@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS projects (
     gitlab_url        TEXT NOT NULL,
     gitlab_project_id TEXT NOT NULL,
     gitlab_token      TEXT NOT NULL,
+    gitlab_operator_token TEXT,                      -- optional; merge + human comments from mrr
     webhook_secret    TEXT NOT NULL,
 
     provider          TEXT NOT NULL,                 -- ANTHROPIC | OPENAI_COMPAT
@@ -167,9 +168,10 @@ CREATE TABLE IF NOT EXISTS findings (
     note_id       TEXT,
     inline        INTEGER NOT NULL DEFAULT 0,          -- attached to a diff line, or fell back
 
-    state         TEXT NOT NULL,                       -- OPEN | ADDRESSED
+    state         TEXT NOT NULL,                       -- OPEN | ADDRESSED | APPROVED
     created_at    TEXT NOT NULL,
-    resolved_at   TEXT
+    resolved_at   TEXT,
+    approved_by   TEXT                                 -- GitLab user who resolved it by hand
 );
 
 CREATE INDEX IF NOT EXISTS idx_findings_open ON findings(project_id, mr_iid, state);

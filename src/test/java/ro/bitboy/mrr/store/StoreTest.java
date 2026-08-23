@@ -132,6 +132,21 @@ class StoreTest {
     }
 
     @Test
+    void operatorTokenIsStoredAndMaskedOnRead() {
+        Project created = store.createProject(new Project(Ids.newId(), alice.id(), "app", true,
+                "https://gitlab.com", "g/app", "glpat-review", "glpat-operator-token", Ids.newSecret(),
+                Project.Provider.ANTHROPIC, null, "claude-opus-5", "sk-x",
+                null, false, 1, List.of(), false, false, null, null, null, null, null, null,
+                Instant.now()));
+
+        Project stored = store.findProject(created.id()).orElseThrow();
+        assertThat(stored.gitlabOperatorToken()).isEqualTo("glpat-operator-token");
+        assertThat(stored.hasOperatorToken()).isTrue();
+        assertThat(stored.redacted().gitlabOperatorToken()).isEqualTo("****oken").doesNotContain("glpat-operator");
+        assertThat(stored.asOperator().gitlabToken()).isEqualTo("glpat-operator-token");
+    }
+
+    @Test
     void claimingTheSameHeadCommitTwiceReturnsTheOriginalReview() {
         Project project = store.createProject(project(alice.id(), "alice-app"));
 
@@ -691,7 +706,7 @@ class StoreTest {
         LlmProvider opus = store.createLlmProvider("Opus", Project.Provider.ANTHROPIC,
                 "claude-opus-5", null);
         Project project = store.createProject(new Project(Ids.newId(), alice.id(), "calc", true,
-                gitlab.url(), "group/calc", "glpat-x", Ids.newSecret(),
+                gitlab.url(), "group/calc", "glpat-x", null, Ids.newSecret(),
                 opus.provider(), opus.modelBaseUrl(), opus.model(), "sk-x",
                 null, false, 1, List.of(), false, false, null, null, null, null, null, null,
                 Instant.now()));
@@ -725,6 +740,39 @@ class StoreTest {
         assertThat(indexes).contains("idx_replies_source_note");
     }
 
+    /**
+     * An approval closes the finding and names the approver. It must not overwrite an
+     * ADDRESSED one: that row's resolved_at is when a commit fixed it, which is the
+     * time-to-fix measurement.
+     */
+    @Test
+    void approvingRecordsTheUserAndLeavesAddressedFindingsAlone() {
+        Project project = store.createProject(project(alice.id(), "alice-approve"));
+        String reviewId = store.claimReview(project.id(), 9, "sha-1", "{}", mrInfo()).review().id();
+        Finding open = store.createFinding(finding(reviewId, project.id(), 9, "disc-a"));
+        Finding fixed = store.createFinding(finding(reviewId, project.id(), 9, "disc-b"));
+        store.markAddressed(fixed.id());
+        Instant fixedAt = store.findingsOf(reviewId).stream()
+                .filter(f -> f.id().equals(fixed.id())).findFirst().orElseThrow().resolvedAt();
+
+        store.markApproved(open.id(), "romanbotnari");
+        store.markApproved(fixed.id(), "romanbotnari");
+
+        assertThat(store.openFindings(project.id(), 9)).isEmpty();
+        assertThat(store.findByDiscussion(project.id(), 9, "disc-a")).get()
+                .satisfies(f -> {
+                    assertThat(f.state()).isEqualTo(Finding.State.APPROVED);
+                    assertThat(f.approvedBy()).isEqualTo("romanbotnari");
+                    assertThat(f.resolvedAt()).isNotNull();
+                });
+        assertThat(store.findByDiscussion(project.id(), 9, "disc-b")).get()
+                .satisfies(f -> {
+                    assertThat(f.state()).isEqualTo(Finding.State.ADDRESSED);
+                    assertThat(f.approvedBy()).isNull();
+                    assertThat(f.resolvedAt()).isEqualTo(fixedAt);
+                });
+    }
+
     private Finding finding(String reviewId, String projectId, long mrIid, String discussionId) {
         return new Finding(Ids.newId(), reviewId, projectId, mrIid, "A.java", 42,
                 Finding.Severity.MAJOR, "title", "body", discussionId, "note-1", true,
@@ -746,7 +794,7 @@ class StoreTest {
 
     private Project project(String ownerId, String name) {
         return new Project(Ids.newId(), ownerId, name, true,
-                "https://gitlab.com", "group/" + name,                 "glpat-x", Ids.newSecret(),
+                "https://gitlab.com", "group/" + name, "glpat-x", null, Ids.newSecret(),
                 Project.Provider.ANTHROPIC, null, "claude-opus-5", "sk-x",
                 null, false, 1, List.of(), false, false, null, null, null, null, null, null, Instant.now());
     }

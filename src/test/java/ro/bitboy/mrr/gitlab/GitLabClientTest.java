@@ -285,6 +285,31 @@ class GitLabClientTest {
                 .isEqualTo("/api/v4/projects/g%2Fp/merge_requests/18/discussions?per_page=100&page=1");
     }
 
+    /**
+     * Who resolved the thread is the whole point of an approval, and GitLab hangs it off the
+     * note rather than the discussion. A leading system note carries no resolved_by.
+     */
+    @Test
+    void readsTheUserThatResolvedEachThread() throws Exception {
+        gitlab.enqueue(json("""
+                [
+                  {"id":"by-hand","notes":[
+                    {"id":"1","body":"resolved all threads","resolvable":false,"system":true},
+                    {"id":"2","body":"**[Major]** missing test","resolvable":true,
+                     "resolved":true,"resolved_by":{"username":"romanbotnari"},"system":false}]},
+                  {"id":"still-open","notes":[{"id":"3","body":"**[Minor]** typo",
+                    "resolvable":true,"resolved":false,"system":false}]}
+                ]
+                """));
+
+        var threads = client.listDiscussions(project("g/p"), 21);
+
+        assertThat(threads.get(0).resolved()).isTrue();
+        assertThat(threads.get(0).resolvedBy()).isEqualTo("romanbotnari");
+        assertThat(threads.get(1).resolved()).isFalse();
+        assertThat(threads.get(1).resolvedBy()).isNull();
+    }
+
     @Test
     void listsLaterDiscussionPagesAndPrefersTheDiscussionResolvedFlag() throws Exception {
         gitlab.enqueue(json("""
@@ -346,6 +371,114 @@ class GitLabClientTest {
         assertThat(client.gitMeta(project("g/p"), 1).commitCount()).isEqualTo(2);
     }
 
+    @Test
+    void listsMrCommits() throws Exception {
+        gitlab.enqueue(json("""
+                [{"id":"aaa111","title":"first","author_name":"Ada","authored_date":"2026-01-01T00:00:00Z","message":"first\\n"},
+                 {"id":"bbb222","title":"second","author_name":"Ada","created_at":"2026-01-02T00:00:00Z","message":"second"}]
+                """));
+
+        var commits = client.mrCommits(project("g/p"), 3);
+
+        assertThat(gitlab.takeRequest().getPath())
+                .isEqualTo("/api/v4/projects/g%2Fp/merge_requests/3/commits?per_page=100&page=1");
+        assertThat(commits).extracting(GitLabClient.MrCommit::sha)
+                .containsExactly("aaa111", "bbb222");
+        assertThat(commits.get(0).authorName()).isEqualTo("Ada");
+        assertThat(commits.get(1).authoredDate()).isEqualTo("2026-01-02T00:00:00Z");
+    }
+
+    private static final String TWO_FILE_COMMIT = """
+            [{"new_path":"A.java","old_path":"A.java","diff":"@@ -1 +1 @@\\n+int x;"},
+             {"new_path":"B.java","old_path":"B.java","diff":"@@ -2 +2 @@\\n+int y;"}]
+            """;
+
+    @Test
+    void commitFilesListsPathsWithoutPatchBodies() throws Exception {
+        gitlab.enqueue(json(TWO_FILE_COMMIT));
+
+        var paths = client.commitFiles(project("g/p"), "abc123");
+
+        assertThat(gitlab.takeRequest().getPath())
+                .isEqualTo("/api/v4/projects/g%2Fp/repository/commits/abc123/diff?per_page=100&page=1");
+        assertThat(paths).containsExactly("A.java", "B.java");
+    }
+
+    @Test
+    void commitFilesFollowsPaginationPastTheFirstPage() throws Exception {
+        gitlab.enqueue(json("""
+                [{"new_path":"A.java","diff":"@@\\n+int x;"}]
+                """).setHeader("X-Next-Page", "2"));
+        gitlab.enqueue(json("""
+                [{"new_path":"Z.java","diff":"@@\\n+int z;"}]
+                """));
+
+        var paths = client.commitFiles(project("g/p"), "abc123");
+
+        assertThat(paths).containsExactly("A.java", "Z.java");
+        assertThat(gitlab.takeRequest().getPath()).endsWith("/diff?per_page=100&page=1");
+        assertThat(gitlab.takeRequest().getPath()).endsWith("/diff?per_page=100&page=2");
+    }
+
+    @Test
+    void commitFilePatchReachesAFileOnALaterPage() throws Exception {
+        gitlab.enqueue(json("""
+                [{"new_path":"A.java","diff":"@@\\n+int x;"}]
+                """).setHeader("X-Next-Page", "2"));
+        gitlab.enqueue(json("""
+                [{"new_path":"Z.java","diff":"@@\\n+int z;"}]
+                """));
+
+        var patch = client.commitFilePatch(project("g/p"), "abc123", "Z.java");
+
+        assertThat(patch).isPresent();
+        assertThat(patch.get().diff()).contains("+int z;");
+    }
+
+    @Test
+    void commitFilePatchReturnsOnlyTheRequestedFile() throws Exception {
+        gitlab.enqueue(json(TWO_FILE_COMMIT));
+
+        var patch = client.commitFilePatch(project("g/p"), "abc123", "B.java");
+
+        gitlab.takeRequest();
+        assertThat(patch).isPresent();
+        assertThat(patch.get().path()).isEqualTo("B.java");
+        assertThat(patch.get().diff()).contains("+int y;").doesNotContain("+int x;");
+    }
+
+    @Test
+    void commitFilePatchIsEmptyForAFileTheCommitDidNotTouch() throws Exception {
+        gitlab.enqueue(json(TWO_FILE_COMMIT));
+
+        assertThat(client.commitFilePatch(project("g/p"), "abc123", "C.java")).isEmpty();
+    }
+
+    @Test
+    void commitEndpointsRejectTraversal() {
+        org.junit.jupiter.api.Assertions.assertThrows(ro.bitboy.mrr.web.ApiException.class,
+                () -> client.commitFiles(project("g/p"), "../etc/passwd"));
+        org.junit.jupiter.api.Assertions.assertThrows(ro.bitboy.mrr.web.ApiException.class,
+                () -> client.commitFilePatch(project("g/p"), "../etc/passwd", "A.java"));
+        org.junit.jupiter.api.Assertions.assertThrows(ro.bitboy.mrr.web.ApiException.class,
+                () -> client.commitFilePatch(project("g/p"), "abc123", " "));
+    }
+
+    @Test
+    void mergeSendsTheProjectToken() throws Exception {
+        gitlab.enqueue(json("""
+                {"iid":3,"title":"t","state":"merged","sha":"abc","web_url":"https://gl/3","draft":false}
+                """));
+
+        GitLabClient.MergeRequest merged = client.merge(project("g/p"), 3);
+
+        RecordedRequest request = gitlab.takeRequest();
+        assertThat(request.getMethod()).isEqualTo("PUT");
+        assertThat(request.getPath()).isEqualTo("/api/v4/projects/g%2Fp/merge_requests/3/merge");
+        assertThat(request.getHeader("PRIVATE-TOKEN")).isEqualTo("glpat-test");
+        assertThat(merged.state()).isEqualTo("merged");
+    }
+
     private MockResponse json(String body) {
         return new MockResponse()
                 .setHeader("Content-Type", "application/json")
@@ -355,7 +488,7 @@ class GitLabClientTest {
     private Project project(String gitlabProjectId) {
         return new Project("p1", "u1", "test", true,
                 gitlab.url("/").toString().replaceAll("/+$", ""), gitlabProjectId,
-                "glpat-test", "secret", Project.Provider.OPENAI_COMPAT, null,
+                "glpat-test", null, "secret", Project.Provider.OPENAI_COMPAT, null,
                 "m", "k", null, false, 1, java.util.List.of(), false,
                 false, null, null, null, null, null, null, Instant.now());
     }

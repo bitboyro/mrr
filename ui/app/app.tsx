@@ -11,6 +11,8 @@ type Project = {
   enabled: boolean;
   gitlabUrl: string;
   gitlabProjectId: string;
+  gitlabToken?: string | null;
+  gitlabOperatorToken?: string | null;
   provider: "ANTHROPIC" | "OPENAI_COMPAT";
   modelBaseUrl: string | null;
   model: string;
@@ -78,6 +80,7 @@ type Finding = {
   title: string;
   body: string;
   state: string;
+  approvedBy: string | null;
 };
 type Review = {
   id: string;
@@ -185,6 +188,7 @@ type InstanceStats = {
   tokensLast7Days: { input: number; output: number; cacheRead: number };
   findingsOpen: number;
   findingsAddressed: number;
+  findingsApproved: number;
   meanReadyDurationSeconds: number | null;
   failuresByKind: Record<string, number>;
   projects: {
@@ -291,7 +295,7 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 function pill(status: string) {
   const s = status.toUpperCase();
-  const cls = s === "CLEAN" || s === "READY" || s === "ADDRESSED" || s === "ENABLED" || s === "ON" || s === "MERGED" ? "ok"
+  const cls = s === "CLEAN" || s === "READY" || s === "ADDRESSED" || s === "APPROVED" || s === "ENABLED" || s === "ON" || s === "MERGED" ? "ok"
     : s === "NEEDS_WORK" || s === "OPEN" || s === "REVIEWING" || s === "PENDING"
       || s === "PROCESSING" || s === "RUNNING" || s === "INITIALIZE" || s === "REFRESH" ? "warn"
     : s === "FAILED" || s === "CANCELLED" || s === "BLOCKER" || s === "QUOTA" || s === "PROVIDER"
@@ -660,15 +664,28 @@ function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
         <thead><tr><th>Permission</th><th></th></tr></thead>
         <tbody>
           <tr><td>Merge Request: Approve</td><td>Auto-approve. Token identity must also be allowed to approve (rules, CODEOWNERS).</td></tr>
-          <tr><td>Repository: Read</td><td><code>read_file</code>, librarian</td></tr>
-          <tr><td>Commit: Read</td><td>Librarian tip SHA</td></tr>
+          <tr><td>Repository: Read</td><td><code>read_file</code>, librarian, per-commit diffs</td></tr>
+          <tr><td>Commit: Read</td><td>Librarian tip SHA, commit diffs</td></tr>
           <tr><td>Project: Read</td><td>Librarian metadata</td></tr>
         </tbody>
       </table>
       <p>
-        Do not grant Merge, repo write, Code: Push, Code: Read, or webhook scopes.
-        mrr never pushes, merges, or creates the hook.
+        Do not grant Merge, repo write, Code: Push, or webhook scopes on the <strong>review</strong> PAT.
+        mrr never pushes, and the hook is created in the GitLab UI.
       </p>
+      <h3>Operator PAT — optional, for merge and comments from mrr</h3>
+      <p>
+        A second token on the project, used only when you merge or post an overall thread
+        from the MR page. Keep Merge off the bot. This PAT is the identity GitLab will show
+        on those actions.
+      </p>
+      <table>
+        <thead><tr><th>Permission</th><th></th></tr></thead>
+        <tbody>
+          <tr><td>Merge Request: Merge</td><td>Merge from the MR page</td></tr>
+          <tr><td>Merge Request: Create</td><td>Overall thread from the MR page</td></tr>
+        </tbody>
+      </table>
       <p className="muted">
         Provider: <code>ANTHROPIC</code> or <code>OPENAI_COMPAT</code> (set base URL for Ollama / vLLM).
         First review: max turns 1, tools off.
@@ -693,13 +710,15 @@ function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
         <li>One <code>### mrr review</code> overview, edited in place</li>
         <li>One thread per finding</li>
         <li>Later commits: the model must return <code>prior</code> for every still-open id. <code>addressed</code> resolves that thread; a leftover related bug is a new finding</li>
-        <li>GitLab follows mrr: open findings stay unresolved (reopened if resolved by hand); addressed findings stay resolved (re-resolved if a comment reopened them)</li>
+        <li>Resolve a thread in GitLab and mrr marks that finding <code>APPROVED</code>, recording your username. It stops counting against the MR and the thread is left closed</li>
+        <li>GitLab follows mrr: open findings stay unresolved; closed ones — <code>ADDRESSED</code> by a commit, <code>APPROVED</code> by a person — stay resolved (re-resolved if a comment reopened them)</li>
         <li>A reply on a finding can close it when the model returns <code>status: addressed</code>. Do not comment “Closing this”</li>
       </ul>
       <p className="muted">
-        Resolving in GitLab does not mark addressed in mrr. Notes from the review PAT are
-        ignored. Title/label edits without a new SHA don’t spend tokens. Drafts are
-        reviewed unless Skip drafts is on.
+        <code>APPROVED</code> means a person signed the finding off, not that a commit fixed
+        it — mrr never invents that verdict for itself. Notes from the review PAT are
+        ignored, so mrr’s own resolves never read as approvals. Title/label edits without a
+        new SHA don’t spend tokens. Drafts are reviewed unless Skip drafts is on.
       </p>
 
       <h2>6. Optional</h2>
@@ -1298,6 +1317,7 @@ function MemoryPanel({ project, onRefresh }: { project: Project; onRefresh: () =
 function ProjectForm({ id }: { id?: string }) {
   const [form, setForm] = useState({
     name: "", gitlabUrl: "https://gitlab.com", gitlabProjectId: "", gitlabToken: "",
+    gitlabOperatorToken: "",
     provider: "ANTHROPIC" as Project["provider"], modelBaseUrl: "", model: "", modelKey: "", skill: "",
     skipDrafts: false, agentMaxTurns: 1, agentTools: "", autoApprove: false,
     librarianEnabled: false, enabled: true,
@@ -1406,6 +1426,7 @@ function ProjectForm({ id }: { id?: string }) {
       if (form.modelBaseUrl) body.modelBaseUrl = form.modelBaseUrl;
     }
     if (form.gitlabToken) body.gitlabToken = form.gitlabToken;
+    if (form.gitlabOperatorToken) body.gitlabOperatorToken = form.gitlabOperatorToken;
     if (form.modelKey) body.modelKey = form.modelKey;
     try {
       if (id) {
@@ -1479,6 +1500,11 @@ function ProjectForm({ id }: { id?: string }) {
         <div>
           <label>GitLab PAT {id && <span className="muted">(blank keeps current)</span>}</label>
           <input value={form.gitlabToken} onChange={(e) => set("gitlabToken", e.target.value)} />
+        </div>
+        <div>
+          <label>Operator PAT {id && <span className="muted">(blank keeps current)</span>}</label>
+          <input value={form.gitlabOperatorToken} onChange={(e) => set("gitlabOperatorToken", e.target.value)}
+            placeholder="Merge + overall thread from mrr" />
         </div>
         <div>
           <label>LLM</label>
@@ -1559,9 +1585,12 @@ function ProjectForm({ id }: { id?: string }) {
 
 function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
   const [cycle, setCycle] = useState<Cycle | null>(null);
+  const [project, setProject] = useState<Project | null>(null);
   const [card, setCard] = useState<MemoryDocument | null>(null);
   const [latest, setLatest] = useState<Review | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [actionErr, setActionErr] = useState<string | null>(null);
+  const [merging, setMerging] = useState(false);
 
   function load() {
     api<Cycle>(`/api/projects/${projectId}/merge-requests/${iid}`)
@@ -1574,6 +1603,7 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
           setLatest(null);
         }
       }).catch((e) => setErr(String(e.message)));
+    api<Project>(`/api/projects/${projectId}`).then(setProject).catch(() => setProject(null));
     api<MemoryDocument>(`/api/projects/${projectId}/memory/mrs/${iid}`)
       .then(setCard).catch(() => setCard(null));
   }
@@ -1582,11 +1612,28 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
 
   const reviewing = cycle?.status.currentStatus === "REVIEWING"
     || (cycle?.reviews.some((r) => r.state === "PENDING" || r.state === "PROCESSING") ?? false);
+  const closed = cycle?.status.currentStatus === "MERGED" || cycle?.status.currentStatus === "CLOSED";
+  const canOperate = !!project?.gitlabOperatorToken;
 
   async function rerun() {
     if (!cycle?.status.latestReviewId) return;
     await api(`/api/reviews/${cycle.status.latestReviewId}/rerun`, { method: "POST" });
     load();
+  }
+
+  async function merge() {
+    if (!canOperate || closed) return;
+    if (!window.confirm(`Merge !${iid} in GitLab as the operator PAT?`)) return;
+    setMerging(true);
+    setActionErr(null);
+    try {
+      await api(`/api/projects/${projectId}/merge-requests/${iid}/merge`, { method: "POST" });
+      load();
+    } catch (e) {
+      setActionErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMerging(false);
+    }
   }
 
   if (err) return <p className="err">{err}</p>;
@@ -1606,9 +1653,24 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
         {cycle.status.mrrApproved && <span className="pill ok">mrr approved</span>}
         {snapshot?.mr?.url && <a href={snapshot.mr.url} target="_blank" rel="noreferrer">GitLab</a>}
         {cycle.status.latestReviewId && <button onClick={rerun}>Re-run latest</button>}
+        {canOperate && !closed && (
+          <button className="danger" onClick={merge} disabled={merging}>
+            {merging ? "Merging…" : "Merge"}
+          </button>
+        )}
       </div>
       <GitMeta mr={snapshot?.mr} sha={snapshot?.headSha ?? cycle.status.latestHeadSha} />
       <p className="muted">{cycle.status.openFindings} open finding(s)</p>
+      {actionErr && <p className="err">{actionErr}</p>}
+      {canOperate && !closed && (
+        <MrThread projectId={projectId} iid={iid} onPosted={load} />
+      )}
+      {!canOperate && (
+        <p className="muted">
+          Set an operator PAT on the project to merge or post an overall thread from here.
+        </p>
+      )}
+      <CommitDiffs projectId={projectId} iid={iid} />
       <MrContext projectId={projectId} iid={iid} initial={cycle.status.userContext} onSaved={load} />
       {cycle.reviews.some((r) => r.state === "FAILED") && (
         <FailureBanner
@@ -1628,6 +1690,7 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
               </div>
               <p className="muted" style={{ margin: "6px 0 0" }}>
                 {f.filePath}{f.line ? `:${f.line}` : ""}
+                {f.approvedBy && ` — approved by @${f.approvedBy}`}
               </p>
             </div>
           ))}
@@ -1690,6 +1753,188 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
         <ReplyCard key={r.id} summary={r} />
       ))}
     </div>
+  );
+}
+
+function MrThread({ projectId, iid, onPosted }: {
+  projectId: string; iid: string; onPosted: () => void;
+}) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function post(e: FormEvent) {
+    e.preventDefault();
+    if (!text.trim()) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await api(`/api/projects/${projectId}/merge-requests/${iid}/discussions`, {
+        method: "POST", body: JSON.stringify({ body: text.trim() }),
+      });
+      setText("");
+      onPosted();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <details className="fold">
+      <summary>Overall thread</summary>
+      <p className="muted">
+        Posts a new GitLab discussion as the operator PAT — not a finding reply, and not the
+        review bot.
+      </p>
+      <form onSubmit={post}>
+        <textarea placeholder="Comment on the MR as a whole…"
+          value={text} onChange={(e) => setText(e.target.value)} />
+        {err && <p className="err">{err}</p>}
+        <p className="row">
+          <button className="primary" type="submit" disabled={busy || !text.trim()}>
+            {busy ? "Posting…" : "Post thread"}
+          </button>
+        </p>
+      </form>
+    </details>
+  );
+}
+
+type MrCommit = {
+  sha: string;
+  title: string;
+  authorName: string | null;
+  authoredDate: string | null;
+  message: string;
+};
+type FilePatch = { path: string; diff: string };
+
+function CommitDiffs({ projectId, iid }: { projectId: string; iid: string }) {
+  const [commits, setCommits] = useState<MrCommit[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [openSha, setOpenSha] = useState<string | null>(null);
+
+  async function load() {
+    setErr(null);
+    try {
+      setCommits(await api<MrCommit[]>(`/api/projects/${projectId}/merge-requests/${iid}/commits`));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  return (
+    <details className="fold" onToggle={(e) => {
+      if (e.currentTarget.open && commits === null && !err) load();
+    }}>
+      <summary>Commit diffs</summary>
+      <p className="muted">
+        View only. A patch is fetched when you unveil that one file — never before. No
+        comments from here.
+      </p>
+      {err && <p className="err">{err}</p>}
+      {commits === null && !err && <p className="muted">Open to load commits from GitLab…</p>}
+      {commits && commits.length === 0 && <p className="muted">No commits.</p>}
+      {commits?.map((c) => (
+        <div className="card" key={c.sha}>
+          <div className="row">
+            <code>{c.sha.slice(0, 8)}</code>
+            <strong>{c.title}</strong>
+            {c.authorName && <span className="muted">{c.authorName}</span>}
+            <button onClick={() => setOpenSha(openSha === c.sha ? null : c.sha)}>
+              {openSha === c.sha ? "Hide files" : "Show files"}
+            </button>
+          </div>
+          {openSha === c.sha && (
+            <CommitFiles projectId={projectId} iid={iid} sha={c.sha} />
+          )}
+        </div>
+      ))}
+    </details>
+  );
+}
+
+function CommitFiles({ projectId, iid, sha }: { projectId: string; iid: string; sha: string }) {
+  const [files, setFiles] = useState<string[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [open, setOpen] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    setFiles(null);
+    setErr(null);
+    setOpen(new Set());
+    api<string[]>(`/api/projects/${projectId}/merge-requests/${iid}/commits/${sha}/files`)
+      .then(setFiles)
+      .catch((e) => setErr(String((e as Error).message)));
+  }, [projectId, iid, sha]);
+
+  if (err) return <p className="err">{err}</p>;
+  if (!files) return <p className="muted">Loading files…</p>;
+  if (files.length === 0) return <p className="muted">No file changes in this commit.</p>;
+
+  function toggle(path: string) {
+    setOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }
+
+  return (
+    <div className="commit-files">
+      {files.map((path) => (
+        <div key={path} className="diff-file">
+          <button onClick={() => toggle(path)}>
+            {open.has(path) ? "Hide" : "Show"} {path}
+          </button>
+          {open.has(path) && (
+            <FilePatchView projectId={projectId} iid={iid} sha={sha} path={path} />
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** One file's patch, requested by this file's unveil and by nothing else. */
+function FilePatchView({ projectId, iid, sha, path }: {
+  projectId: string; iid: string; sha: string; path: string;
+}) {
+  const [patch, setPatch] = useState<FilePatch | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    setPatch(null);
+    setErr(null);
+    const url = `/api/projects/${projectId}/merge-requests/${iid}/commits/${sha}/diff`
+      + `?path=${encodeURIComponent(path)}`;
+    api<FilePatch>(url)
+      .then((p) => { if (live) setPatch(p); })
+      .catch((e) => { if (live) setErr(String((e as Error).message)); });
+    return () => { live = false; };
+  }, [projectId, iid, sha, path]);
+
+  if (err) return <p className="err">{err}</p>;
+  if (!patch) return <p className="muted">Loading patch…</p>;
+  return <DiffView text={patch.diff} />;
+}
+
+function DiffView({ text }: { text: string }) {
+  const lines = (text || "").split("\n");
+  return (
+    <pre className="diff-view">
+      {lines.map((line, i) => {
+        let cls = "";
+        if (line.startsWith("+") && !line.startsWith("+++")) cls = "add";
+        else if (line.startsWith("-") && !line.startsWith("---")) cls = "del";
+        else if (line.startsWith("@@")) cls = "hunk";
+        return <span key={i} className={cls}>{line}{"\n"}</span>;
+      })}
+    </pre>
   );
 }
 
@@ -2463,6 +2708,7 @@ function Configure() {
         <div className="stat"><strong>{stats.tokensLast7Days.output.toLocaleString()}</strong><span>Out (7d)</span></div>
         <div className="stat"><strong>{stats.findingsOpen}</strong><span>Open findings</span></div>
         <div className="stat"><strong>{stats.findingsAddressed}</strong><span>Addressed</span></div>
+        <div className="stat"><strong>{stats.findingsApproved}</strong><span>Approved by hand</span></div>
         <div className="stat"><strong>{stats.inFlight}</strong><span>In flight</span></div>
         <div className="stat"><strong>{stats.pendingOrProcessing}</strong><span>Queued</span></div>
         <div className="stat">

@@ -261,13 +261,17 @@ public class Reviewer {
                     review.id(), project.name(), review.mrIid(), existing.currentStatus());
             return;
         }
+        // Adopt hand-resolves first: a finding a human signed off is closed, and the cycle,
+        // the open count and the approval decision below must all see that.
+        List<GitLabClient.DiscussionView> threads = listThreads(project, review.mrIid());
+        adoptHumanResolves(project, review.mrIid(), threads);
         int open = store.openFindings(project.id(), review.mrIid()).size();
         MrStatus.Status status = open == 0 ? MrStatus.Status.CLEAN : MrStatus.Status.NEEDS_WORK;
         store.upsertMrStatus(project.id(), review.mrIid(), status,
                 review.id(), review.headSha(), open);
         // The in-memory review still has null discussion ids until markReady; re-read.
         Review posted = store.findReview(review.id()).orElse(review);
-        syncGitlabThreads(project, posted, open == 0);
+        syncGitlabThreads(project, posted, open == 0, threads);
         if (!project.autoApprove()) {
             return;
         }
@@ -396,20 +400,91 @@ public class Reviewer {
      * list did not return is left alone — that is how a first-page miss used to
      * re-resolve the overview every two minutes.
      */
-    private void syncGitlabThreads(Project project, Review review, boolean clean) {
-        List<GitLabClient.DiscussionView> threads = List.of();
-        try {
-            threads = gitlab.listDiscussions(project, review.mrIid());
-        } catch (Exception e) {
-            log.warn("could not list discussions on {}!{}: {}",
-                    project.name(), review.mrIid(), e.getMessage());
-        }
+    private void syncGitlabThreads(Project project, Review review, boolean clean,
+                                   List<GitLabClient.DiscussionView> threads) {
         Map<String, Boolean> current = new LinkedHashMap<>();
         for (GitLabClient.DiscussionView thread : threads) {
             current.put(thread.discussionId(), thread.resolved());
         }
         syncOverviewResolved(project, review, clean, threads, current);
         syncFindingThreads(project, review, current);
+    }
+
+    /** One listing per sync: adoption and the resolve/reopen pass read the same snapshot. */
+    private List<GitLabClient.DiscussionView> listThreads(Project project, long mrIid) {
+        try {
+            return gitlab.listDiscussions(project, mrIid);
+        } catch (Exception e) {
+            log.warn("could not list discussions on {}!{}: {}",
+                    project.name(), mrIid, e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * A human pressed Resolve on a finding thread. Nobody is claiming a commit fixed it, so
+     * this is not the model's ADDRESSED verdict — it becomes APPROVED and carries the username
+     * of whoever signed it off. mrr then stops reopening that thread and stops handing the
+     * finding to the model.
+     *
+     * <p>mrr resolves threads itself, so its own PAT must not read as an approver. That
+     * username costs a GitLab call, so it is looked up only once a resolved thread is actually
+     * sitting on an open finding — the steady state spends nothing. When the lookup fails the
+     * resolve is still adopted: an OPEN finding whose thread is resolved is a human's doing
+     * almost by definition, and refusing to adopt would strand the thread in a reopen loop.
+     *
+     * @return true when at least one finding changed state
+     */
+    private boolean adoptHumanResolves(Project project, long mrIid,
+                                       List<GitLabClient.DiscussionView> threads) {
+        Map<String, String> resolvers = new LinkedHashMap<>();
+        for (GitLabClient.DiscussionView thread : threads) {
+            if (thread.resolved() && thread.resolvedBy() != null) {
+                resolvers.put(thread.discussionId(), thread.resolvedBy());
+            }
+        }
+        if (resolvers.isEmpty()) {
+            return false;
+        }
+        String bot = null;
+        boolean botRead = false;
+        boolean changed = false;
+        for (Finding finding : store.findingsOfMr(project.id(), mrIid)) {
+            if (finding.state() != Finding.State.OPEN || finding.discussionId() == null) {
+                continue;
+            }
+            String resolver = resolvers.get(finding.discussionId());
+            if (resolver == null) {
+                continue;
+            }
+            if (!botRead) {
+                bot = botUsername(project);
+                botRead = true;
+            }
+            if (bot != null && bot.equalsIgnoreCase(resolver)) {
+                continue;
+            }
+            store.markApproved(finding.id(), resolver);
+            changed = true;
+            log.info("finding {} approved by {} on {}!{} — thread stays closed",
+                    finding.id(), resolver, project.name(), mrIid);
+        }
+        return changed;
+    }
+
+    /**
+     * The PAT's own username, or null when GitLab will not say. Null means "cannot tell the
+     * bot from a person", and the caller adopts the resolve anyway — losing the lookup must
+     * not cost a human their sign-off, which is what letting the failure out of here would do.
+     */
+    private String botUsername(Project project) {
+        try {
+            return gitlab.tokenUsername(project);
+        } catch (RuntimeException e) {
+            log.warn("could not read the GitLab token user for {} — adopting resolves anyway: {}",
+                    project.name(), e.getMessage());
+            return null;
+        }
     }
 
     private void setResolvedIfNeeded(Project project, long mrIid, Map<String, Boolean> current,
@@ -476,7 +551,15 @@ public class Reviewer {
                     null, null, Instant.now(), null, 0, null);
         }
         synchronized (lockFor(project.id(), mrIid)) {
-            syncGitlabThreads(project, review, status.openFindings() == 0);
+            List<GitLabClient.DiscussionView> threads = listThreads(project, mrIid);
+            int open = status.openFindings();
+            if (adoptHumanResolves(project, mrIid, threads)) {
+                open = store.openFindings(project.id(), mrIid).size();
+                store.upsertMrStatus(project.id(), mrIid,
+                        open == 0 ? MrStatus.Status.CLEAN : MrStatus.Status.NEEDS_WORK,
+                        status.latestReviewId(), status.latestHeadSha(), open);
+            }
+            syncGitlabThreads(project, review, open == 0, threads);
         }
     }
 
@@ -485,9 +568,11 @@ public class Reviewer {
     }
 
     /**
-     * mrr is source of truth for OPEN vs ADDRESSED. GitLab must match: still-open
-     * threads are reopened (a "resolve all" must not hide NEEDS_WORK); addressed
-     * threads are resolved again if a later comment reopened them.
+     * mrr is source of truth for whether a finding still stands. GitLab must match: OPEN
+     * threads are reopened (a "resolve all" must not hide NEEDS_WORK); closed ones —
+     * ADDRESSED by a commit or APPROVED by a human — are resolved again if a later comment
+     * reopened them. A hand-resolve is adopted before this runs, so it is honoured here
+     * rather than undone.
      */
     private void syncFindingThreads(Project project, Review review,
                                     Map<String, Boolean> current) {
@@ -495,7 +580,7 @@ public class Reviewer {
             if (finding.discussionId() == null) {
                 continue;
             }
-            boolean resolve = finding.state() == Finding.State.ADDRESSED;
+            boolean resolve = finding.state().isClosed();
             try {
                 setResolvedIfNeeded(project, review.mrIid(), current,
                         finding.discussionId(), resolve);

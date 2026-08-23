@@ -28,6 +28,7 @@ public class SchemaPatch {
 
     @PostConstruct
     void patch() {
+        addColumn("projects", "gitlab_operator_token", "TEXT");
         addColumn("projects", "agent_max_turns", "INTEGER NOT NULL DEFAULT 1");
         addColumn("projects", "agent_tools", "TEXT");
         addColumn("projects", "auto_approve", "INTEGER NOT NULL DEFAULT 0");
@@ -136,6 +137,7 @@ public class SchemaPatch {
         addColumn("reviews", "commit_count", "INTEGER");
         addColumn("reviews", "assignees", "TEXT");
         addColumn("reviews", "reviewers", "TEXT");
+        addColumn("findings", "approved_by", "TEXT");
         addColumn("reviews", "detailed_merge_status", "TEXT");
         addColumn("reviews", "diverged_commits_count", "INTEGER");
         addColumn("reviews", "has_conflicts", "INTEGER");

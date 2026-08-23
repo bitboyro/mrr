@@ -133,13 +133,15 @@ public class Store {
     public Project createProject(Project p) {
         db.sql("""
                 INSERT INTO projects (id, owner_id, name, enabled, gitlab_url, gitlab_project_id,
-                                      gitlab_token, webhook_secret, provider, model_base_url,
-                                      model, model_key, skill, skip_drafts, agent_max_turns,
-                                      agent_tools, auto_approve, librarian_enabled, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      gitlab_token, gitlab_operator_token, webhook_secret, provider,
+                                      model_base_url, model, model_key, skill, skip_drafts,
+                                      agent_max_turns, agent_tools, auto_approve, librarian_enabled,
+                                      created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)
                 .params(p.id(), p.ownerId(), p.name(), p.enabled() ? 1 : 0, p.gitlabUrl(),
-                        p.gitlabProjectId(), p.gitlabToken(), p.webhookSecret(), p.provider().name(),
+                        p.gitlabProjectId(), p.gitlabToken(), p.gitlabOperatorToken(),
+                        p.webhookSecret(), p.provider().name(),
                         p.modelBaseUrl(), p.model(), p.modelKey(), p.skill(), p.skipDrafts() ? 1 : 0,
                         p.agentMaxTurns(), toolsCsv(p.agentTools()), p.autoApprove() ? 1 : 0,
                         p.librarianEnabled() ? 1 : 0, p.createdAt().toString())
@@ -150,13 +152,15 @@ public class Store {
     public void updateProject(Project p) {
         db.sql("""
                 UPDATE projects SET name = ?, enabled = ?, gitlab_url = ?, gitlab_project_id = ?,
-                       gitlab_token = ?, webhook_secret = ?, provider = ?, model_base_url = ?,
+                       gitlab_token = ?, gitlab_operator_token = ?, webhook_secret = ?,
+                       provider = ?, model_base_url = ?,
                        model = ?, model_key = ?, skill = ?, skip_drafts = ?, agent_max_turns = ?,
                        agent_tools = ?, auto_approve = ?, librarian_enabled = ?
                 WHERE id = ?
                 """)
                 .params(p.name(), p.enabled() ? 1 : 0, p.gitlabUrl(), p.gitlabProjectId(),
-                        p.gitlabToken(), p.webhookSecret(), p.provider().name(), p.modelBaseUrl(),
+                        p.gitlabToken(), p.gitlabOperatorToken(), p.webhookSecret(),
+                        p.provider().name(), p.modelBaseUrl(),
                         p.model(), p.modelKey(), p.skill(), p.skipDrafts() ? 1 : 0,
                         p.agentMaxTurns(), toolsCsv(p.agentTools()), p.autoApprove() ? 1 : 0,
                         p.librarianEnabled() ? 1 : 0, p.id())
@@ -571,6 +575,20 @@ public class Store {
                 .update();
     }
 
+    /**
+     * A human resolved the thread on GitLab. That is an acceptance, not a fix, so it gets its
+     * own state and carries the username: "who signed this off" is the whole point of it.
+     *
+     * <p>Only an OPEN finding can be approved. An ADDRESSED one is already closed and its
+     * resolved_at is when the commit fixed it — overwriting that would lose the time-to-fix.
+     */
+    public void markApproved(String findingId, String username) {
+        db.sql("UPDATE findings SET state = ?, resolved_at = ?, approved_by = ? WHERE id = ? AND state = ?")
+                .params(Finding.State.APPROVED.name(), Instant.now().toString(), username,
+                        findingId, Finding.State.OPEN.name())
+                .update();
+    }
+
     public List<Finding> findingsOfMr(String projectId, long mrIid) {
         return db.sql("SELECT * FROM findings WHERE project_id = ? AND mr_iid = ? ORDER BY created_at")
                 .params(projectId, mrIid)
@@ -974,6 +992,8 @@ public class Store {
                 .param(Finding.State.OPEN.name()).query(Long.class).optional().orElse(0L);
         long findingsAddressed = db.sql("SELECT COUNT(*) FROM findings WHERE state = ?")
                 .param(Finding.State.ADDRESSED.name()).query(Long.class).optional().orElse(0L);
+        long findingsApproved = db.sql("SELECT COUNT(*) FROM findings WHERE state = ?")
+                .param(Finding.State.APPROVED.name()).query(Long.class).optional().orElse(0L);
         Double meanReady = meanReadyDurationSeconds();
         Map<String, Long> failures = new LinkedHashMap<>();
         db.sql("""
@@ -998,7 +1018,8 @@ public class Store {
                 rs.getLong("reviews"), rs.getLong("input_tokens"), rs.getLong("output_tokens")))
                 .list();
         return new InstanceStats(mrsProcessed, reviewsTotal, byState, inFlight, pendingOrProcessing,
-                tokens, last7, findingsOpen, findingsAddressed, meanReady, failures, projects);
+                tokens, last7, findingsOpen, findingsAddressed, findingsApproved,
+                meanReady, failures, projects);
     }
 
     private InstanceStats.TokenTotals tokenTotals(String sinceIso) {
@@ -1349,7 +1370,8 @@ public class Store {
         return new Project(
                 rs.getString("id"), rs.getString("owner_id"), rs.getString("name"),
                 rs.getInt("enabled") == 1, rs.getString("gitlab_url"), rs.getString("gitlab_project_id"),
-                rs.getString("gitlab_token"), rs.getString("webhook_secret"),
+                rs.getString("gitlab_token"), rs.getString("gitlab_operator_token"),
+                rs.getString("webhook_secret"),
                 Project.Provider.valueOf(rs.getString("provider")), rs.getString("model_base_url"),
                 rs.getString("model"), rs.getString("model_key"), rs.getString("skill"),
                 rs.getInt("skip_drafts") == 1,
@@ -1400,7 +1422,8 @@ public class Store {
                 Finding.Severity.valueOf(rs.getString("severity")), rs.getString("title"),
                 rs.getString("body"), rs.getString("discussion_id"), rs.getString("note_id"),
                 rs.getInt("inline") == 1, Finding.State.valueOf(rs.getString("state")),
-                instant(rs.getString("created_at")), instant(rs.getString("resolved_at")));
+                instant(rs.getString("created_at")), instant(rs.getString("resolved_at")),
+                rs.getString("approved_by"));
     }
 
     private static Reply toReply(ResultSet rs, int n) throws SQLException {

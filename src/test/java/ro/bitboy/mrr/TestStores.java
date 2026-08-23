@@ -37,7 +37,7 @@ public final class TestStores {
     public static Project project(String ownerId, String name, String webhookSecret,
                            boolean enabled, boolean skipDrafts) {
         return new Project(Ids.newId(), ownerId, name, enabled,
-                "https://gitlab.com", "group/" + name, "glpat-x", webhookSecret,
+                "https://gitlab.com", "group/" + name, "glpat-x", null, webhookSecret,
                 Project.Provider.ANTHROPIC, null, "claude-opus-5", "sk-x",
                 null, skipDrafts, 1, List.of(), false, false, null, null, null, null, null, null,
                 Instant.now());

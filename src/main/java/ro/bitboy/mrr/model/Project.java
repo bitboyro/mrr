@@ -9,13 +9,15 @@ import java.util.List;
  * A registered GitLab project. {@code gitlabUrl} is what makes self-hosted GitLab work —
  * nothing in mrr may assume gitlab.com.
  *
- * <p>{@code gitlabToken}, {@code webhookSecret}, and {@code modelKey} are stored in plaintext
- * in the SQLite file. That is a deliberate, flagged tradeoff for a private volume; encrypting
- * them later is one class and needs no schema change.
+ * <p>{@code gitlabToken}, {@code gitlabOperatorToken}, {@code webhookSecret}, and
+ * {@code modelKey} are stored in plaintext in the SQLite file. That is a deliberate,
+ * flagged tradeoff for a private volume; encrypting them later is one class and needs
+ * no schema change.
  */
 @Schema(description = """
-        A registered GitLab project. The three secrets — `gitlabToken`, `webhookSecret`, and \
-        `modelKey` — are write-only: accepted on create and update, always masked on read.""")
+        A registered GitLab project. Secrets — `gitlabToken`, `gitlabOperatorToken`, \
+        `webhookSecret`, and `modelKey` — are write-only: accepted on create and update, \
+        always masked on read.""")
 public record Project(
         String id,
         @Schema(description = "The user that registered it. Only this user and admins can see it.")
@@ -27,7 +29,10 @@ public record Project(
                 + "self-hosted work.", example = "https://gitlab.com") String gitlabUrl,
         @Schema(description = "Numeric id or `group/project` path.", example = "bitboy.ro/test-repo")
         String gitlabProjectId,
-        @Schema(description = "Masked on read.", example = "****v38q") String gitlabToken,
+        @Schema(description = "Review-loop PAT. Masked on read.", example = "****v38q") String gitlabToken,
+        @Schema(description = "Optional PAT for merging and posting an overall thread from mrr. "
+                + "Kept separate so the review bot never needs Merge. Masked on read.",
+                nullable = true, example = "****ab12") String gitlabOperatorToken,
         @Schema(description = "Masked on read. Readable only in the create response.",
                 example = "****e091") String webhookSecret,
         Provider provider,
@@ -85,13 +90,33 @@ public record Project(
         return agentTools.contains(name);
     }
 
+    public boolean hasOperatorToken() {
+        return gitlabOperatorToken != null && !gitlabOperatorToken.isBlank();
+    }
+
+    /** Same project, a different PRIVATE-TOKEN — used to act as the operator PAT. */
+    public Project withGitlabToken(String token) {
+        return new Project(id, ownerId, name, enabled, gitlabUrl, gitlabProjectId,
+                token, gitlabOperatorToken, webhookSecret, provider, modelBaseUrl, model,
+                modelKey, skill, skipDrafts, agentMaxTurns, agentTools, autoApprove,
+                librarianEnabled, memoryHeadSha, memoryStatus, memoryRefreshedAt,
+                lastErrorKind, lastError, lastErrorAt, createdAt);
+    }
+
+    public Project asOperator() {
+        if (!hasOperatorToken()) {
+            throw new IllegalStateException("gitlabOperatorToken is not set");
+        }
+        return withGitlabToken(gitlabOperatorToken);
+    }
+
     /** Never let secrets out over the API. */
     public Project redacted() {
         return new Project(id, ownerId, name, enabled, gitlabUrl, gitlabProjectId,
-                mask(gitlabToken), mask(webhookSecret), provider, modelBaseUrl, model,
-                mask(modelKey), skill, skipDrafts, agentMaxTurns, agentTools, autoApprove,
-                librarianEnabled, memoryHeadSha, memoryStatus, memoryRefreshedAt,
-                lastErrorKind, lastError, lastErrorAt, createdAt);
+                mask(gitlabToken), mask(gitlabOperatorToken), mask(webhookSecret), provider,
+                modelBaseUrl, model, mask(modelKey), skill, skipDrafts, agentMaxTurns,
+                agentTools, autoApprove, librarianEnabled, memoryHeadSha, memoryStatus,
+                memoryRefreshedAt, lastErrorKind, lastError, lastErrorAt, createdAt);
     }
 
     private static String mask(String secret) {
