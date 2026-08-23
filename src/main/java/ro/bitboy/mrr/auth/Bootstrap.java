@@ -4,6 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import ro.bitboy.mrr.MrrProperties;
 import ro.bitboy.mrr.model.Role;
@@ -25,6 +26,7 @@ import java.util.Set;
  * hash. Losing it means adding another admin by hand or starting over.
  */
 @Component
+@Order(10)
 public class Bootstrap implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(Bootstrap.class);

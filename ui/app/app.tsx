@@ -5,6 +5,7 @@ import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "reac
 const TOKEN_KEY = "mrr.token";
 
 type Me = { userId: string; name: string; role: "ADMIN" | "USER" };
+type Provider = "ANTHROPIC" | "OPENAI_COMPAT";
 type Project = {
   id: string;
   name: string;
@@ -13,9 +14,10 @@ type Project = {
   gitlabProjectId: string;
   gitlabToken?: string | null;
   gitlabOperatorToken?: string | null;
-  provider: "ANTHROPIC" | "OPENAI_COMPAT";
-  modelBaseUrl: string | null;
-  model: string;
+  // The model configuration is the catalog entry's, resolved on every read. `llm` is that
+  // entry with its key masked; the project stores only the reference.
+  llmProviderId: string;
+  llm: LlmProvider | null;
   skill: string | null;
   skipDrafts: boolean;
   agentMaxTurns: number;
@@ -163,13 +165,15 @@ type LibrarySkill = {
   createdAt: string;
   updatedAt: string;
 };
-type GitlabInstance = { id: string; name: string; url: string; createdAt: string };
+type GitlabInstance = { id: string; ownerId: string | null; name: string; url: string; createdAt: string };
 type LlmProvider = {
   id: string;
+  ownerId: string | null;   // null = shared entry, curated by an admin, never carries a key
   name: string;
-  provider: Project["provider"];
+  provider: Provider;
   model: string;
   modelBaseUrl: string | null;
+  modelKey: string | null;  // masked on read; a shared entry has none
   createdAt: string;
 };
 type InstanceInfo = { baseUrl: string; webhookUrlTemplate: string };
@@ -211,6 +215,8 @@ type TokenInfo = { id: string; name: string; prefix: string; createdAt: string; 
 
 type Route =
   | { name: "howto" }
+  | { name: "skills" }
+  | { name: "stats" }
   | { name: "projects" }
   | { name: "project"; id: string }
   | { name: "edit"; id: string }
@@ -228,6 +234,8 @@ function parseRoute(path: string): Route {
   if (path === "/admin") return { name: "admin" };
   if (path === "/logs") return { name: "logs" };
   if (path === "/configure") return { name: "configure" };
+  if (path === "/skills") return { name: "skills" };
+  if (path === "/stats") return { name: "stats" };
   let m = path.match(/^\/projects\/([^/]+)\/edit$/);
   if (m) return { name: "edit", id: m[1] };
   m = path.match(/^\/projects\/([^/]+)\/mrs\/(\d+)$/);
@@ -545,6 +553,8 @@ export default function App() {
             {me.role === "ADMIN" && (
               <>
                 <a href="/configure" onClick={(e) => { e.preventDefault(); go("/configure"); }}>Configure</a>
+                <a href="/skills" onClick={(e) => { e.preventDefault(); go("/skills"); }}>Skills</a>
+                <a href="/stats" onClick={(e) => { e.preventDefault(); go("/stats"); }}>Stats</a>
                 <a href="/logs" onClick={(e) => { e.preventDefault(); go("/logs"); }}>Logs</a>
                 <a href="/admin" onClick={(e) => { e.preventDefault(); go("/admin"); }}>Admin</a>
               </>
@@ -565,6 +575,8 @@ export default function App() {
         {route.name === "admin" && me.role === "ADMIN" && <Admin />}
         {route.name === "logs" && me.role === "ADMIN" && <Logs />}
         {route.name === "configure" && me.role === "ADMIN" && <Configure />}
+        {route.name === "skills" && me.role === "ADMIN" && <SkillLibrary />}
+        {route.name === "stats" && me.role === "ADMIN" && <Stats />}
       </div>
     );
   }
@@ -784,7 +796,7 @@ function Projects() {
             {p.librarianEnabled && <span className="pill">librarian</span>}
             {p.lastErrorKind && pill(p.lastErrorKind)}
             <span className="muted">{p.gitlabProjectId}</span>
-            <span className="muted" style={{ marginLeft: "auto" }}>{p.model}</span>
+            <span className="muted" style={{ marginLeft: "auto" }}>{p.llm?.model ?? "—"}</span>
           </div>
         </div>
       ))}
@@ -813,7 +825,7 @@ function ProjectHome({ id }: { id: string }) {
         <button onClick={() => go(`/projects/${id}/edit`)}>Edit</button>
       </div>
       <p className="muted">
-        {project.gitlabUrl}/{project.gitlabProjectId} · {project.model}
+        {project.gitlabUrl}/{project.gitlabProjectId} · {project.llm?.model ?? "no entry"}
         {project.autoApprove ? " · auto-approve on" : ""}
         {project.librarianEnabled ? " · librarian on" : ""}
         {project.memoryStatus && project.memoryStatus !== "NONE" ? ` · memory ${project.memoryStatus}` : ""}
@@ -1333,8 +1345,7 @@ function MemoryPanel({ project, onRefresh }: { project: Project; onRefresh: () =
 function ProjectForm({ id }: { id?: string }) {
   const [form, setForm] = useState({
     name: "", gitlabUrl: "https://gitlab.com", gitlabProjectId: "", gitlabToken: "",
-    gitlabOperatorToken: "",
-    provider: "ANTHROPIC" as Project["provider"], modelBaseUrl: "", model: "", modelKey: "", skill: "",
+    gitlabOperatorToken: "", skill: "",
     skipDrafts: false, agentMaxTurns: 1, agentTools: "", autoApprove: false,
     librarianEnabled: false, enabled: true,
   });
@@ -1344,7 +1355,7 @@ function ProjectForm({ id }: { id?: string }) {
   const [llmProviders, setLlmProviders] = useState<LlmProvider[]>([]);
   const [instance, setInstance] = useState<InstanceInfo | null>(null);
   const [gitlabPick, setGitlabPick] = useState("custom");
-  const [llmPick, setLlmPick] = useState("custom");
+  const [llmPick, setLlmPick] = useState("");
 
   useEffect(() => {
     Promise.all([
@@ -1380,9 +1391,6 @@ function ProjectForm({ id }: { id?: string }) {
       name: p.name,
       gitlabUrl: p.gitlabUrl,
       gitlabProjectId: p.gitlabProjectId,
-      provider: p.provider,
-      modelBaseUrl: p.modelBaseUrl ?? "",
-      model: p.model,
       skill: p.skill ?? "",
       skipDrafts: p.skipDrafts,
       agentMaxTurns: p.agentMaxTurns,
@@ -1391,6 +1399,14 @@ function ProjectForm({ id }: { id?: string }) {
       librarianEnabled: p.librarianEnabled,
       enabled: p.enabled,
     }))).catch((e) => setErr(String(e.message)));
+  }, [id]);
+
+  // Editing an existing project starts on the entry it already references.
+  useEffect(() => {
+    if (!id) return;
+    api<Project>(`/api/projects/${id}`)
+      .then((p) => setLlmPick(p.llmProviderId))
+      .catch(() => { /* the form's own load reports the error */ });
   }, [id]);
 
   function set<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
@@ -1402,20 +1418,6 @@ function ProjectForm({ id }: { id?: string }) {
     if (value === "custom") return;
     const host = gitlabInstances.find((g) => g.id === value);
     if (host) set("gitlabUrl", host.url);
-  }
-
-  function pickLlm(value: string) {
-    setLlmPick(value);
-    if (value === "custom") return;
-    const provider = llmProviders.find((p) => p.id === value);
-    if (provider) {
-      setForm((f) => ({
-        ...f,
-        provider: provider.provider,
-        model: provider.model,
-        modelBaseUrl: provider.modelBaseUrl ?? "",
-      }));
-    }
   }
 
   async function submit(e: FormEvent) {
@@ -1435,22 +1437,20 @@ function ProjectForm({ id }: { id?: string }) {
     };
     if (gitlabPick !== "custom") body.gitlabInstanceId = gitlabPick;
     else body.gitlabUrl = form.gitlabUrl;
-    if (llmPick !== "custom") body.llmProviderId = llmPick;
-    else {
-      body.provider = form.provider;
-      body.model = form.model;
-      if (form.modelBaseUrl) body.modelBaseUrl = form.modelBaseUrl;
-    }
+    body.llmProviderId = llmPick;
     if (form.gitlabToken) body.gitlabToken = form.gitlabToken;
     if (form.gitlabOperatorToken) body.gitlabOperatorToken = form.gitlabOperatorToken;
-    if (form.modelKey) body.modelKey = form.modelKey;
     try {
       if (id) {
         await api(`/api/projects/${id}`, { method: "PUT", body: JSON.stringify(body) });
         go(`/projects/${id}`);
       } else {
-        if (!form.gitlabToken || !form.modelKey) {
-          setErr("GitLab token and model key are required.");
+        if (!form.gitlabToken) {
+          setErr("A GitLab token is required.");
+          return;
+        }
+        if (!llmPick) {
+          setErr("Pick an LLM entry. Add one under Configure — the model key lives there.");
           return;
         }
         const created = await api<{ project: Project; webhookUrl: string; webhookSecret: string }>(
@@ -1480,7 +1480,6 @@ function ProjectForm({ id }: { id?: string }) {
     ? instance.webhookUrlTemplate.replace("{projectId}", "<project-id>")
     : null;
   const gitlabLocked = gitlabPick !== "custom";
-  const llmLocked = llmPick !== "custom";
 
   return (
     <form onSubmit={submit}>
@@ -1524,34 +1523,20 @@ function ProjectForm({ id }: { id?: string }) {
         </div>
         <div>
           <label>LLM</label>
-          <select value={llmPick} onChange={(e) => pickLlm(e.target.value)}>
-            <option value="custom">Custom provider</option>
+          <select value={llmPick} onChange={(e) => setLlmPick(e.target.value)} required>
+            <option value="">Pick an entry…</option>
             {llmProviders.map((p) => (
-              <option key={p.id} value={p.id}>{p.name} — {p.model}</option>
+              <option key={p.id} value={p.id} disabled={!p.modelKey}>
+                {p.name} — {p.model}{p.modelKey ? "" : " (shared, no key)"}
+              </option>
             ))}
           </select>
-        </div>
-        <div>
-          <label>Provider</label>
-          <select value={form.provider} disabled={llmLocked}
-            onChange={(e) => { setLlmPick("custom"); set("provider", e.target.value as Project["provider"]); }}>
-            <option>ANTHROPIC</option>
-            <option>OPENAI_COMPAT</option>
-          </select>
-        </div>
-        <div>
-          <label>Model</label>
-          <input value={form.model} readOnly={llmLocked} required={!llmLocked}
-            onChange={(e) => { setLlmPick("custom"); set("model", e.target.value); }} />
-        </div>
-        <div>
-          <label>Model base URL</label>
-          <input value={form.modelBaseUrl} readOnly={llmLocked}
-            onChange={(e) => { setLlmPick("custom"); set("modelBaseUrl", e.target.value); }} />
-        </div>
-        <div>
-          <label>Model key {id && <span className="muted">(blank keeps current)</span>}</label>
-          <input value={form.modelKey} onChange={(e) => set("modelKey", e.target.value)} />
+          <p className="muted">
+            The model, its base URL and its API key all come from this entry, and the project
+            follows it — change the key under <a href="/configure">Configure</a> and every
+            project using it moves with it. Shared entries carry no key, so they cannot be
+            picked; add your own.
+          </p>
         </div>
       </div>
       <label>Initial review skill {id && <span className="muted">(managed on the project page)</span>}</label>
@@ -2297,15 +2282,13 @@ function Logs() {
 
 function Configure() {
   const [settings, setSettings] = useState<SettingsView | null>(null);
-  const [stats, setStats] = useState<InstanceStats | null>(null);
-  const [library, setLibrary] = useState<LibrarySkill[]>([]);
   const [gitlabInstances, setGitlabInstances] = useState<GitlabInstance[]>([]);
   const [llmProviders, setLlmProviders] = useState<LlmProvider[]>([]);
   const [draft, setDraft] = useState<Record<string, string>>({});
-  const [libDraft, setLibDraft] = useState({ name: "", body: "" });
   const [gitlabDraft, setGitlabDraft] = useState({ name: "", url: "https://gitlab.com" });
   const [llmDraft, setLlmDraft] = useState({
-    name: "", provider: "ANTHROPIC" as Project["provider"], model: "", modelBaseUrl: "",
+    name: "", provider: "ANTHROPIC" as Provider, model: "", modelBaseUrl: "",
+    modelKey: "", shared: false,
   });
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -2313,14 +2296,10 @@ function Configure() {
   function load() {
     Promise.all([
       api<SettingsView>("/api/settings"),
-      api<InstanceStats>("/api/stats"),
-      api<LibrarySkill[]>("/api/skills"),
       api<GitlabInstance[]>("/api/gitlab-instances"),
       api<LlmProvider[]>("/api/llm-providers"),
-    ]).then(([s, st, lib, hosts, providers]) => {
+    ]).then(([s, hosts, providers]) => {
       setSettings(s);
-      setStats(st);
-      setLibrary(lib);
       setGitlabInstances(hosts);
       setLlmProviders(providers);
       const next: Record<string, string> = {};
@@ -2392,22 +2371,8 @@ function Configure() {
     }
   }
 
-  async function addLibrary(e: FormEvent) {
-    e.preventDefault();
-    await api("/api/skills", { method: "POST", body: JSON.stringify(libDraft) });
-    setLibDraft({ name: "", body: "" });
-    load();
-  }
 
-  async function saveLibrary(s: LibrarySkill, body: string) {
-    await api(`/api/skills/${s.id}`, { method: "PUT", body: JSON.stringify({ body }) });
-    load();
-  }
 
-  async function removeLibrary(id: string) {
-    await api(`/api/skills/${id}`, { method: "DELETE" });
-    load();
-  }
 
   async function addGitlab(e: FormEvent) {
     e.preventDefault();
@@ -2435,9 +2400,12 @@ function Configure() {
         provider: llmDraft.provider,
         model: llmDraft.model,
         modelBaseUrl: llmDraft.modelBaseUrl || null,
+        modelKey: llmDraft.modelKey || null,
+        shared: llmDraft.shared,
       }),
     });
-    setLlmDraft({ name: "", provider: "ANTHROPIC", model: "", modelBaseUrl: "" });
+    setLlmDraft({ name: "", provider: "ANTHROPIC", model: "", modelBaseUrl: "",
+      modelKey: "", shared: false });
     load();
   }
 
@@ -2502,7 +2470,7 @@ function Configure() {
     },
   ];
 
-  if (!settings || !stats) return <p className="muted">Loading configure…</p>;
+  if (!settings) return <p className="muted">Loading configure…</p>;
 
   const restartOnly: { key: string; label: string; help: string }[] = [
     { key: "serverPort", label: "SERVER_PORT", help: "HTTP port this process listens on." },
@@ -2576,14 +2544,19 @@ function Configure() {
 
       <h2>Model provider</h2>
       <p className="muted">
-        Named endpoints — provider, model, and optional base URL. No API key; keys stay on
-        the project. New Project can pick one of these or type custom values. Editing a row
-        does not rewrite existing projects.
+        Named endpoints — provider, model, optional base URL, and the API key projects bill
+        against. A project <strong>references</strong> an entry rather than copying it, so
+        changing the model or the key here moves every project using it on its next review.
+        An entry cannot be deleted while a project still points at it.
+      </p>
+      <p className="muted">
+        Entries you add are yours alone. A <em>shared</em> entry is visible to every account,
+        which is why it may not carry a key — only an admin can create one.
       </p>
       <table>
-        <thead><tr><th>Name</th><th>Provider</th><th>Model</th><th>Base URL</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Provider</th><th>Model</th><th>Base URL</th><th>API key</th><th></th></tr></thead>
         <tbody>
-          {llmProviders.length === 0 && <tr><td colSpan={5} className="muted">None yet.</td></tr>}
+          {llmProviders.length === 0 && <tr><td colSpan={6} className="muted">None yet.</td></tr>}
           {llmProviders.map((p) => (
             <tr key={p.id}>
               <td>
@@ -2592,7 +2565,7 @@ function Configure() {
               </td>
               <td>
                 <select defaultValue={p.provider} key={`${p.id}-provider-${p.provider}`}
-                  onChange={(e) => saveLlm(p, { provider: e.target.value as Project["provider"] })}>
+                  onChange={(e) => saveLlm(p, { provider: e.target.value as Provider })}>
                   <option>ANTHROPIC</option>
                   <option>OPENAI_COMPAT</option>
                 </select>
@@ -2609,18 +2582,29 @@ function Configure() {
                     if (next !== (p.modelBaseUrl ?? "")) saveLlm(p, { modelBaseUrl: next });
                   }} />
               </td>
+              <td>
+                {p.ownerId === null
+                  ? <span className="muted">shared — no key</span>
+                  : <input type="password" defaultValue="" key={`${p.id}-key`}
+                      placeholder={p.modelKey ?? "set a key"}
+                      onBlur={(e) => { if (e.target.value) saveLlm(p, { modelKey: e.target.value }); }} />}
+              </td>
               <td><button className="danger" onClick={() => removeLlm(p.id)}>Delete</button></td>
             </tr>
           ))}
         </tbody>
       </table>
+      <p className="muted">
+        The key field shows the masked current value as its placeholder and is write-only —
+        typing a new one rotates it for every project on that entry; leaving it blank keeps it.
+      </p>
       <form onSubmit={addLlm}>
         <label>New LLM provider</label>
         <div className="grid">
           <input placeholder="name" value={llmDraft.name}
             onChange={(e) => setLlmDraft({ ...llmDraft, name: e.target.value })} required />
           <select value={llmDraft.provider}
-            onChange={(e) => setLlmDraft({ ...llmDraft, provider: e.target.value as Project["provider"] })}>
+            onChange={(e) => setLlmDraft({ ...llmDraft, provider: e.target.value as Provider })}>
             <option>ANTHROPIC</option>
             <option>OPENAI_COMPAT</option>
           </select>
@@ -2628,7 +2612,17 @@ function Configure() {
             onChange={(e) => setLlmDraft({ ...llmDraft, model: e.target.value })} required />
           <input placeholder="model base URL (optional)" value={llmDraft.modelBaseUrl}
             onChange={(e) => setLlmDraft({ ...llmDraft, modelBaseUrl: e.target.value })} />
+          <input type="password" placeholder={llmDraft.shared ? "shared entries take no key" : "API key"}
+            value={llmDraft.modelKey} disabled={llmDraft.shared}
+            onChange={(e) => setLlmDraft({ ...llmDraft, modelKey: e.target.value })}
+            required={!llmDraft.shared} />
           <button className="primary" type="submit">Add</button>
+        </div>
+        <div className="toggles">
+          <Toggle on={llmDraft.shared}
+            onChange={(v) => setLlmDraft({ ...llmDraft, shared: v, modelKey: v ? "" : llmDraft.modelKey })}>
+            Shared with everyone (admin only, no key)
+          </Toggle>
         </div>
       </form>
 
@@ -2679,7 +2673,47 @@ function Configure() {
         </tbody>
       </table>
 
+    </div>
+  );
+}
+
+function SkillLibrary() {
+  const [library, setLibrary] = useState<LibrarySkill[]>([]);
+  const [libDraft, setLibDraft] = useState({ name: "", body: "" });
+  const [err, setErr] = useState<string | null>(null);
+
+  function load() {
+    api<LibrarySkill[]>("/api/skills")
+      .then(setLibrary)
+      .catch((e) => setErr(String((e as Error).message)));
+  }
+  useEffect(load, []);
+
+  async function addLibrary(e: FormEvent) {
+    e.preventDefault();
+    await api("/api/skills", { method: "POST", body: JSON.stringify(libDraft) });
+    setLibDraft({ name: "", body: "" });
+    load();
+  }
+
+  async function saveLibrary(s: LibrarySkill, body: string) {
+    await api(`/api/skills/${s.id}`, { method: "PUT", body: JSON.stringify({ body }) });
+    load();
+  }
+
+  async function removeLibrary(id: string) {
+    await api(`/api/skills/${id}`, { method: "DELETE" });
+    load();
+  }
+
+  return (
+    <div>
+      {err && <p className="err">{err}</p>}
       <h2>Skill library</h2>
+      <p className="muted">
+        The skills bundled with mrr are copied into every account's library on first sight, as
+        your own editable copies — tweak or delete them freely, and a deleted one stays deleted.
+      </p>
       <p className="muted">
         Instruction bodies owned by the user behind the API token. A project skill is an
         attachment; editing a body here updates every attached project. Delete is blocked
@@ -2712,7 +2746,24 @@ function Configure() {
         <textarea placeholder="instructions" value={libDraft.body}
           onChange={(e) => setLibDraft({ ...libDraft, body: e.target.value })} />
       </form>
+    </div>
+  );
+}
 
+function Stats() {
+  const [stats, setStats] = useState<InstanceStats | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    api<InstanceStats>("/api/stats")
+      .then(setStats)
+      .catch((e) => setErr(String((e as Error).message)));
+  }, []);
+
+  if (err) return <p className="err">{err}</p>;
+  if (!stats) return <p className="muted">Loading…</p>;
+  return (
+    <div>
       <h2>Stats</h2>
       <p className="muted">Token totals are from this version forward — older reviews show as zero.</p>
       <div className="stats-grid">

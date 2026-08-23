@@ -9,16 +9,19 @@ import java.util.List;
  * A registered GitLab project. {@code gitlabUrl} is what makes self-hosted GitLab work —
  * nothing in mrr may assume gitlab.com.
  *
- * <p>{@code gitlabToken}, {@code gitlabOperatorToken}, {@code webhookSecret}, and
- * {@code modelKey} are encrypted at rest by {@link ro.bitboy.mrr.secret.SecretBox} when a key
- * is configured, and stored in plaintext when one is not. Either way this record always holds
- * the cleartext — {@link ro.bitboy.mrr.store.Store} is the only place that seals and opens
- * them, and {@link #redacted()} is what keeps them off the API.
+ * <p>{@code gitlabToken}, {@code gitlabOperatorToken} and {@code webhookSecret} are encrypted
+ * at rest by {@link ro.bitboy.mrr.secret.SecretBox} when a key is configured, and stored in
+ * plaintext when one is not. Either way this record always holds the cleartext —
+ * {@link ro.bitboy.mrr.store.Store} is the only place that seals and opens them, and
+ * {@link #redacted()} is what keeps them off the API.
+ *
+ * <p>The model key is not among them. It lives on the {@link LlmProvider} this project
+ * references, so it is set and rotated in one place for every project using that entry.
  */
 @Schema(description = """
-        A registered GitLab project. Secrets — `gitlabToken`, `gitlabOperatorToken`, \
-        `webhookSecret`, and `modelKey` — are write-only: accepted on create and update, \
-        always masked on read.""")
+        A registered GitLab project. Secrets — `gitlabToken`, `gitlabOperatorToken` and \
+        `webhookSecret` — are write-only: accepted on create and update, always masked on \
+        read. The model and its API key come from the referenced catalog entry.""")
 public record Project(
         String id,
         @Schema(description = "The user that registered it. Only this user and admins can see it.")
@@ -36,11 +39,11 @@ public record Project(
                 nullable = true, example = "****ab12") String gitlabOperatorToken,
         @Schema(description = "Masked on read. Readable only in the create response.",
                 example = "****e091") String webhookSecret,
-        Provider provider,
-        @Schema(description = "OPENAI_COMPAT only. Null means OpenAI itself.",
-                nullable = true, example = "http://ollama:11434/v1") String modelBaseUrl,
-        @Schema(example = "claude-opus-5") String model,
-        @Schema(description = "Masked on read.", example = "****oosA") String modelKey,
+        @Schema(description = "Catalog entry supplying the provider, model, base URL and API "
+                + "key. Referenced, not copied — rotating the key on the entry moves this "
+                + "project with it.") String llmProviderId,
+        @Schema(description = "That entry, resolved and with its key masked. Read-only: write "
+                + "`llmProviderId`.", nullable = true) LlmProvider llm,
         @Schema(description = "Legacy single instruction blob. Prefer the skill set at "
                 + "`/api/projects/{id}/skills`. Used only when that set is empty.", nullable = true) String skill,
         @Schema(description = "Skip merge requests marked draft. Every push to a draft costs a "
@@ -87,6 +90,38 @@ public record Project(
         if (memoryStatus == null) memoryStatus = MemoryStatus.NONE;
     }
 
+    /**
+     * The model configuration is the catalog entry's, resolved by {@link
+     * ro.bitboy.mrr.store.Store} on every read. These four accessors exist so the review path
+     * keeps asking a project what model it uses, rather than every caller learning about the
+     * catalog. A project always has an entry — {@code llm_provider_id} is NOT NULL — so a null
+     * here means the row was built by hand without resolving it, which is a bug, not a state.
+     */
+    public Provider provider() {
+        return requireLlm().provider();
+    }
+
+    public String model() {
+        return requireLlm().model();
+    }
+
+    public String modelBaseUrl() {
+        return requireLlm().modelBaseUrl();
+    }
+
+    public String modelKey() {
+        return requireLlm().modelKey();
+    }
+
+    private LlmProvider requireLlm() {
+        if (llm == null) {
+            throw new IllegalStateException(
+                    "project " + id + " was loaded without resolving llmProviderId "
+                            + llmProviderId + " — Store must join the catalog entry");
+        }
+        return llm;
+    }
+
     public boolean toolEnabled(String name) {
         return agentTools.contains(name);
     }
@@ -98,8 +133,8 @@ public record Project(
     /** Same project, a different PRIVATE-TOKEN — used to act as the operator PAT. */
     public Project withGitlabToken(String token) {
         return new Project(id, ownerId, name, enabled, gitlabUrl, gitlabProjectId,
-                token, gitlabOperatorToken, webhookSecret, provider, modelBaseUrl, model,
-                modelKey, skill, skipDrafts, agentMaxTurns, agentTools, autoApprove,
+                token, gitlabOperatorToken, webhookSecret, llmProviderId, llm,
+                skill, skipDrafts, agentMaxTurns, agentTools, autoApprove,
                 librarianEnabled, memoryHeadSha, memoryStatus, memoryRefreshedAt,
                 lastErrorKind, lastError, lastErrorAt, createdAt);
     }
@@ -114,8 +149,9 @@ public record Project(
     /** Never let secrets out over the API. */
     public Project redacted() {
         return new Project(id, ownerId, name, enabled, gitlabUrl, gitlabProjectId,
-                mask(gitlabToken), mask(gitlabOperatorToken), mask(webhookSecret), provider,
-                modelBaseUrl, model, mask(modelKey), skill, skipDrafts, agentMaxTurns,
+                mask(gitlabToken), mask(gitlabOperatorToken), mask(webhookSecret),
+                llmProviderId, llm == null ? null : llm.redacted(),
+                skill, skipDrafts, agentMaxTurns,
                 agentTools, autoApprove, librarianEnabled, memoryHeadSha, memoryStatus,
                 memoryRefreshedAt, lastErrorKind, lastError, lastErrorAt, createdAt);
     }

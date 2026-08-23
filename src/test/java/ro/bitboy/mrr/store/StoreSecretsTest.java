@@ -5,6 +5,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.SimpleDriverDataSource;
 import ro.bitboy.mrr.TestStores;
+import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.User;
@@ -41,13 +42,14 @@ class StoreSecretsTest {
 
     private static Project seed(Store store) {
         User owner = store.createUser("owner", Role.ADMIN);
+        LlmProvider llm = TestStores.llmProvider(owner.id(), MODEL_KEY);
         Project project = new Project(
                 ro.bitboy.mrr.auth.Ids.newId(), owner.id(), "test-repo", true,
                 "https://gitlab.com", "group/test-repo", PAT, OPERATOR_PAT, WEBHOOK,
-                Project.Provider.ANTHROPIC, null, "claude-opus-5", MODEL_KEY,
+                llm.id(), llm,
                 null, false, 1, java.util.List.of(), false, false,
                 null, null, null, null, null, null, java.time.Instant.now());
-        return store.createProject(project);
+        return TestStores.persist(store, project);
     }
 
     @Test
@@ -56,8 +58,9 @@ class StoreSecretsTest {
         Project created = seed(store);
 
         var row = rawClient(dir).sql("""
-                SELECT gitlab_token, gitlab_operator_token, webhook_secret, model_key
-                FROM projects WHERE id = ?
+                SELECT p.gitlab_token, p.gitlab_operator_token, p.webhook_secret, l.model_key
+                FROM projects p JOIN llm_providers l ON l.id = p.llm_provider_id
+                WHERE p.id = ?
                 """)
                 .param(created.id())
                 .query((rs, n) -> java.util.List.of(
@@ -103,7 +106,7 @@ class StoreSecretsTest {
     void keepsAnAbsentOperatorTokenNull(@TempDir Path dir) {
         Store store = TestStores.sqlite(dir, box());
         User owner = store.createUser("owner", Role.ADMIN);
-        Project created = store.createProject(
+        Project created = TestStores.persist(store, 
                 TestStores.project(owner.id(), "no-operator", WEBHOOK));
 
         assertThat(store.findProject(created.id()).orElseThrow().gitlabOperatorToken()).isNull();

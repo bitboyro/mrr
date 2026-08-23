@@ -74,6 +74,57 @@ public class Store {
         return user;
     }
 
+    /**
+     * Gives a user any bundled skill they have not been offered before, as their own editable
+     * copy. Idempotent through {@code library_seeds} rather than through the library itself:
+     * the point is that deleting the copy is a decision, not something undone at the next boot.
+     * A name they already use is skipped but still recorded, so nothing is overwritten.
+     *
+     * @return how many copies were created
+     */
+    public int seedLibrarySkills(String ownerId, List<BundledSkills.Skill> bundled) {
+        int created = 0;
+        for (BundledSkills.Skill skill : bundled) {
+            Integer seeded = db.sql("SELECT count(*) FROM library_seeds WHERE owner_id = ? AND name = ?")
+                    .params(ownerId, skill.name()).query(Integer.class).single();
+            if (seeded != null && seeded > 0) {
+                continue;
+            }
+            String now = Instant.now().toString();
+            db.sql("INSERT INTO library_seeds (owner_id, name, seeded_at) VALUES (?, ?, ?)")
+                    .params(ownerId, skill.name(), now).update();
+            Integer clash = db.sql("SELECT count(*) FROM skill_library WHERE owner_id = ? AND name = ?")
+                    .params(ownerId, skill.name()).query(Integer.class).single();
+            if (clash != null && clash > 0) {
+                continue;
+            }
+            db.sql("""
+                    INSERT INTO skill_library (id, owner_id, name, body, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """).params(Ids.newId(), ownerId, skill.name(), skill.body(), now, now).update();
+            created++;
+        }
+        return created;
+    }
+
+    /**
+     * The one host almost every instance needs, as a shared entry so it is there for every
+     * account rather than retyped per user. Absent means someone deleted it deliberately —
+     * this only fills in a catalog that has never had it.
+     */
+    public boolean ensureSharedGitlabInstance(String name, String url) {
+        Integer existing = db.sql("SELECT count(*) FROM gitlab_instances WHERE owner_id IS NULL")
+                .query(Integer.class).single();
+        if (existing != null && existing > 0) {
+            return false;
+        }
+        db.sql("""
+                INSERT INTO gitlab_instances (id, owner_id, name, url, created_at)
+                VALUES (?, NULL, ?, ?, ?)
+                """).params(Ids.newId(), name, url, Instant.now().toString()).update();
+        return true;
+    }
+
     public List<User> listUsers() {
         return db.sql("SELECT * FROM users ORDER BY created_at").query(Store::toUser).list();
     }
@@ -138,20 +189,35 @@ public class Store {
 
     // ── projects ─────────────────────────────────────────────────────────────────────
 
+    /**
+     * Every project read resolves its catalog entry in the same statement. An inner join is
+     * right: {@code llm_provider_id} is NOT NULL and points at a row that cannot be deleted
+     * while a project references it, so a project with no entry is a broken invariant and
+     * should disappear from listings loudly rather than load with a null model.
+     */
+    private static final String PROJECT_SELECT = """
+            SELECT p.*,
+                   l.id AS llm_id, l.owner_id AS llm_owner_id, l.name AS llm_name,
+                   l.provider AS llm_provider, l.model AS llm_model,
+                   l.model_base_url AS llm_model_base_url, l.model_key AS llm_model_key,
+                   l.created_at AS llm_created_at
+            FROM projects p
+            JOIN llm_providers l ON l.id = p.llm_provider_id
+            """;
+
     public Project createProject(Project p) {
         db.sql("""
                 INSERT INTO projects (id, owner_id, name, enabled, gitlab_url, gitlab_project_id,
-                                      gitlab_token, gitlab_operator_token, webhook_secret, provider,
-                                      model_base_url, model, model_key, skill, skip_drafts,
+                                      gitlab_token, gitlab_operator_token, webhook_secret,
+                                      llm_provider_id, skill, skip_drafts,
                                       agent_max_turns, agent_tools, auto_approve, librarian_enabled,
                                       created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)
                 .params(p.id(), p.ownerId(), p.name(), p.enabled() ? 1 : 0, p.gitlabUrl(),
                         p.gitlabProjectId(), secrets.seal(p.gitlabToken()),
                         secrets.seal(p.gitlabOperatorToken()),
-                        secrets.seal(p.webhookSecret()), p.provider().name(),
-                        p.modelBaseUrl(), p.model(), secrets.seal(p.modelKey()), p.skill(),
+                        secrets.seal(p.webhookSecret()), p.llmProviderId(), p.skill(),
                         p.skipDrafts() ? 1 : 0,
                         p.agentMaxTurns(), toolsCsv(p.agentTools()), p.autoApprove() ? 1 : 0,
                         p.librarianEnabled() ? 1 : 0, p.createdAt().toString())
@@ -163,23 +229,21 @@ public class Store {
         db.sql("""
                 UPDATE projects SET name = ?, enabled = ?, gitlab_url = ?, gitlab_project_id = ?,
                        gitlab_token = ?, gitlab_operator_token = ?, webhook_secret = ?,
-                       provider = ?, model_base_url = ?,
-                       model = ?, model_key = ?, skill = ?, skip_drafts = ?, agent_max_turns = ?,
+                       llm_provider_id = ?, skill = ?, skip_drafts = ?, agent_max_turns = ?,
                        agent_tools = ?, auto_approve = ?, librarian_enabled = ?
                 WHERE id = ?
                 """)
                 .params(p.name(), p.enabled() ? 1 : 0, p.gitlabUrl(), p.gitlabProjectId(),
                         secrets.seal(p.gitlabToken()), secrets.seal(p.gitlabOperatorToken()),
                         secrets.seal(p.webhookSecret()),
-                        p.provider().name(), p.modelBaseUrl(),
-                        p.model(), secrets.seal(p.modelKey()), p.skill(), p.skipDrafts() ? 1 : 0,
+                        p.llmProviderId(), p.skill(), p.skipDrafts() ? 1 : 0,
                         p.agentMaxTurns(), toolsCsv(p.agentTools()), p.autoApprove() ? 1 : 0,
                         p.librarianEnabled() ? 1 : 0, p.id())
                 .update();
     }
 
     public Optional<Project> findProject(String id) {
-        return db.sql("SELECT * FROM projects WHERE id = ?").param(id)
+        return db.sql(PROJECT_SELECT + " WHERE p.id = ?").param(id)
                 .query(this::toProject).optional();
     }
 
@@ -199,18 +263,18 @@ public class Store {
     /** Admins list everything; everyone else lists only their own. */
     public List<Project> listProjects(Principal caller) {
         return caller.isAdmin()
-                ? db.sql("SELECT * FROM projects ORDER BY created_at").query(this::toProject).list()
-                : db.sql("SELECT * FROM projects WHERE owner_id = ? ORDER BY created_at")
+                ? db.sql(PROJECT_SELECT + " ORDER BY p.created_at").query(this::toProject).list()
+                : db.sql(PROJECT_SELECT + " WHERE p.owner_id = ? ORDER BY p.created_at")
                         .param(caller.userId()).query(this::toProject).list();
     }
 
     public List<Project> listEnabledProjects() {
-        return db.sql("SELECT * FROM projects WHERE enabled = 1 ORDER BY created_at")
+        return db.sql(PROJECT_SELECT + " WHERE p.enabled = 1 ORDER BY p.created_at")
                 .query(this::toProject).list();
     }
 
     public List<Project> listProjectsWithMemoryStatus(MemoryStatus status) {
-        return db.sql("SELECT * FROM projects WHERE memory_status = ? ORDER BY created_at")
+        return db.sql(PROJECT_SELECT + " WHERE p.memory_status = ? ORDER BY p.created_at")
                 .param(status.name()).query(this::toProject).list();
     }
 
@@ -885,31 +949,46 @@ public class Store {
 
     // ── GitLab / LLM catalogs ────────────────────────────────────────────────────────
 
-    public List<GitlabInstance> listGitlabInstances() {
-        return db.sql("SELECT * FROM gitlab_instances ORDER BY name")
+    /**
+     * A caller sees the shared entries plus their own. Admins see everything, exactly as they
+     * do with projects — the catalog now follows the ownership rule the rest of mrr already had.
+     */
+    private static final String VISIBLE = " WHERE (owner_id IS NULL OR owner_id = ? OR ?) ";
+
+    public List<GitlabInstance> listGitlabInstances(Principal caller) {
+        return db.sql("SELECT * FROM gitlab_instances" + VISIBLE + "ORDER BY name")
+                .params(caller.userId(), caller.isAdmin())
                 .query(Store::toGitlabInstance).list();
     }
 
-    public Optional<GitlabInstance> findGitlabInstance(String id) {
-        return db.sql("SELECT * FROM gitlab_instances WHERE id = ?")
-                .param(id).query(Store::toGitlabInstance).optional();
+    public Optional<GitlabInstance> findGitlabInstance(Principal caller, String id) {
+        return db.sql("SELECT * FROM gitlab_instances" + VISIBLE + "AND id = ?")
+                .params(caller.userId(), caller.isAdmin(), id)
+                .query(Store::toGitlabInstance).optional();
     }
 
-    public GitlabInstance createGitlabInstance(String name, String url) {
+    public GitlabInstance createGitlabInstance(Principal caller, boolean shared,
+                                               String name, String url) {
         String trimmed = requireName(name);
         String host = requireHttpUrl(url, "url");
-        GitlabInstance row = new GitlabInstance(Ids.newId(), trimmed, host, Instant.now());
+        GitlabInstance row = new GitlabInstance(Ids.newId(), shared ? null : caller.userId(),
+                trimmed, host, Instant.now());
         try {
-            db.sql("INSERT INTO gitlab_instances (id, name, url, created_at) VALUES (?, ?, ?, ?)")
-                    .params(row.id(), row.name(), row.url(), row.createdAt().toString()).update();
+            db.sql("""
+                    INSERT INTO gitlab_instances (id, owner_id, name, url, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """)
+                    .params(row.id(), row.ownerId(), row.name(), row.url(),
+                            row.createdAt().toString()).update();
         } catch (DataAccessException e) {
             throw ApiException.conflict("a GitLab instance named '" + trimmed + "' already exists");
         }
         return row;
     }
 
-    public GitlabInstance updateGitlabInstance(String id, String name, String url) {
-        GitlabInstance current = findGitlabInstance(id)
+    public GitlabInstance updateGitlabInstance(Principal caller, String id,
+                                               String name, String url) {
+        GitlabInstance current = findGitlabInstance(caller, id)
                 .orElseThrow(() -> ApiException.notFound("gitlab instance"));
         String nextName = name == null || name.isBlank() ? current.name() : requireName(name);
         String nextUrl = url == null || url.isBlank() ? current.url() : requireHttpUrl(url, "url");
@@ -919,68 +998,125 @@ public class Store {
         } catch (DataAccessException e) {
             throw ApiException.conflict("a GitLab instance named '" + nextName + "' already exists");
         }
-        return findGitlabInstance(id).orElseThrow();
+        return findGitlabInstance(caller, id).orElseThrow();
     }
 
-    public void deleteGitlabInstance(String id) {
-        if (db.sql("DELETE FROM gitlab_instances WHERE id = ?").param(id).update() == 0) {
-            throw ApiException.notFound("gitlab instance");
-        }
+    public void deleteGitlabInstance(Principal caller, String id) {
+        findGitlabInstance(caller, id).orElseThrow(() -> ApiException.notFound("gitlab instance"));
+        db.sql("DELETE FROM gitlab_instances WHERE id = ?").param(id).update();
     }
 
-    public List<LlmProvider> listLlmProviders() {
-        return db.sql("SELECT * FROM llm_providers ORDER BY name")
-                .query(Store::toLlmProvider).list();
+    public List<LlmProvider> listLlmProviders(Principal caller) {
+        return db.sql("SELECT * FROM llm_providers" + VISIBLE + "ORDER BY name")
+                .params(caller.userId(), caller.isAdmin())
+                .query(this::toLlmProvider).list();
     }
 
+    public Optional<LlmProvider> findLlmProvider(Principal caller, String id) {
+        return db.sql("SELECT * FROM llm_providers" + VISIBLE + "AND id = ?")
+                .params(caller.userId(), caller.isAdmin(), id)
+                .query(this::toLlmProvider).optional();
+    }
+
+    /** Unscoped: the review path resolves whatever entry the project already references. */
     public Optional<LlmProvider> findLlmProvider(String id) {
         return db.sql("SELECT * FROM llm_providers WHERE id = ?")
-                .param(id).query(Store::toLlmProvider).optional();
+                .param(id).query(this::toLlmProvider).optional();
     }
 
-    public LlmProvider createLlmProvider(String name, Project.Provider provider, String model,
-                                         String modelBaseUrl) {
-        String trimmed = requireName(name);
-        Project.Provider kind = requireProvider(provider);
-        String modelId = requireModel(model);
-        String base = optionalHttpUrl(modelBaseUrl, "modelBaseUrl");
-        LlmProvider row = new LlmProvider(Ids.newId(), trimmed, kind, modelId, base, Instant.now());
+    public int projectsUsingLlmProvider(String id) {
+        Integer n = db.sql("SELECT count(*) FROM projects WHERE llm_provider_id = ?")
+                .param(id).query(Integer.class).single();
+        return n == null ? 0 : n;
+    }
+
+    /** Inserts a row as given, the way {@link #createProject} takes a finished project. */
+    public LlmProvider createLlmProvider(LlmProvider row) {
         try {
             db.sql("""
-                    INSERT INTO llm_providers (id, name, provider, model, model_base_url, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """).params(row.id(), row.name(), row.provider().name(), row.model(),
-                    row.modelBaseUrl(), row.createdAt().toString()).update();
+                    INSERT INTO llm_providers
+                        (id, owner_id, name, provider, model, model_base_url, model_key, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """).params(row.id(), row.ownerId(), row.name(), row.provider().name(),
+                    row.model(), row.modelBaseUrl(), secrets.seal(row.modelKey()),
+                    row.createdAt().toString()).update();
         } catch (DataAccessException e) {
-            throw ApiException.conflict("an LLM provider named '" + trimmed + "' already exists");
+            throw ApiException.conflict("an LLM provider named '" + row.name() + "' already exists");
         }
         return row;
     }
 
-    public LlmProvider updateLlmProvider(String id, String name, Project.Provider provider,
-                                         String model, String modelBaseUrl) {
-        LlmProvider current = findLlmProvider(id)
+    public LlmProvider createLlmProvider(Principal caller, boolean shared, String name,
+                                         Project.Provider provider, String model,
+                                         String modelBaseUrl, String modelKey) {
+        String trimmed = requireName(name);
+        Project.Provider kind = requireProvider(provider);
+        String modelId = requireModel(model);
+        String base = optionalHttpUrl(modelBaseUrl, "modelBaseUrl");
+        String key = requireKeyRules(shared, modelKey);
+        return createLlmProvider(new LlmProvider(Ids.newId(), shared ? null : caller.userId(),
+                trimmed, kind, modelId, base, key, Instant.now()));
+    }
+
+    /**
+     * A shared entry may not hold a key: it is visible to every account on the instance, so a
+     * key on it is a credential handed to all of them. A private one must hold a key, because
+     * a project referencing it has nowhere else to get one.
+     */
+    private static String requireKeyRules(boolean shared, String modelKey) {
+        boolean present = modelKey != null && !modelKey.isBlank();
+        if (shared && present) {
+            throw ApiException.badRequest(
+                    "a shared entry cannot carry an API key — every account on this instance "
+                            + "can see it. Leave it unshared, or leave the key off.");
+        }
+        if (!shared && !present) {
+            throw ApiException.badRequest("modelKey is required: a project referencing this "
+                    + "entry has nowhere else to get one");
+        }
+        return present ? modelKey.trim() : null;
+    }
+
+    /** Omitting {@code modelKey} keeps the current one; sending one rotates every project. */
+    public LlmProvider updateLlmProvider(Principal caller, String id, String name,
+                                         Project.Provider provider, String model,
+                                         String modelBaseUrl, String modelKey) {
+        LlmProvider current = findLlmProvider(caller, id)
                 .orElseThrow(() -> ApiException.notFound("llm provider"));
         String nextName = name == null || name.isBlank() ? current.name() : requireName(name);
         Project.Provider nextKind = provider == null ? current.provider() : requireProvider(provider);
         String nextModel = model == null || model.isBlank() ? current.model() : requireModel(model);
         String nextBase = modelBaseUrl == null ? current.modelBaseUrl()
                 : optionalHttpUrl(modelBaseUrl, "modelBaseUrl");
+        String nextKey = modelKey == null || modelKey.isBlank()
+                ? current.modelKey() : modelKey.trim();
+        requireKeyRules(current.isShared(), nextKey);
         try {
             db.sql("""
-                    UPDATE llm_providers SET name = ?, provider = ?, model = ?, model_base_url = ?
+                    UPDATE llm_providers SET name = ?, provider = ?, model = ?, model_base_url = ?,
+                           model_key = ?
                     WHERE id = ?
-                    """).params(nextName, nextKind.name(), nextModel, nextBase, id).update();
+                    """).params(nextName, nextKind.name(), nextModel, nextBase,
+                    secrets.seal(nextKey), id).update();
         } catch (DataAccessException e) {
             throw ApiException.conflict("an LLM provider named '" + nextName + "' already exists");
         }
-        return findLlmProvider(id).orElseThrow();
+        return findLlmProvider(caller, id).orElseThrow();
     }
 
-    public void deleteLlmProvider(String id) {
-        if (db.sql("DELETE FROM llm_providers WHERE id = ?").param(id).update() == 0) {
-            throw ApiException.notFound("llm provider");
+    /**
+     * Refused while any project points at it. Projects reference this row rather than copying
+     * it, so deleting one out from under them would leave reviews with no key and no model —
+     * a 409 naming the count is more use than a foreign key SQLite is not enforcing anyway.
+     */
+    public void deleteLlmProvider(Principal caller, String id) {
+        findLlmProvider(caller, id).orElseThrow(() -> ApiException.notFound("llm provider"));
+        int inUse = projectsUsingLlmProvider(id);
+        if (inUse > 0) {
+            throw ApiException.conflict(inUse + " project(s) still use this entry. Point them at "
+                    + "another one first — deleting it would leave them with no model key.");
         }
+        db.sql("DELETE FROM llm_providers WHERE id = ?").param(id).update();
     }
 
     public InstanceStats instanceStats(long inFlight) {
@@ -1384,8 +1520,7 @@ public class Store {
                 secrets.open(rs.getString("gitlab_token")),
                 secrets.open(rs.getString("gitlab_operator_token")),
                 secrets.open(rs.getString("webhook_secret")),
-                Project.Provider.valueOf(rs.getString("provider")), rs.getString("model_base_url"),
-                rs.getString("model"), secrets.open(rs.getString("model_key")),
+                rs.getString("llm_provider_id"), toJoinedLlmProvider(rs),
                 rs.getString("skill"),
                 rs.getInt("skip_drafts") == 1,
                 rs.getInt("agent_max_turns") == 0 ? 1 : rs.getInt("agent_max_turns"),
@@ -1475,16 +1610,27 @@ public class Store {
     }
 
     private static GitlabInstance toGitlabInstance(ResultSet rs, int n) throws SQLException {
-        return new GitlabInstance(rs.getString("id"), rs.getString("name"),
-                rs.getString("url"), instant(rs.getString("created_at")));
+        return new GitlabInstance(rs.getString("id"), rs.getString("owner_id"),
+                rs.getString("name"), rs.getString("url"), instant(rs.getString("created_at")));
     }
 
-    private static LlmProvider toLlmProvider(ResultSet rs, int n) throws SQLException {
+    private LlmProvider toLlmProvider(ResultSet rs, int n) throws SQLException {
         return new LlmProvider(
-                rs.getString("id"), rs.getString("name"),
+                rs.getString("id"), rs.getString("owner_id"), rs.getString("name"),
                 Project.Provider.valueOf(rs.getString("provider")),
                 rs.getString("model"), rs.getString("model_base_url"),
+                secrets.open(rs.getString("model_key")),
                 instant(rs.getString("created_at")));
+    }
+
+    /** The same entry, read from the aliased columns {@link #PROJECT_SELECT} joins in. */
+    private LlmProvider toJoinedLlmProvider(ResultSet rs) throws SQLException {
+        return new LlmProvider(
+                rs.getString("llm_id"), rs.getString("llm_owner_id"), rs.getString("llm_name"),
+                Project.Provider.valueOf(rs.getString("llm_provider")),
+                rs.getString("llm_model"), rs.getString("llm_model_base_url"),
+                secrets.open(rs.getString("llm_model_key")),
+                instant(rs.getString("llm_created_at")));
     }
 
     private static AgentDocument toDocument(ResultSet rs, int n) throws SQLException {

@@ -47,7 +47,7 @@ class WebhookControllerTest {
     void setUp() {
         store = TestStores.sqlite(tempDir);
         User alice = store.createUser("alice", Role.USER);
-        project = store.createProject(TestStores.project(alice.id(), "calc", SECRET));
+        project = TestStores.persist(store, TestStores.project(alice.id(), "calc", SECRET));
         reviewer = new FakeReviewer();
         replier = new FakeReplier();
         memory = new FakeMemory();

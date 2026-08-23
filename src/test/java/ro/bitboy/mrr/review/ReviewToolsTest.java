@@ -15,6 +15,8 @@ import ro.bitboy.mrr.memory.MemoryActor;
 import ro.bitboy.mrr.memory.MemoryDocument;
 import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.memory.MemoryStore;
+import ro.bitboy.mrr.model.LlmProvider;
+import ro.bitboy.mrr.TestStores;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.store.Store;
@@ -45,9 +47,10 @@ class ReviewToolsTest {
                 tempDir.resolve("memory").toString(), null);
         memory = new MemoryService(new MemoryStore(db, properties));
         var user = store.createUser("alice", Role.USER);
-        Project project = store.createProject(new Project(Ids.newId(), user.id(), "calc", true,
+        LlmProvider llm = TestStores.llmProvider(user.id());
+        Project project = TestStores.persist(store, new Project(Ids.newId(), user.id(), "calc", true,
                 "https://gitlab.com", "g/calc", "glpat-x", null, Ids.newSecret(),
-                Project.Provider.ANTHROPIC, null, "claude-opus-5", "sk-x",
+                llm.id(), llm,
                 null, false, 1, List.of(), false, false, null, null, null, null, null, null, Instant.now()));
         projectId = project.id();
     }

@@ -38,7 +38,7 @@ class OpenMrScanTest {
     void setUp() {
         store = TestStores.sqlite(tempDir);
         User alice = store.createUser("alice", Role.USER);
-        project = store.createProject(TestStores.project(alice.id(), "calc", "hook-secret"));
+        project = TestStores.persist(store, TestStores.project(alice.id(), "calc", "hook-secret"));
         gitlab = new FakeGitLab();
         reviewer = new FakeReviewer();
         memory = new FakeMemory();
@@ -168,7 +168,7 @@ class OpenMrScanTest {
 
     @Test
     void skipsDraftsWhenTheProjectAsks() {
-        Project skipping = store.createProject(
+        Project skipping = TestStores.persist(store, 
                 TestStores.project(project.ownerId(), "drafty", "other-secret", true, true));
         gitlab.openMrs = List.of(
                 new GitLabClient.MergeRequest(3, "wip", "opened", "sha-d", "https://gl/3", true));

@@ -29,16 +29,17 @@ CREATE TABLE IF NOT EXISTS projects (
     -- GitLab: base_url is what makes self-hosted work. Never hardcode gitlab.com.
     gitlab_url        TEXT NOT NULL,
     gitlab_project_id TEXT NOT NULL,
-    -- The four secret columns. Sealed by SecretBox when a key is configured, so their
-    -- contents are opaque and never comparable with = in SQL. Nothing queries by them.
+    -- The secret columns. Sealed by SecretBox when a key is configured, so their contents
+    -- are opaque and never comparable with = in SQL. Nothing queries by them. The model
+    -- key is not among them any more: it lives on the referenced llm_providers row.
     gitlab_token      TEXT NOT NULL,
     gitlab_operator_token TEXT,                      -- optional; merge + human comments from mrr
     webhook_secret    TEXT NOT NULL,
 
-    provider          TEXT NOT NULL,                 -- ANTHROPIC | OPENAI_COMPAT
-    model_base_url    TEXT,
-    model             TEXT NOT NULL,
-    model_key         TEXT NOT NULL,
+    -- Which catalog entry supplies provider, model, base URL and API key. Referenced,
+    -- not copied: rotating the key on the entry moves every project that points at it.
+    -- SchemaPatch mints an entry per distinct inline config when upgrading an old database.
+    llm_provider_id   TEXT NOT NULL REFERENCES llm_providers(id),
 
     skill             TEXT,                          -- legacy single blob; agent_skills is the set
     skip_drafts       INTEGER NOT NULL DEFAULT 0,    -- draft MRs cost the same as any other
@@ -286,21 +287,57 @@ CREATE TABLE IF NOT EXISTS skill_library (
 
 CREATE INDEX IF NOT EXISTS idx_skill_library_owner ON skill_library(owner_id, name);
 
--- Named GitLab hosts (URL only — PATs stay on the project).
-CREATE TABLE IF NOT EXISTS gitlab_instances (
-    id         TEXT PRIMARY KEY,
-    name       TEXT NOT NULL UNIQUE,
-    url        TEXT NOT NULL,
-    created_at TEXT NOT NULL
+-- Which bundled skills a user has already been given. The copy is theirs to edit or delete,
+-- so this is what stops a deleted one reappearing on the next boot — and it is per skill
+-- rather than per user, so a skill added to a later release still reaches existing accounts.
+CREATE TABLE IF NOT EXISTS library_seeds (
+    owner_id  TEXT NOT NULL REFERENCES users(id),
+    name      TEXT NOT NULL,
+    seeded_at TEXT NOT NULL,
+    PRIMARY KEY (owner_id, name)
 );
 
--- Named LLM endpoints (no API key — keys stay on the project).
+-- Named GitLab hosts (URL only — PATs stay on the project).
+-- Named GitLab endpoints. Scoped the same way as llm_providers, minus the key: these
+-- hold only a URL, but a user's own list should not be everyone's.
+CREATE TABLE IF NOT EXISTS gitlab_instances (
+    id         TEXT PRIMARY KEY,
+    owner_id   TEXT REFERENCES users(id),            -- NULL = shared, curated by an admin
+    name       TEXT NOT NULL,
+    url        TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (owner_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gitlab_instances_owner ON gitlab_instances(owner_id);
+
+-- UNIQUE (owner_id, name) does not constrain shared rows: SQLite treats NULLs as distinct in
+-- a unique index, so every shared entry has a "different" owner. This is what actually keeps
+-- their names unique.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gitlab_instances_shared_name
+    ON gitlab_instances(name) WHERE owner_id IS NULL;
+
+-- Named LLM endpoints, including the API key. owner_id NULL is a shared row an admin
+-- curates for everyone and which may not hold a key; owner_id set is private to that
+-- user, may hold one, and is visible only to them and to admins. Projects reference a
+-- row rather than copying it, so the key is set and rotated here and nowhere else.
 CREATE TABLE IF NOT EXISTS llm_providers (
     id             TEXT PRIMARY KEY,
-    name           TEXT NOT NULL UNIQUE,
+    owner_id       TEXT REFERENCES users(id),        -- NULL = shared, curated by an admin
+    name           TEXT NOT NULL,
     provider       TEXT NOT NULL,
     model          TEXT NOT NULL,
     model_base_url TEXT,
-    created_at     TEXT NOT NULL
+    model_key      TEXT,                             -- sealed by SecretBox; NULL on shared rows
+    created_at     TEXT NOT NULL,
+    UNIQUE (owner_id, name)
 );
+
+CREATE INDEX IF NOT EXISTS idx_llm_providers_owner ON llm_providers(owner_id);
+
+-- UNIQUE (owner_id, name) does not constrain shared rows: SQLite treats NULLs as distinct in
+-- a unique index, so every shared entry has a "different" owner. This is what actually keeps
+-- their names unique.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_providers_shared_name
+    ON llm_providers(name) WHERE owner_id IS NULL;
 

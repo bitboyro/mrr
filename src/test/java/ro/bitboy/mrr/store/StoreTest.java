@@ -23,6 +23,7 @@ import ro.bitboy.mrr.model.LibrarySkill;
 import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.MergeRequestInfo;
 import ro.bitboy.mrr.model.MrStatus;
+import ro.bitboy.mrr.TestStores;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Reply;
 import ro.bitboy.mrr.model.Review;
@@ -107,8 +108,8 @@ class StoreTest {
 
     @Test
     void aUserSeesOnlyItsOwnProjectsAndAnAdminSeesAll() {
-        store.createProject(project(alice.id(), "alice-app"));
-        store.createProject(project(bob.id(), "bob-app"));
+        TestStores.persist(store, project(alice.id(), "alice-app"));
+        TestStores.persist(store, project(bob.id(), "bob-app"));
 
         assertThat(store.listProjects(principal(alice)))
                 .extracting(Project::name).containsExactly("alice-app");
@@ -118,7 +119,7 @@ class StoreTest {
 
     @Test
     void aNonOwnerGets404NotForbiddenSoExistenceDoesNotLeak() {
-        Project owned = store.createProject(project(alice.id(), "alice-app"));
+        Project owned = TestStores.persist(store, project(alice.id(), "alice-app"));
 
         assertThatThrownBy(() -> store.requireVisible(principal(bob), owned.id()))
                 .isInstanceOf(ApiException.class)
@@ -134,9 +135,10 @@ class StoreTest {
 
     @Test
     void operatorTokenIsStoredAndMaskedOnRead() {
-        Project created = store.createProject(new Project(Ids.newId(), alice.id(), "app", true,
+        LlmProvider llm = TestStores.llmProvider(alice.id());
+        Project created = TestStores.persist(store, new Project(Ids.newId(), alice.id(), "app", true,
                 "https://gitlab.com", "g/app", "glpat-review", "glpat-operator-token", Ids.newSecret(),
-                Project.Provider.ANTHROPIC, null, "claude-opus-5", "sk-x",
+                llm.id(), llm,
                 null, false, 1, List.of(), false, false, null, null, null, null, null, null,
                 Instant.now()));
 
@@ -149,7 +151,7 @@ class StoreTest {
 
     @Test
     void claimingTheSameHeadCommitTwiceReturnsTheOriginalReview() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
 
         Store.Claim first = store.claimReview(project.id(), 7, "abc123", "{}", mrInfo());
         Store.Claim redelivered = store.claimReview(project.id(), 7, "abc123", "{}", mrInfo());
@@ -168,7 +170,7 @@ class StoreTest {
 
     @Test
     void updateMergeRequestInfoPersistsHowFarTheBranchIsBehind() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         String id = store.claimReview(project.id(), 7, "abc123", "{}", mrInfo()).review().id();
 
         store.updateMergeRequestInfo(id, mrInfo().withGitMeta(
@@ -184,7 +186,7 @@ class StoreTest {
 
     @Test
     void reviewLifecycleReachesATerminalState() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         String id = store.claimReview(project.id(), 1, "sha", "{}", mrInfo()).review().id();
 
         store.markProcessing(id, "prompt");
@@ -208,7 +210,7 @@ class StoreTest {
 
     @Test
     void traceRoundTripsAndIsDroppedFromTheListView() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         String id = store.claimReview(project.id(), 1, "sha-trace", "{}", mrInfo()).review().id();
 
         var event = AgentTrace.Event.assistant(1, 12L, "end_turn", "verdict", List.of());
@@ -228,7 +230,7 @@ class StoreTest {
 
     @Test
     void repliesAreStoredPerMergeRequest() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         String review = store.claimReview(project.id(), 5, "sha", "{}", mrInfo()).review().id();
         Finding finding = store.createFinding(finding(review, project.id(), 5, "disc-x"));
 
@@ -252,7 +254,7 @@ class StoreTest {
      */
     @Test
     void aResponseSurvivesAFailureToPostIt() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         String id = store.claimReview(project.id(), 2, "sha2", "{}", mrInfo()).review().id();
 
         store.markProcessing(id, "prompt");
@@ -267,7 +269,7 @@ class StoreTest {
 
     @Test
     void cancellingStopsOnlyReviewsThatAreStillRunning() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         String running = store.claimReview(project.id(), 3, "sha-a", "{}", mrInfo()).review().id();
         String finished = store.claimReview(project.id(), 4, "sha-b", "{}", mrInfo()).review().id();
         store.markReady(finished, "disc", "note");
@@ -284,7 +286,7 @@ class StoreTest {
 
     @Test
     void closeMrFollowsGitLabWithoutClearingFindings() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         String review = store.claimReview(project.id(), 15, "sha-15", "{}", mrInfo()).review().id();
         store.createFinding(finding(review, project.id(), 15, "disc-open"));
         store.upsertMrStatus(project.id(), 15, MrStatus.Status.NEEDS_WORK, review, "sha-15", 1);
@@ -300,7 +302,7 @@ class StoreTest {
 
     @Test
     void listsMergeRequestsNewestFirstWithFilters() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         String first = store.claimReview(project.id(), 1, "sha-1", "{}", mrInfo()).review().id();
         String tenth = store.claimReview(project.id(), 10, "sha-10", "{}", mrInfo()).review().id();
         String third = store.claimReview(project.id(), 3, "sha-3", "{}", mrInfo()).review().id();
@@ -327,7 +329,7 @@ class StoreTest {
 
     @Test
     void openFindingsSpanEveryReviewOfTheMergeRequest() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         String first = store.claimReview(project.id(), 9, "sha-1", "{}", mrInfo()).review().id();
         String second = store.claimReview(project.id(), 9, "sha-2", "{}", mrInfo()).review().id();
 
@@ -350,7 +352,7 @@ class StoreTest {
 
     @Test
     void theLatestOverviewIsThePreviousReadyReviewOnTheSameMr() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         String first = store.claimReview(project.id(), 10, "sha-1", "{}", mrInfo()).review().id();
         String second = store.claimReview(project.id(), 10, "sha-2", "{}", mrInfo()).review().id();
         String third = store.claimReview(project.id(), 10, "sha-3", "{}", mrInfo()).review().id();
@@ -367,7 +369,7 @@ class StoreTest {
 
     @Test
     void overviewThreadIsStoredOnTheMergeRequest() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         String first = store.claimReview(project.id(), 12, "sha-1", "{}", mrInfo()).review().id();
         store.upsertMrStatus(project.id(), 12, MrStatus.Status.CLEAN, first, "sha-1", 0);
         store.saveOverview(project.id(), 12, "ov-live", "note-live");
@@ -386,7 +388,7 @@ class StoreTest {
 
     @Test
     void findsTheOwningFindingForAGitLabThread() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         String review = store.claimReview(project.id(), 5, "sha", "{}", mrInfo()).review().id();
         store.createFinding(finding(review, project.id(), 5, "disc-x"));
 
@@ -397,7 +399,7 @@ class StoreTest {
 
     @Test
     void mrStatusTracksOpenFindingsAndMrrApproval() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         String id = store.claimReview(project.id(), 11, "sha", "{}", mrInfo()).review().id();
 
         store.upsertMrStatus(project.id(), 11, MrStatus.Status.REVIEWING, id, "sha", 0);
@@ -425,7 +427,7 @@ class StoreTest {
 
     @Test
     void skillsAreANamedEnabledSetPerProject() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         store.createSkill(project.id(), "security", "No eval.", true);
         store.createSkill(project.id(), "style", "No wildcards.", false);
 
@@ -444,7 +446,7 @@ class StoreTest {
 
     @Test
     void aSkillCanBeScopedToASourceBranchPattern() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         AgentSkill hotfix = store.createSkill(project.id(), "hotfix", "Be strict.", true, "hotfix/*");
         assertThat(hotfix.branchPattern()).isEqualTo("hotfix/*");
         assertThat(hotfix.appliesTo("hotfix/prod")).isTrue();
@@ -464,7 +466,7 @@ class StoreTest {
 
     @Test
     void userContextOnAnMrSurvivesStatusUpserts() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         String id = store.claimReview(project.id(), 11, "sha-ctx", "{}", mrInfo()).review().id();
         store.upsertMrStatus(project.id(), 11, MrStatus.Status.REVIEWING, id, "sha-ctx", 0);
 
@@ -482,7 +484,7 @@ class StoreTest {
 
     @Test
     void documentsAreANamedFolderPerProject() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         store.createDocument(project.id(), "architecture.md", "Hexagonal.", true);
         assertThat(store.listDocuments(project.id()))
                 .extracting(AgentDocument::name)
@@ -493,7 +495,7 @@ class StoreTest {
 
     @Test
     void aFailedReviewIsRecordedOnTheProjectForTheUi() {
-        Project project = store.createProject(project(alice.id(), "alice-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-app"));
         String id = store.claimReview(project.id(), 12, "sha-fail", "{}", mrInfo()).review().id();
         store.markFailed(id, FailureKind.QUOTA, "out of credits");
 
@@ -510,8 +512,8 @@ class StoreTest {
 
     @Test
     void creatingAProjectSkillWritesTheOwnerLibraryAndAttachReusesIt() {
-        Project one = store.createProject(project(alice.id(), "one"));
-        Project two = store.createProject(project(alice.id(), "two"));
+        Project one = TestStores.persist(store, project(alice.id(), "one"));
+        Project two = TestStores.persist(store, project(alice.id(), "two"));
         AgentSkill first = store.createSkill(one.id(), "security", "No eval.", true);
         assertThat(first.libraryId()).isNotBlank();
         assertThat(store.listLibrary(principal(alice)))
@@ -539,8 +541,8 @@ class StoreTest {
 
     @Test
     void aUserDoesNotSeeAnotherUsersLibraryAndAdminSeesAll() {
-        Project aliceApp = store.createProject(project(alice.id(), "alice-app"));
-        Project bobApp = store.createProject(project(bob.id(), "bob-app"));
+        Project aliceApp = TestStores.persist(store, project(alice.id(), "alice-app"));
+        Project bobApp = TestStores.persist(store, project(bob.id(), "bob-app"));
         store.createSkill(aliceApp.id(), "security", "Alice rules.", true);
         store.createSkill(bobApp.id(), "security", "Bob rules.", true);
 
@@ -556,7 +558,7 @@ class StoreTest {
 
     @Test
     void skillLibraryBackfillLinksExistingProjectSkills() {
-        Project project = store.createProject(project(alice.id(), "legacy"));
+        Project project = TestStores.persist(store, project(alice.id(), "legacy"));
         String skillId = Ids.newId();
         db.sql("""
                 INSERT INTO agent_skills (id, project_id, name, body, enabled, position, created_at)
@@ -601,7 +603,7 @@ class StoreTest {
         assertThat(runtime.webhookUrl("proj-1"))
                 .isEqualTo("https://mrr.example.com/webhooks/gitlab/proj-1");
 
-        Project project = store.createProject(project(alice.id(), "stats-app"));
+        Project project = TestStores.persist(store, project(alice.id(), "stats-app"));
         String one = store.claimReview(project.id(), 1, "sha-1", "{}", mrInfo()).review().id();
         String two = store.claimReview(project.id(), 2, "sha-2", "{}", mrInfo()).review().id();
         store.markReady(one, "d", "n");
@@ -628,68 +630,68 @@ class StoreTest {
 
     @Test
     void gitlabInstancesAreNamedUrlsWithNoToken() {
-        GitlabInstance gitlab = store.createGitlabInstance(" GitLab.com ", "https://gitlab.com/");
+        GitlabInstance gitlab = store.createGitlabInstance(adminOf(alice), true, " GitLab.com ", "https://gitlab.com/");
         assertThat(gitlab.name()).isEqualTo("GitLab.com");
         assertThat(gitlab.url()).isEqualTo("https://gitlab.com");
 
-        GitlabInstance self = store.createGitlabInstance("corp", "https://git.example.com");
-        store.updateGitlabInstance(self.id(), "Corp GitLab", "https://git.example.com/gitlab/");
-        assertThat(store.findGitlabInstance(self.id())).get()
+        GitlabInstance self = store.createGitlabInstance(adminOf(alice), true, "corp", "https://git.example.com");
+        store.updateGitlabInstance(adminOf(alice), self.id(), "Corp GitLab", "https://git.example.com/gitlab/");
+        assertThat(store.findGitlabInstance(adminOf(alice), self.id())).get()
                 .extracting(GitlabInstance::name, GitlabInstance::url)
                 .containsExactly("Corp GitLab", "https://git.example.com/gitlab");
 
-        assertThat(store.listGitlabInstances())
+        assertThat(store.listGitlabInstances(adminOf(alice)))
                 .extracting(GitlabInstance::name)
                 .containsExactly("Corp GitLab", "GitLab.com");
 
-        assertThatThrownBy(() -> store.createGitlabInstance("GitLab.com", "https://gitlab.com"))
+        assertThatThrownBy(() -> store.createGitlabInstance(adminOf(alice), true, "GitLab.com", "https://gitlab.com"))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(409));
-        assertThatThrownBy(() -> store.createGitlabInstance("bad", "gitlab.com"))
+        assertThatThrownBy(() -> store.createGitlabInstance(adminOf(alice), true, "bad", "gitlab.com"))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
-        assertThatThrownBy(() -> store.updateGitlabInstance("missing", "x", "https://gitlab.com"))
+        assertThatThrownBy(() -> store.updateGitlabInstance(adminOf(alice), "missing", "x", "https://gitlab.com"))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(404));
 
-        store.deleteGitlabInstance(gitlab.id());
-        assertThat(store.findGitlabInstance(gitlab.id())).isEmpty();
-        assertThatThrownBy(() -> store.deleteGitlabInstance(gitlab.id()))
+        store.deleteGitlabInstance(adminOf(alice), gitlab.id());
+        assertThat(store.findGitlabInstance(adminOf(alice), gitlab.id())).isEmpty();
+        assertThatThrownBy(() -> store.deleteGitlabInstance(adminOf(alice), gitlab.id()))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(404));
     }
 
     @Test
     void llmProvidersStoreEndpointNotKeyAndBlankBaseUrlClears() {
-        LlmProvider opus = store.createLlmProvider("Opus", Project.Provider.ANTHROPIC,
-                "claude-opus-5", "  ");
+        LlmProvider opus = store.createLlmProvider(adminOf(alice), false, "Opus", Project.Provider.ANTHROPIC,
+                "claude-opus-5", "  ", "sk-x");
         assertThat(opus.modelBaseUrl()).isNull();
         assertThat(opus.provider()).isEqualTo(Project.Provider.ANTHROPIC);
 
-        LlmProvider ollama = store.createLlmProvider("Ollama", Project.Provider.OPENAI_COMPAT,
-                "llama3.2", "http://ollama:11434/v1/");
+        LlmProvider ollama = store.createLlmProvider(adminOf(alice), false, "Ollama", Project.Provider.OPENAI_COMPAT,
+                "llama3.2", "http://ollama:11434/v1/", "sk-x");
         assertThat(ollama.modelBaseUrl()).isEqualTo("http://ollama:11434/v1");
 
-        store.updateLlmProvider(ollama.id(), null, null, "llama3.3", "");
-        LlmProvider cleared = store.findLlmProvider(ollama.id()).orElseThrow();
+        store.updateLlmProvider(adminOf(alice), ollama.id(), null, null, "llama3.3", "", null);
+        LlmProvider cleared = store.findLlmProvider(adminOf(alice), ollama.id()).orElseThrow();
         assertThat(cleared.model()).isEqualTo("llama3.3");
         assertThat(cleared.modelBaseUrl()).isNull();
 
-        assertThatThrownBy(() -> store.createLlmProvider("Opus", Project.Provider.ANTHROPIC,
-                "claude-sonnet-4", null))
+        assertThatThrownBy(() -> store.createLlmProvider(adminOf(alice), false, "Opus", Project.Provider.ANTHROPIC,
+                "claude-sonnet-4", null, "sk-x"))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(409));
-        assertThatThrownBy(() -> store.createLlmProvider("bad", Project.Provider.OPENAI_COMPAT,
-                "gpt-4", "not-a-url"))
+        assertThatThrownBy(() -> store.createLlmProvider(adminOf(alice), false, "bad", Project.Provider.OPENAI_COMPAT,
+                "gpt-4", "not-a-url", "sk-x"))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
-        assertThatThrownBy(() -> store.createLlmProvider("no-model", Project.Provider.ANTHROPIC,
-                "  ", null))
+        assertThatThrownBy(() -> store.createLlmProvider(adminOf(alice), false, "no-model", Project.Provider.ANTHROPIC,
+                "  ", null, "sk-x"))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
 
-        store.deleteLlmProvider(opus.id());
-        assertThat(store.listLlmProviders()).extracting(LlmProvider::name).containsExactly("Ollama");
+        store.deleteLlmProvider(adminOf(alice), opus.id());
+        assertThat(store.listLlmProviders(adminOf(alice))).extracting(LlmProvider::name).containsExactly("Ollama");
     }
 
     @Test
@@ -697,27 +699,50 @@ class StoreTest {
         db.sql("DROP TABLE IF EXISTS gitlab_instances").update();
         db.sql("DROP TABLE IF EXISTS llm_providers").update();
         new SchemaPatch(db).patch();
-        GitlabInstance row = store.createGitlabInstance("patched", "https://gitlab.example");
-        assertThat(store.findGitlabInstance(row.id())).isPresent();
+        GitlabInstance row = store.createGitlabInstance(adminOf(alice), true, "patched", "https://gitlab.example");
+        assertThat(store.findGitlabInstance(adminOf(alice), row.id())).isPresent();
     }
 
     @Test
-    void editingACatalogDoesNotRewriteAnExistingProject() {
-        GitlabInstance gitlab = store.createGitlabInstance("gitlab.com", "https://gitlab.com");
-        LlmProvider opus = store.createLlmProvider("Opus", Project.Provider.ANTHROPIC,
-                "claude-opus-5", null);
+    void theGitlabUrlIsCopiedButTheLlmEntryIsFollowed() {
+        GitlabInstance gitlab = store.createGitlabInstance(adminOf(alice), true, "gitlab.com", "https://gitlab.com");
+        LlmProvider opus = store.createLlmProvider(adminOf(alice), false, "Opus",
+                Project.Provider.ANTHROPIC, "claude-opus-5", null, "sk-x");
         Project project = store.createProject(new Project(Ids.newId(), alice.id(), "calc", true,
                 gitlab.url(), "group/calc", "glpat-x", null, Ids.newSecret(),
-                opus.provider(), opus.modelBaseUrl(), opus.model(), "sk-x",
+                opus.id(), opus,
                 null, false, 1, List.of(), false, false, null, null, null, null, null, null,
                 Instant.now()));
 
-        store.updateGitlabInstance(gitlab.id(), "GitLab", "https://gitlab.example.com");
-        store.updateLlmProvider(opus.id(), "Opus 4", Project.Provider.ANTHROPIC, "claude-opus-4", null);
+        store.updateGitlabInstance(adminOf(alice), gitlab.id(), "GitLab", "https://gitlab.example.com");
+        store.updateLlmProvider(adminOf(alice), opus.id(), "Opus 4", Project.Provider.ANTHROPIC,
+                "claude-opus-4", null, null);
 
         Project kept = store.findProject(project.id()).orElseThrow();
-        assertThat(kept.gitlabUrl()).isEqualTo("https://gitlab.com");
-        assertThat(kept.model()).isEqualTo("claude-opus-5");
+        assertThat(kept.gitlabUrl()).isEqualTo("https://gitlab.com");  // copied at registration
+        assertThat(kept.model()).isEqualTo("claude-opus-4");           // referenced, so it moves
+    }
+
+    @Test
+    void anEntryCannotBeDeletedWhileAProjectReferencesIt() {
+        LlmProvider entry = store.createLlmProvider(adminOf(alice), false, "In use",
+                Project.Provider.ANTHROPIC, "claude-opus-5", null, "sk-x");
+        Project project = store.createProject(new Project(Ids.newId(), alice.id(), "calc", true,
+                "https://gitlab.com", "group/calc", "glpat-x", null, Ids.newSecret(),
+                entry.id(), entry,
+                null, false, 1, List.of(), false, false, null, null, null, null, null, null,
+                Instant.now()));
+
+        assertThatThrownBy(() -> store.deleteLlmProvider(adminOf(alice), entry.id()))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> {
+                    assertThat(((ApiException) e).status().value()).isEqualTo(409);
+                    assertThat(e.getMessage()).contains("1 project(s) still use this entry");
+                });
+
+        store.deleteProject(project.id());
+        store.deleteLlmProvider(adminOf(alice), entry.id());
+        assertThat(store.findLlmProvider(adminOf(alice), entry.id())).isEmpty();
     }
 
     @Test
@@ -748,7 +773,7 @@ class StoreTest {
      */
     @Test
     void approvingRecordsTheUserAndLeavesAddressedFindingsAlone() {
-        Project project = store.createProject(project(alice.id(), "alice-approve"));
+        Project project = TestStores.persist(store, project(alice.id(), "alice-approve"));
         String reviewId = store.claimReview(project.id(), 9, "sha-1", "{}", mrInfo()).review().id();
         Finding open = store.createFinding(finding(reviewId, project.id(), 9, "disc-a"));
         Finding fixed = store.createFinding(finding(reviewId, project.id(), 9, "disc-b"));
@@ -794,10 +819,16 @@ class StoreTest {
     }
 
     private Project project(String ownerId, String name) {
+        LlmProvider llm = TestStores.llmProvider(ownerId);
         return new Project(Ids.newId(), ownerId, name, true,
                 "https://gitlab.com", "group/" + name, "glpat-x", null, Ids.newSecret(),
-                Project.Provider.ANTHROPIC, null, "claude-opus-5", "sk-x",
+                llm.id(), llm,
                 null, false, 1, List.of(), false, false, null, null, null, null, null, null, Instant.now());
+    }
+
+    /** The catalogs are owner-scoped now; these tests curate shared entries as an admin. */
+    private static Principal adminOf(ro.bitboy.mrr.model.User user) {
+        return new Principal(user.id(), user.name(), ro.bitboy.mrr.model.Role.ADMIN);
     }
 
 }

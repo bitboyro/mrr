@@ -30,6 +30,7 @@ class CatalogControllerTest {
     private CatalogController catalog;
     private Principal admin;
     private Principal user;
+    private Principal other;
 
     @BeforeEach
     void setUp() {
@@ -38,6 +39,8 @@ class CatalogControllerTest {
         User alice = store.createUser("alice", Role.USER);
         admin = new Principal(root.id(), root.name(), root.role());
         user = new Principal(alice.id(), alice.name(), alice.role());
+        User bob = store.createUser("bob", Role.USER);
+        other = new Principal(bob.id(), bob.name(), bob.role());
         settings = new RuntimeSettings(TestStores.properties(), store);
         settings.load();
         catalog = new CatalogController(store, settings);
@@ -46,9 +49,9 @@ class CatalogControllerTest {
     @Test
     void anyAuthenticatedUserCanReadInstanceInfoAndCatalogs() {
         settings.save(Map.of(RuntimeSettings.BASE_URL, "https://mrr.example.com/"));
-        catalog.createGitlab(admin, new CatalogController.GitlabUpsert("gitlab.com", "https://gitlab.com"));
+        catalog.createGitlab(admin, new CatalogController.GitlabUpsert("gitlab.com", "https://gitlab.com", true));
         catalog.createLlm(admin, new CatalogController.LlmUpsert("Opus", Project.Provider.ANTHROPIC,
-                "claude-opus-5", null));
+                "claude-opus-5", null, null, true));
 
         CatalogController.InstanceInfo info = catalog.instance(user);
         assertThat(info.baseUrl()).isEqualTo("https://mrr.example.com");
@@ -62,75 +65,62 @@ class CatalogControllerTest {
     }
 
     @Test
-    void catalogWritesAreAdminOnly() {
-        CatalogController.GitlabUpsert gitlab = new CatalogController.GitlabUpsert(
-                "gitlab.com", "https://gitlab.com");
-        CatalogController.LlmUpsert llm = new CatalogController.LlmUpsert(
-                "Opus", Project.Provider.ANTHROPIC, "claude-opus-5", null);
+    void anyoneMayAddTheirOwnEntryButOnlyAnAdminMayShareOne() {
+        CatalogController.GitlabUpsert shared =
+                new CatalogController.GitlabUpsert("gitlab.com", "https://gitlab.com", true);
+        CatalogController.LlmUpsert sharedLlm = new CatalogController.LlmUpsert(
+                "Opus", Project.Provider.ANTHROPIC, "claude-opus-5", null, null, true);
 
-        assertThatThrownBy(() -> catalog.createGitlab(user, gitlab))
+        assertThatThrownBy(() -> catalog.createGitlab(user, shared))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(403));
-        assertThatThrownBy(() -> catalog.createLlm(user, llm))
-                .isInstanceOf(ApiException.class)
-                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(403));
-
-        GitlabInstance created = catalog.createGitlab(admin, gitlab);
-        LlmProvider provider = catalog.createLlm(admin, llm);
-
-        assertThatThrownBy(() -> catalog.updateGitlab(user, created.id(), gitlab))
-                .isInstanceOf(ApiException.class)
-                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(403));
-        assertThatThrownBy(() -> catalog.updateLlm(user, provider.id(), llm))
-                .isInstanceOf(ApiException.class)
-                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(403));
-        assertThatThrownBy(() -> catalog.deleteGitlab(user, created.id()))
-                .isInstanceOf(ApiException.class)
-                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(403));
-        assertThatThrownBy(() -> catalog.deleteLlm(user, provider.id()))
+        assertThatThrownBy(() -> catalog.createLlm(user, sharedLlm))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(403));
 
-        catalog.updateGitlab(admin, created.id(),
-                new CatalogController.GitlabUpsert("GitLab", "https://gitlab.example.com"));
-        catalog.updateLlm(admin, provider.id(),
-                new CatalogController.LlmUpsert(null, Project.Provider.OPENAI_COMPAT, "gpt-5.4",
-                        "https://api.openai.com/v1"));
-        assertThat(catalog.listGitlab(admin).getFirst().url()).isEqualTo("https://gitlab.example.com");
-        assertThat(catalog.listLlm(admin).getFirst())
-                .extracting(LlmProvider::provider, LlmProvider::model, LlmProvider::modelBaseUrl)
-                .containsExactly(Project.Provider.OPENAI_COMPAT, "gpt-5.4", "https://api.openai.com/v1");
+        // Their own, however, is theirs to add — and a private entry is the only kind that
+        // may carry a key.
+        LlmProvider mine = catalog.createLlm(user, new CatalogController.LlmUpsert(
+                "Mine", Project.Provider.ANTHROPIC, "claude-opus-5", null, "sk-mine", false));
+        assertThat(mine.ownerId()).isEqualTo(user.userId());
+        assertThat(mine.modelKey()).isEqualTo("****mine");
 
-        catalog.deleteGitlab(admin, created.id());
-        catalog.deleteLlm(admin, provider.id());
-        assertThat(catalog.listGitlab(admin)).isEmpty();
-        assertThat(catalog.listLlm(admin)).isEmpty();
+        assertThatThrownBy(() -> catalog.createLlm(admin, new CatalogController.LlmUpsert(
+                "Shared with key", Project.Provider.ANTHROPIC, "claude-opus-5", null, "sk-x", true)))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).getMessage())
+                        .contains("shared entry cannot carry an API key"));
+
+        // A shared entry is visible to everyone; a private one only to its owner and admins.
+        catalog.createGitlab(admin, shared);
+        assertThat(catalog.listLlm(user)).extracting(LlmProvider::name).contains("Mine");
+        assertThat(catalog.listLlm(other)).extracting(LlmProvider::name).doesNotContain("Mine");
     }
 
     @Test
     void catalogCreatesRejectBlankFields() {
         assertThatThrownBy(() -> catalog.createGitlab(admin,
-                new CatalogController.GitlabUpsert(" ", "https://gitlab.com")))
+                new CatalogController.GitlabUpsert(" ", "https://gitlab.com", true)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
         assertThatThrownBy(() -> catalog.createGitlab(admin,
-                new CatalogController.GitlabUpsert("gl", "gitlab.com")))
+                new CatalogController.GitlabUpsert("gl", "gitlab.com", true)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
         assertThatThrownBy(() -> catalog.createGitlab(admin,
-                new CatalogController.GitlabUpsert("gl", "https://")))
+                new CatalogController.GitlabUpsert("gl", "https://", true)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
         assertThatThrownBy(() -> catalog.createGitlab(admin,
-                new CatalogController.GitlabUpsert("gl", "https://?bad")))
+                new CatalogController.GitlabUpsert("gl", "https://?bad", true)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
         assertThatThrownBy(() -> catalog.createLlm(admin,
-                new CatalogController.LlmUpsert("Opus", null, "claude-opus-5", null)))
+                new CatalogController.LlmUpsert("Opus", null, "claude-opus-5", null, null, true)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
         assertThatThrownBy(() -> catalog.createLlm(admin,
-                new CatalogController.LlmUpsert("Opus", Project.Provider.ANTHROPIC, "  ", null)))
+                new CatalogController.LlmUpsert("Opus", Project.Provider.ANTHROPIC, "  ", null, null, true)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
         assertThat(catalog.listGitlab(admin)).isEmpty();

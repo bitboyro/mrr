@@ -172,23 +172,45 @@ public class SchemaPatch {
         db.sql("CREATE INDEX IF NOT EXISTS idx_skill_library_owner ON skill_library(owner_id, name)")
                 .update();
         db.sql("""
+                CREATE TABLE IF NOT EXISTS library_seeds (
+                    owner_id  TEXT NOT NULL REFERENCES users(id),
+                    name      TEXT NOT NULL,
+                    seeded_at TEXT NOT NULL,
+                    PRIMARY KEY (owner_id, name)
+                )
+                """).update();
+        db.sql("""
                 CREATE TABLE IF NOT EXISTS gitlab_instances (
                     id         TEXT PRIMARY KEY,
-                    name       TEXT NOT NULL UNIQUE,
+                    owner_id   TEXT REFERENCES users(id),
+                    name       TEXT NOT NULL,
                     url        TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    UNIQUE (owner_id, name)
                 )
                 """).update();
         db.sql("""
                 CREATE TABLE IF NOT EXISTS llm_providers (
                     id             TEXT PRIMARY KEY,
-                    name           TEXT NOT NULL UNIQUE,
+                    owner_id       TEXT REFERENCES users(id),
+                    name           TEXT NOT NULL,
                     provider       TEXT NOT NULL,
                     model          TEXT NOT NULL,
                     model_base_url TEXT,
-                    created_at     TEXT NOT NULL
+                    model_key      TEXT,
+                    created_at     TEXT NOT NULL,
+                    UNIQUE (owner_id, name)
                 )
                 """).update();
+        db.sql("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_providers_shared_name
+                    ON llm_providers(name) WHERE owner_id IS NULL
+                """).update();
+        db.sql("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_gitlab_instances_shared_name
+                    ON gitlab_instances(name) WHERE owner_id IS NULL
+                """).update();
+        refuseLegacyShape();
         backfillOverviewThreads();
         migrateLegacySkill();
         backfillSkillLibrary();
@@ -296,6 +318,25 @@ public class SchemaPatch {
     private boolean libraryNameTaken(String ownerId, String name) {
         return db.sql("SELECT 1 FROM skill_library WHERE owner_id = ? AND name = ? LIMIT 1")
                 .params(ownerId, name).query(Integer.class).optional().isPresent();
+    }
+
+    /**
+     * Refuses a database written before the catalog owned the model configuration.
+     *
+     * <p>There is deliberately no migration. mrr is early enough that re-registering a handful
+     * of projects costs less than a rebuild of three tables whose sealed columns cannot be
+     * compared, and a wrong migration of a credential store fails in ways that look like a
+     * working deployment. Delete the database and set the projects up again.
+     */
+    private void refuseLegacyShape() {
+        if (!columnsOf("projects").contains("model_key")) {
+            return;
+        }
+        throw new IllegalStateException("""
+                This database predates the owned LLM catalog: projects still carry an inline \
+                provider, model and API key. There is no migration. Stop mrr, delete the \
+                database file, start it again, and register the projects against a catalog \
+                entry — the catalog is where the key lives now.""");
     }
 
     private void addColumn(String table, String column, String definition) {

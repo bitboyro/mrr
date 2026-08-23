@@ -39,7 +39,7 @@ class MergeRequestControllerTest {
         store = TestStores.sqlite(tempDir);
         User user = store.createUser("alice", Role.USER);
         alice = new Principal(user.id(), user.name(), user.role());
-        project = store.createProject(TestStores.project(user.id(), "calc", "secret"));
+        project = TestStores.persist(store, TestStores.project(user.id(), "calc", "secret"));
         store.upsertMrStatus(project.id(), 7, MrStatus.Status.CLEAN, null, "sha", 0);
         gitlab = new FakeGitLab();
         memory = new FakeMemory();
@@ -127,8 +127,8 @@ class MergeRequestControllerTest {
 
     private static Project withOperator(Project p, String token) {
         return new Project(p.id(), p.ownerId(), p.name(), p.enabled(), p.gitlabUrl(),
-                p.gitlabProjectId(), p.gitlabToken(), token, p.webhookSecret(), p.provider(),
-                p.modelBaseUrl(), p.model(), p.modelKey(), p.skill(), p.skipDrafts(),
+                p.gitlabProjectId(), p.gitlabToken(), token, p.webhookSecret(),
+                p.llmProviderId(), p.llm(), p.skill(), p.skipDrafts(),
                 p.agentMaxTurns(), p.agentTools(), p.autoApprove(), p.librarianEnabled(),
                 p.memoryHeadSha(), p.memoryStatus(), p.memoryRefreshedAt(),
                 p.lastErrorKind(), p.lastError(), p.lastErrorAt(), Instant.now());

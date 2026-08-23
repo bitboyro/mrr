@@ -6,7 +6,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The model API key moves from the project to the catalog, and the catalog gains owners.**
+  `llm_providers` and `gitlab_instances` now carry an `owner_id`: null is a shared entry an
+  admin curates for everyone, anything else is private to the user who created it. A caller
+  lists the shared entries plus their own; an admin lists everything, which is the rule
+  projects already followed. Anyone may add their own entry; only an admin may share one.
+
+  An LLM entry now holds the API key, and a project **references** an entry instead of copying
+  its fields. Set the key once under Configure and every project on that entry follows it —
+  including a rotation, which previously meant editing each project in turn. A shared entry may
+  not carry a key, since it is visible to every account on the instance; a private one must,
+  because a project pointing at it has nowhere else to get one. Deleting an entry is refused
+  with `409` while any project still references it.
+
+  `POST`/`PUT /api/projects` therefore no longer accept `provider`, `model`, `modelBaseUrl` or
+  `modelKey`; `llmProviderId` is required. `Project` gains `llmProviderId` and a resolved,
+  key-masked `llm`. The GitLab catalog still copies its URL onto the project at registration —
+  a host is not a credential, and a project that moved GitLab should not follow a catalog edit.
+
+  **There is no migration.** A database written before this change is refused at boot with
+  instructions rather than half-read: the three tables cannot be rebuilt in place, sealed
+  columns cannot be compared to deduplicate keys, and mrr is early enough that re-registering
+  a handful of projects costs less than a migration that fails like a working deployment.
+  Delete the database and set the projects up again.
+
 ### Added
+
+- **A default GitLab entry and a starting skill library.** A fresh instance now has
+  `gitlab.com` in the GitLab catalog as a shared entry, so it is there for every account
+  without anyone retyping it, and the skills bundled in the jar — `mr-review`,
+  `java-reviewer` — are copied into each account's library as its own editable copies. A new
+  account gets them the moment it is created, not at the next restart. `library_seeds` records
+  what an account has already been offered, so deleting a copy is a decision that sticks and a
+  skill added in a later release still reaches existing accounts.
+
+- **Skill library and Stats are their own pages** (`/skills`, `/stats`), off the Configure
+  page, which keeps the base URL, the two catalogs, and the settings table.
+
+### Fixed
+
+- **A path that matches nothing returns 404, not 500.** `NoResourceFoundException` fell through
+  to the catch-all handler, so every mistyped URL was answered with `internal_error` and logged
+  at ERROR with a stack trace. A public instance is probed for `.env` and `.git/HEAD` within
+  minutes of coming up, and each probe was filling the error log.
+
 
 - **Secrets encrypted at rest.** The four per-project credentials — both GitLab PATs, the
   webhook secret, and the model key — are sealed with AES-256-GCM before they reach the

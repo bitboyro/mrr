@@ -5,6 +5,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.SimpleDriverDataSource;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import ro.bitboy.mrr.auth.Ids;
+import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.MergeRequestInfo;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.store.Store;
@@ -37,17 +38,45 @@ public final class TestStores {
                 new MrrProperties.Review(1, 20_000, 30, 8_000, 8_000, 8_000, 2, 8_000, 8));
     }
 
+    /**
+     * A catalog entry owned by {@code ownerId}, carrying the key the project bills against.
+     * Projects reference one of these, so a test that persists a project must persist its
+     * entry too — {@code PROJECT_SELECT} inner-joins them.
+     */
+    public static LlmProvider llmProvider(String ownerId) {
+        return llmProvider(ownerId, "sk-x");
+    }
+
+    public static LlmProvider llmProvider(String ownerId, String modelKey) {
+        return new LlmProvider(Ids.newId(), ownerId, "entry-" + Ids.newId().substring(0, 8),
+                Project.Provider.ANTHROPIC, "claude-opus-5", null, modelKey, Instant.now());
+    }
+
     public static Project project(String ownerId, String name, String webhookSecret) {
         return project(ownerId, name, webhookSecret, true, false);
     }
 
     public static Project project(String ownerId, String name, String webhookSecret,
                            boolean enabled, boolean skipDrafts) {
+        return project(llmProvider(ownerId), ownerId, name, webhookSecret, enabled, skipDrafts);
+    }
+
+    public static Project project(LlmProvider llm, String ownerId, String name,
+                                  String webhookSecret, boolean enabled, boolean skipDrafts) {
         return new Project(Ids.newId(), ownerId, name, enabled,
                 "https://gitlab.com", "group/" + name, "glpat-x", null, webhookSecret,
-                Project.Provider.ANTHROPIC, null, "claude-opus-5", "sk-x",
+                llm.id(), llm,
                 null, skipDrafts, 1, List.of(), false, false, null, null, null, null, null, null,
                 Instant.now());
+    }
+
+    /**
+     * Persists the catalog entry a project references, then the project. Every project read
+     * inner-joins {@code llm_providers}, so a project whose entry was never stored is invisible.
+     */
+    public static Project persist(Store store, Project project) {
+        store.createLlmProvider(project.llm());
+        return store.createProject(project);
     }
 
     public static MergeRequestInfo mrInfo() {

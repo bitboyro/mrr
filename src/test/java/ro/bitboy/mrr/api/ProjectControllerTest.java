@@ -33,6 +33,7 @@ class ProjectControllerTest {
     private Store store;
     private RuntimeSettings settings;
     private ProjectController projects;
+    private LlmProvider defaultLlm;
     private Principal alice;
     private Principal admin;
 
@@ -48,17 +49,20 @@ class ProjectControllerTest {
         OpenMrScan scan = new OpenMrScan(store, new FakeGitLab(), new FakeReviewer(),
                 new FakeMemory(), 120_000);
         projects = new ProjectController(store, settings, new FakeMemory(), scan);
+        // Every project references a catalog entry now, so the fixture needs one that carries
+        // a key. Tests that care which entry pass their own id.
+        defaultLlm = store.createLlmProvider(alice, false, "default", Project.Provider.ANTHROPIC,
+                "claude-opus-5", null, "sk-x");
     }
 
     @Test
-    void createCopiesCatalogFieldsAndBuildsWebhookFromLiveBaseUrl() {
+    void gitlabUrlIsCopiedButTheModelFollowsItsCatalogEntry() {
         settings.save(Map.of(RuntimeSettings.BASE_URL, "https://mrr.example.com/"));
-        GitlabInstance gitlab = store.createGitlabInstance("gitlab.com", "https://gitlab.com/");
-        LlmProvider ollama = store.createLlmProvider("Ollama", Project.Provider.OPENAI_COMPAT,
-                "llama3.2", "http://ollama:11434/v1/");
+        GitlabInstance gitlab = store.createGitlabInstance(admin, true, "gitlab.com", "https://gitlab.com/");
+        LlmProvider ollama = store.createLlmProvider(alice, false, "Ollama",
+                Project.Provider.OPENAI_COMPAT, "llama3.2", "http://ollama:11434/v1/", "sk-x");
 
-        ProjectController.Registered created = projects.create(alice, upsert(
-                gitlab.id(), null, ollama.id(), null, null, null));
+        ProjectController.Registered created = projects.create(alice, upsert(gitlab.id(), null, ollama.id()));
 
         assertThat(created.project().gitlabUrl()).isEqualTo("https://gitlab.com");
         assertThat(created.project().provider()).isEqualTo(Project.Provider.OPENAI_COMPAT);
@@ -68,18 +72,16 @@ class ProjectControllerTest {
                 .isEqualTo("https://mrr.example.com/webhooks/gitlab/" + created.project().id());
         assertThat(created.webhookSecret()).isNotBlank();
 
-        store.updateGitlabInstance(gitlab.id(), null, "https://git.internal");
-        store.updateLlmProvider(ollama.id(), null, null, "llama3.3", null);
+        store.updateGitlabInstance(admin, gitlab.id(), null, "https://git.internal");
+        store.updateLlmProvider(alice, ollama.id(), null, null, "llama3.3", null, null);
         Project kept = store.findProject(created.project().id()).orElseThrow();
         assertThat(kept.gitlabUrl()).isEqualTo("https://gitlab.com");
-        assertThat(kept.model()).isEqualTo("llama3.2");
+        assertThat(kept.model()).isEqualTo("llama3.3");
     }
 
     @Test
     void createStillAcceptsCustomGitlabAndProvider() {
-        ProjectController.Registered created = projects.create(alice, upsert(
-                null, "https://git.example.com/", null,
-                Project.Provider.ANTHROPIC, "claude-opus-5", null));
+        ProjectController.Registered created = projects.create(alice, upsert(null, "https://git.example.com/", null));
 
         assertThat(created.project().gitlabUrl()).isEqualTo("https://git.example.com");
         assertThat(created.project().provider()).isEqualTo(Project.Provider.ANTHROPIC);
@@ -90,74 +92,61 @@ class ProjectControllerTest {
 
     @Test
     void createRejectsAMissingCatalogId() {
-        assertThatThrownBy(() -> projects.create(alice, upsert(
-                "no-such-gitlab", null, null,
-                Project.Provider.ANTHROPIC, "claude-opus-5", null)))
+        assertThatThrownBy(() -> projects.create(alice, upsert("no-such-gitlab", null, null)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(404));
 
-        GitlabInstance gitlab = store.createGitlabInstance("gitlab.com", "https://gitlab.com");
-        assertThatThrownBy(() -> projects.create(alice, upsert(
-                gitlab.id(), null, "no-such-llm", null, null, null)))
+        GitlabInstance gitlab = store.createGitlabInstance(admin, true, "gitlab.com", "https://gitlab.com");
+        assertThatThrownBy(() -> projects.create(alice, upsert(gitlab.id(), null, "no-such-llm")))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(404));
     }
 
     @Test
-    void createRequiresUrlAndProviderWhenNoCatalogIsSelected() {
-        assertThatThrownBy(() -> projects.create(alice, upsert(
-                null, null, null, Project.Provider.ANTHROPIC, "claude-opus-5", null)))
+    void createRequiresAUrlAndACatalogEntryThatCarriesAKey() {
+        assertThatThrownBy(() -> projects.create(alice, upsert(null, null, null)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).getMessage()).isEqualTo("gitlabUrl is required"));
-        assertThatThrownBy(() -> projects.create(alice, upsert(
-                null, "https://gitlab.com", null, null, "claude-opus-5", null)))
+
+        ProjectController.Upsert noEntry = new ProjectController.Upsert(
+                "calc", true, null, "https://gitlab.com", "group/calc", "glpat-x", null, null,
+                null, null, false, 1, List.of(), false, false);
+        assertThatThrownBy(() -> projects.create(alice, noEntry))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).getMessage())
-                        .contains("provider must be ANTHROPIC"));
-        assertThatThrownBy(() -> projects.create(alice, upsert(
-                null, "https://gitlab.com", null, Project.Provider.ANTHROPIC, null, null)))
+                        .contains("llmProviderId is required"));
+
+        // A shared entry is allowed to exist but cannot carry a key, so no review could run.
+        LlmProvider shared = store.createLlmProvider(admin, true, "shared",
+                Project.Provider.ANTHROPIC, "claude-opus-5", null, null);
+        assertThatThrownBy(() -> projects.create(alice, upsert(null, "https://gitlab.com", shared.id())))
                 .isInstanceOf(ApiException.class)
-                .satisfies(e -> assertThat(((ApiException) e).getMessage()).isEqualTo("model is required"));
+                .satisfies(e -> assertThat(((ApiException) e).getMessage())
+                        .contains("no API key"));
     }
 
     @Test
     void createRejectsCustomUrlsThatAreNotHttp() {
-        assertThatThrownBy(() -> projects.create(alice, upsert(
-                null, "gitlab.com", null,
-                Project.Provider.ANTHROPIC, "claude-opus-5", null)))
+        assertThatThrownBy(() -> projects.create(alice, upsert(null, "gitlab.com", null)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> {
                     assertThat(((ApiException) e).status().value()).isEqualTo(400);
                     assertThat(e.getMessage()).contains("gitlabUrl");
                 });
-        assertThatThrownBy(() -> projects.create(alice, upsert(
-                null, "file:///tmp", null,
-                Project.Provider.ANTHROPIC, "claude-opus-5", null)))
+        assertThatThrownBy(() -> projects.create(alice, upsert(null, "file:///tmp", null)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> {
                     assertThat(((ApiException) e).status().value()).isEqualTo(400);
                     assertThat(e.getMessage()).contains("gitlabUrl");
-                });
-        assertThatThrownBy(() -> projects.create(alice, upsert(
-                null, "https://gitlab.com", null,
-                Project.Provider.OPENAI_COMPAT, "llama3.2", "not-a-url")))
-                .isInstanceOf(ApiException.class)
-                .satisfies(e -> {
-                    assertThat(((ApiException) e).status().value()).isEqualTo(400);
-                    assertThat(e.getMessage()).contains("modelBaseUrl");
                 });
         assertThat(store.listProjects(alice)).isEmpty();
     }
 
     @Test
     void updateRejectsAMalformedCustomGitlabUrl() {
-        ProjectController.Registered created = projects.create(alice, upsert(
-                null, "https://gitlab.com", null,
-                Project.Provider.ANTHROPIC, "claude-opus-5", null));
+        ProjectController.Registered created = projects.create(alice, upsert(null, "https://gitlab.com", null));
 
-        assertThatThrownBy(() -> projects.update(alice, created.project().id(), upsert(
-                null, "gitlab.com", null,
-                null, null, null)))
+        assertThatThrownBy(() -> projects.update(alice, created.project().id(), upsert(null, "gitlab.com", null)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
         assertThat(store.findProject(created.project().id()).orElseThrow().gitlabUrl())
@@ -165,17 +154,17 @@ class ProjectControllerTest {
     }
 
     @Test
-    void updateClearsACustomModelBaseUrlWhenBlank() {
-        ProjectController.Registered created = projects.create(alice, upsert(
-                null, "https://gitlab.com", null,
-                Project.Provider.OPENAI_COMPAT, "gpt-5.4", "http://ollama:11434/v1"));
+    void aProjectFollowsItsCatalogEntryWhenTheModelChanges() {
+        ProjectController.Registered created = projects.create(alice, upsert(null, "https://gitlab.com", null));
+        assertThat(created.project().model()).isEqualTo("claude-opus-5");
 
-        Project updated = projects.update(alice, created.project().id(), upsert(
-                null, null, null, null, null, "  "));
+        store.updateLlmProvider(alice, defaultLlm.id(), null, null, "claude-opus-6", null, null);
 
-        assertThat(updated.modelBaseUrl()).isNull();
-        assertThat(store.findProject(updated.id()).orElseThrow().modelBaseUrl()).isNull();
-        assertThat(updated.model()).isEqualTo("gpt-5.4");
+        // Referenced, not copied: no project row was touched, yet the project reports the new
+        // model. This is the whole point of moving the key onto the entry — one rotation, not N.
+        Project reloaded = store.findProject(created.project().id()).orElseThrow();
+        assertThat(reloaded.model()).isEqualTo("claude-opus-6");
+        assertThat(reloaded.llmProviderId()).isEqualTo(defaultLlm.id());
     }
 
     @Test
@@ -183,9 +172,7 @@ class ProjectControllerTest {
         assertThatThrownBy(() -> projects.create(alice, null))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
-        ProjectController.Registered created = projects.create(alice, upsert(
-                null, "https://gitlab.com", null,
-                Project.Provider.ANTHROPIC, "claude-opus-5", null));
+        ProjectController.Registered created = projects.create(alice, upsert(null, "https://gitlab.com", null));
         assertThatThrownBy(() -> projects.update(alice, created.project().id(), null))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
@@ -193,17 +180,13 @@ class ProjectControllerTest {
 
     @Test
     void updateCanSwitchOntoACatalogWithoutRewritingSecrets() {
-        ProjectController.Registered created = projects.create(alice, upsert(
-                null, "https://gitlab.com", null,
-                Project.Provider.ANTHROPIC, "claude-opus-5", null));
+        ProjectController.Registered created = projects.create(alice, upsert(null, "https://gitlab.com", null));
         String token = store.findProject(created.project().id()).orElseThrow().gitlabToken();
-        GitlabInstance corp = store.createGitlabInstance("corp", "https://git.corp");
-        LlmProvider ollama = store.createLlmProvider("Ollama", Project.Provider.OPENAI_COMPAT,
-                "llama3.2", "http://ollama:11434/v1");
+        GitlabInstance corp = store.createGitlabInstance(admin, true, "corp", "https://git.corp");
+        LlmProvider ollama = store.createLlmProvider(alice, false, "Ollama",
+                Project.Provider.OPENAI_COMPAT, "llama3.2", "http://ollama:11434/v1", "sk-x");
 
-        Project updated = projects.update(alice, created.project().id(), upsert(
-                corp.id(), "https://ignored", ollama.id(),
-                Project.Provider.ANTHROPIC, "ignored", "http://ignored"));
+        Project updated = projects.update(alice, created.project().id(), upsert(corp.id(), "https://ignored", ollama.id()));
 
         assertThat(updated.gitlabUrl()).isEqualTo("https://git.corp");
         assertThat(updated.provider()).isEqualTo(Project.Provider.OPENAI_COMPAT);
@@ -215,28 +198,24 @@ class ProjectControllerTest {
     @Test
     void aSavedBaseUrlChangeShowsOnTheNextCreate() {
         settings.save(Map.of(RuntimeSettings.BASE_URL, "https://mrr.internal"));
-        ProjectController.Registered created = projects.create(alice, upsert(
-                null, "https://gitlab.com", null,
-                Project.Provider.ANTHROPIC, "claude-opus-5", null));
+        ProjectController.Registered created = projects.create(alice, upsert(null, "https://gitlab.com", null));
         assertThat(created.webhookUrl())
                 .startsWith("https://mrr.internal/webhooks/gitlab/");
     }
 
     @Test
     void adminCanSeeEveryProjectAUserCreates() {
-        ProjectController.Registered created = projects.create(alice, upsert(
-                null, "https://gitlab.com", null,
-                Project.Provider.ANTHROPIC, "claude-opus-5", null));
+        ProjectController.Registered created = projects.create(alice, upsert(null, "https://gitlab.com", null));
         assertThat(projects.list(admin)).extracting(Project::id)
                 .contains(created.project().id());
     }
 
-    private static ProjectController.Upsert upsert(String gitlabInstanceId, String gitlabUrl,
-                                                   String llmProviderId, Project.Provider provider,
-                                                   String model, String modelBaseUrl) {
+    /** A null {@code llmProviderId} falls back to the fixture entry, which has a key. */
+    private ProjectController.Upsert upsert(String gitlabInstanceId, String gitlabUrl,
+                                            String llmProviderId) {
         return new ProjectController.Upsert(
                 "calc", true, gitlabInstanceId, gitlabUrl, "group/calc", "glpat-x", null, null,
-                llmProviderId, provider, modelBaseUrl, model, "sk-x", null,
-                false, 1, List.of(), false, false);
+                llmProviderId == null ? defaultLlm.id() : llmProviderId,
+                null, false, 1, List.of(), false, false);
     }
 }

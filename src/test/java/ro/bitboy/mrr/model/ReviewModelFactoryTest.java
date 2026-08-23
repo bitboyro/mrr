@@ -47,10 +47,12 @@ class ReviewModelFactoryTest {
     }
 
     private static Project withModel(Project p, String model) {
+        LlmProvider llm = new LlmProvider(p.llm().id(), p.llm().ownerId(), p.llm().name(),
+                p.llm().provider(), model, p.llm().modelBaseUrl(), p.llm().modelKey(),
+                p.llm().createdAt());
         return new Project(p.id(), p.ownerId(), p.name(), p.enabled(), p.gitlabUrl(),
                 p.gitlabProjectId(), p.gitlabToken(), p.gitlabOperatorToken(),
-                p.webhookSecret(), p.provider(),
-                p.modelBaseUrl(), model, p.modelKey(), p.skill(), p.skipDrafts(),
+                p.webhookSecret(), llm.id(), llm, p.skill(), p.skipDrafts(),
                 p.agentMaxTurns(), p.agentTools(), p.autoApprove(), p.librarianEnabled(),
                 p.memoryHeadSha(), p.memoryStatus(), p.memoryRefreshedAt(),
                 p.lastErrorKind(), p.lastError(), p.lastErrorAt(), p.createdAt());

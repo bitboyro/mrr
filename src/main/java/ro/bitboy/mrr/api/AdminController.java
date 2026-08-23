@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.RestController;
 import ro.bitboy.mrr.auth.Principal;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.User;
+import ro.bitboy.mrr.store.BundledSkills;
 import ro.bitboy.mrr.store.Store;
 import ro.bitboy.mrr.web.ApiException;
 
@@ -35,10 +36,13 @@ import java.util.List;
              revoke its own tokens and do nothing else here.""")
 public class AdminController {
 
+    private final BundledSkills bundled;
+
     private final Store store;
 
-    public AdminController(Store store) {
+    public AdminController(Store store, BundledSkills bundled) {
         this.store = store;
+        this.bundled = bundled;
     }
 
     @Operation(summary = "Who the presented token belongs to",
@@ -62,7 +66,11 @@ public class AdminController {
             throw ApiException.badRequest("name is required");
         }
         Role role = request.role() == null ? Role.USER : request.role();
-        return store.createUser(request.name().trim(), role);
+        User created = store.createUser(request.name().trim(), role);
+        // Immediately, rather than at the next restart: a new account with an empty library
+        // looks broken to whoever just received its token.
+        store.seedLibrarySkills(created.id(), bundled.all());
+        return created;
     }
 
     @Operation(summary = "List all users", description = "Admin only.")

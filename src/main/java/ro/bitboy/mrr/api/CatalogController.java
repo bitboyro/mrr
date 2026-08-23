@@ -25,16 +25,23 @@ import ro.bitboy.mrr.web.Urls;
 import java.util.List;
 
 /**
- * Instance-wide catalogs and the public base URL. Lists are readable by any
- * authenticated user so a USER can pick a preset when registering a project.
- * Writes are admin-only. PATs and model keys are never stored here.
+ * The GitLab and LLM catalogs, and the public base URL.
+ *
+ * <p>Each entry is either shared — {@code ownerId} null, curated by an admin, visible to
+ * everyone — or owned by the user who created it. A caller lists the shared ones plus their
+ * own; an admin lists everything, exactly as with projects. Anyone may create their own entry;
+ * only an admin may create a shared one.
+ *
+ * <p>An LLM entry carries the API key a project bills against, which is why a shared entry may
+ * not hold one: it would be a credential handed to every account on the instance. GitLab PATs
+ * stay on the project, because a PAT is scoped to one project's code.
  */
 @RestController
 @Tag(name = "Catalogs",
         description = """
-                Named GitLab hosts (URL only) and LLM endpoints (no API key). \
-                `GET /api/instance` is the live public base URL used to build \
-                webhook URLs. Writes are admin-only; any authenticated user can list.""")
+                Named GitLab hosts (URL only) and LLM endpoints, which carry the model API \
+                key. Entries are shared (admin-curated, no key) or private to their owner. \
+                `GET /api/instance` is the live public base URL used to build webhook URLs.""")
 public class CatalogController {
 
     private final Store store;
@@ -54,7 +61,7 @@ public class CatalogController {
     @Operation(summary = "List GitLab instances")
     @GetMapping("/api/gitlab-instances")
     public List<GitlabInstance> listGitlab(Principal caller) {
-        return store.listGitlabInstances();
+        return store.listGitlabInstances(caller);
     }
 
     @Operation(summary = "Add a GitLab instance")
@@ -63,9 +70,9 @@ public class CatalogController {
     @PostMapping("/api/gitlab-instances")
     @ResponseStatus(HttpStatus.CREATED)
     public GitlabInstance createGitlab(Principal caller, @RequestBody GitlabUpsert request) {
-        requireAdmin(caller);
+        requireSharedIsAdmin(caller, request.shared());
         requireGitlabCreate(request);
-        return store.createGitlabInstance(request.name().trim(),
+        return store.createGitlabInstance(caller, request.shared(), request.name().trim(),
                 Urls.requireHttp(request.url(), "url"));
     }
 
@@ -75,10 +82,9 @@ public class CatalogController {
     @PutMapping("/api/gitlab-instances/{id}")
     public GitlabInstance updateGitlab(Principal caller, @PathVariable String id,
                                        @RequestBody GitlabUpsert request) {
-        requireAdmin(caller);
         requireGitlabUpdate(request);
         String url = request.url() == null ? null : Urls.requireHttp(request.url(), "url");
-        return store.updateGitlabInstance(id, request.name(), url);
+        return store.updateGitlabInstance(caller, id, request.name(), url);
     }
 
     @Operation(summary = "Delete a GitLab instance")
@@ -87,13 +93,13 @@ public class CatalogController {
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void deleteGitlab(Principal caller, @PathVariable String id) {
         requireAdmin(caller);
-        store.deleteGitlabInstance(id);
+        store.deleteGitlabInstance(caller, id);
     }
 
     @Operation(summary = "List LLM providers")
     @GetMapping("/api/llm-providers")
     public List<LlmProvider> listLlm(Principal caller) {
-        return store.listLlmProviders();
+        return store.listLlmProviders(caller).stream().map(LlmProvider::redacted).toList();
     }
 
     @Operation(summary = "Add an LLM provider")
@@ -102,12 +108,13 @@ public class CatalogController {
     @PostMapping("/api/llm-providers")
     @ResponseStatus(HttpStatus.CREATED)
     public LlmProvider createLlm(Principal caller, @RequestBody LlmUpsert request) {
-        requireAdmin(caller);
+        requireSharedIsAdmin(caller, request.shared());
         requireLlmCreate(request);
         String base = request.modelBaseUrl() == null || request.modelBaseUrl().isBlank()
                 ? null : Urls.requireHttp(request.modelBaseUrl(), "modelBaseUrl");
-        return store.createLlmProvider(request.name().trim(), request.provider(),
-                request.model().trim(), base);
+        return store.createLlmProvider(caller, request.shared(), request.name().trim(),
+                request.provider(), request.model().trim(), base, request.modelKey())
+                .redacted();
     }
 
     @Operation(summary = "Update an LLM provider",
@@ -116,13 +123,12 @@ public class CatalogController {
     @PutMapping("/api/llm-providers/{id}")
     public LlmProvider updateLlm(Principal caller, @PathVariable String id,
                                  @RequestBody LlmUpsert request) {
-        requireAdmin(caller);
         requireLlmUpdate(request);
         String base = request.modelBaseUrl() == null || request.modelBaseUrl().isBlank()
                 ? request.modelBaseUrl()
                 : Urls.requireHttp(request.modelBaseUrl(), "modelBaseUrl");
-        return store.updateLlmProvider(id, request.name(), request.provider(), request.model(),
-                base);
+        return store.updateLlmProvider(caller, id, request.name(), request.provider(),
+                request.model(), base, request.modelKey()).redacted();
     }
 
     @Operation(summary = "Delete an LLM provider")
@@ -131,12 +137,19 @@ public class CatalogController {
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void deleteLlm(Principal caller, @PathVariable String id) {
         requireAdmin(caller);
-        store.deleteLlmProvider(id);
+        store.deleteLlmProvider(caller, id);
     }
 
     private static void requireAdmin(Principal caller) {
         if (!caller.isAdmin()) {
             throw ApiException.forbidden("Only an admin token can perform this operation.");
+        }
+    }
+
+    /** Anyone may add their own entry; only an admin may add one everybody sees. */
+    private static void requireSharedIsAdmin(Principal caller, boolean shared) {
+        if (shared) {
+            requireAdmin(caller);
         }
     }
 
@@ -209,14 +222,23 @@ public class CatalogController {
     @Schema(description = "Create or update a GitLab host. On update, omitted fields are kept.")
     public record GitlabUpsert(
             @Schema(example = "gitlab.com") String name,
-            @Schema(example = "https://gitlab.com") String url) {
+            @Schema(example = "https://gitlab.com") String url,
+            @Schema(description = "Admin only. Makes the entry visible to every account.")
+            boolean shared) {
     }
 
-    @Schema(description = "Create or update an LLM endpoint. On update, omitted fields are kept. No API key.")
+    @Schema(description = """
+            Create or update an LLM endpoint. On update, omitted fields are kept — including \
+            `modelKey`, so the model can be changed without re-sending the key. Sending a new \
+            `modelKey` rotates it for every project referencing this entry.""")
     public record LlmUpsert(
             @Schema(example = "Anthropic Opus") String name,
             @Schema(example = "ANTHROPIC") Project.Provider provider,
             @Schema(example = "claude-opus-5") String model,
-            @Schema(nullable = true, example = "http://ollama:11434/v1") String modelBaseUrl) {
+            @Schema(nullable = true, example = "http://ollama:11434/v1") String modelBaseUrl,
+            @Schema(description = "Write-only. Required on a private entry, refused on a shared "
+                    + "one.", nullable = true) String modelKey,
+            @Schema(description = "Admin only. Makes the entry visible to every account, which "
+                    + "is why it may not carry a key.") boolean shared) {
     }
 }

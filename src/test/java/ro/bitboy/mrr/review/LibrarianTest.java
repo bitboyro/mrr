@@ -45,7 +45,7 @@ class LibrarianTest {
         librarian = new Librarian(store, memoryStore, new MemoryService(memoryStore),
                 new FakeGitLab(), new ReviewModelFactory(RestClient.builder(), settings),
                 settings, new ObjectMapper());
-        project = store.createProject(TestStores.project(
+        project = TestStores.persist(store, TestStores.project(
                 store.createUser("alice", Role.USER).id(), "calc", "hook-secret"));
     }
 

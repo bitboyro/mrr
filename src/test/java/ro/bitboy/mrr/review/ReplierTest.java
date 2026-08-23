@@ -38,7 +38,7 @@ class ReplierTest {
     void setUp() {
         store = TestStores.sqlite(tempDir);
         User alice = store.createUser("alice", Role.USER);
-        project = store.createProject(TestStores.project(alice.id(), "calc", "hook-secret"));
+        project = TestStores.persist(store, TestStores.project(alice.id(), "calc", "hook-secret"));
         gitlab = new FakeGitLab();
         workers = Executors.newSingleThreadExecutor();
         String reviewId = store.claimReview(project.id(), 7, "sha", "{}", TestStores.mrInfo())

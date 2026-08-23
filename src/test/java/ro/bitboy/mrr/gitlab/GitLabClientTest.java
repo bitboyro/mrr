@@ -7,6 +7,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.client.RestClient;
+import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.Project;
 
 import java.time.Instant;
@@ -486,10 +487,12 @@ class GitLabClientTest {
     }
 
     private Project project(String gitlabProjectId) {
+        LlmProvider llm = new LlmProvider("l1", "u1", "entry", Project.Provider.OPENAI_COMPAT,
+                "m", null, "k", Instant.now());
         return new Project("p1", "u1", "test", true,
                 gitlab.url("/").toString().replaceAll("/+$", ""), gitlabProjectId,
-                "glpat-test", null, "secret", Project.Provider.OPENAI_COMPAT, null,
-                "m", "k", null, false, 1, java.util.List.of(), false,
+                "glpat-test", null, "secret", llm.id(), llm,
+                null, false, 1, java.util.List.of(), false,
                 false, null, null, null, null, null, null, Instant.now());
     }
 }

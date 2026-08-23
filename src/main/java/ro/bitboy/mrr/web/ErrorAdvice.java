@@ -8,6 +8,7 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import jakarta.servlet.http.HttpServletRequest;
 
@@ -36,6 +37,20 @@ public class ErrorAdvice {
                 .body(new ErrorResponse("method_not_allowed",
                         "This URL does not accept " + e.getMethod() + ".",
                         request.getRequestURI()));
+    }
+
+    /**
+     * A path that matches no controller and no file. Left to the catch-all below it would be
+     * answered with 500 and logged at ERROR with a stack trace — which is both wrong for the
+     * caller and corrosive for anyone who needs ERROR to mean something, since a public
+     * instance is probed for {@code .env} and {@code .git/HEAD} within minutes of coming up.
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ErrorResponse> handle(NoResourceFoundException e,
+                                                HttpServletRequest request) {
+        log.debug("404 {} {}", request.getMethod(), request.getRequestURI());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(new ErrorResponse("not_found", "No such endpoint.", request.getRequestURI()));
     }
 
     @ExceptionHandler(Exception.class)

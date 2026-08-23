@@ -390,6 +390,13 @@
             "example": "gitlab.com",
             "type": "string"
           },
+          "ownerId": {
+            "description": "Owning user, or null for a shared entry every account can pick.",
+            "type": "string"
+          },
+          "shared": {
+            "type": "boolean"
+          },
           "url": {
             "example": "https://gitlab.com",
             "type": "string"
@@ -403,6 +410,10 @@
           "name": {
             "example": "gitlab.com",
             "type": "string"
+          },
+          "shared": {
+            "description": "Admin only. Makes the entry visible to every account.",
+            "type": "boolean"
           },
           "url": {
             "example": "https://gitlab.com",
@@ -557,7 +568,7 @@
         "type": "object"
       },
       "LlmProvider": {
-        "description": "Named LLM endpoint (no API key).",
+        "description": "Named LLM endpoint. `modelKey` is write-only: accepted on create and update, always masked on read. A shared entry (null `ownerId`) may not carry one.",
         "properties": {
           "createdAt": {
             "format": "date-time",
@@ -575,8 +586,17 @@
             "example": "http://ollama:11434/v1",
             "type": "string"
           },
+          "modelKey": {
+            "description": "Masked on read.",
+            "example": "****oosA",
+            "type": "string"
+          },
           "name": {
             "example": "Anthropic Opus",
+            "type": "string"
+          },
+          "ownerId": {
+            "description": "Owning user, or null for a shared entry every account can pick.",
             "type": "string"
           },
           "provider": {
@@ -586,12 +606,15 @@
               "OPENAI_COMPAT"
             ],
             "type": "string"
+          },
+          "shared": {
+            "type": "boolean"
           }
         },
         "type": "object"
       },
       "LlmUpsert": {
-        "description": "Create or update an LLM endpoint. On update, omitted fields are kept. No API key.",
+        "description": "Create or update an LLM endpoint. On update, omitted fields are kept \u2014 including `modelKey`, so the model can be changed without re-sending the key. Sending a new `modelKey` rotates it for every project referencing this entry.",
         "properties": {
           "model": {
             "example": "claude-opus-5",
@@ -599,6 +622,10 @@
           },
           "modelBaseUrl": {
             "example": "http://ollama:11434/v1",
+            "type": "string"
+          },
+          "modelKey": {
+            "description": "Write-only. Required on a private entry, refused on a shared one.",
             "type": "string"
           },
           "name": {
@@ -613,6 +640,10 @@
             ],
             "example": "ANTHROPIC",
             "type": "string"
+          },
+          "shared": {
+            "description": "Admin only. Makes the entry visible to every account, which is why it may not carry a key.",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -978,7 +1009,7 @@
         "type": "object"
       },
       "Project": {
-        "description": "A registered GitLab project. Secrets \u2014 `gitlabToken`, `gitlabOperatorToken`, `webhookSecret`, and `modelKey` \u2014 are write-only: accepted on create and update, always masked on read.",
+        "description": "A registered GitLab project. Secrets \u2014 `gitlabToken`, `gitlabOperatorToken` and `webhookSecret` \u2014 are write-only: accepted on create and update, always masked on read. The model and its API key come from the referenced catalog entry.",
         "properties": {
           "agentMaxTurns": {
             "description": "Maximum model turns per review, including the first. 1 is a single shot with no tools, which is the default and preserves original behaviour.",
@@ -1053,6 +1084,14 @@
             "description": "Optional librarian addon. When true, Initialize/Refresh is available. Disable never deletes memory files.",
             "type": "boolean"
           },
+          "llm": {
+            "$ref": "#/components/schemas/LlmProvider",
+            "description": "That entry, resolved and with its key masked. Read-only: write `llmProviderId`."
+          },
+          "llmProviderId": {
+            "description": "Catalog entry supplying the provider, model, base URL and API key. Referenced, not copied \u2014 rotating the key on the entry moves this project with it.",
+            "type": "string"
+          },
           "memoryHeadSha": {
             "description": "Default-branch tip the last librarian run observed.",
             "type": "string"
@@ -1071,34 +1110,12 @@
             ],
             "type": "string"
           },
-          "model": {
-            "example": "claude-opus-5",
-            "type": "string"
-          },
-          "modelBaseUrl": {
-            "description": "OPENAI_COMPAT only. Null means OpenAI itself.",
-            "example": "http://ollama:11434/v1",
-            "type": "string"
-          },
-          "modelKey": {
-            "description": "Masked on read.",
-            "example": "****oosA",
-            "type": "string"
-          },
           "name": {
             "example": "test-repo",
             "type": "string"
           },
           "ownerId": {
             "description": "The user that registered it. Only this user and admins can see it.",
-            "type": "string"
-          },
-          "provider": {
-            "description": "Which adapter reviews this project. ANTHROPIC uses the official Anthropic SDK. OPENAI_COMPAT speaks the chat-completions shape and so reaches OpenAI, Ollama, vLLM, llama.cpp, and most gateways \u2014 pick the one you want with `modelBaseUrl`.",
-            "enum": [
-              "ANTHROPIC",
-              "OPENAI_COMPAT"
-            ],
             "type": "string"
           },
           "skill": {
@@ -1554,36 +1571,12 @@
             "type": "boolean"
           },
           "llmProviderId": {
-            "description": "Catalog LLM endpoint. When set, copies provider, model, and modelBaseUrl onto the project; those fields are ignored. The project keeps its own copy afterwards.",
-            "type": "string"
-          },
-          "model": {
-            "description": "Model id, passed through verbatim.",
-            "example": "claude-opus-5",
-            "type": "string"
-          },
-          "modelBaseUrl": {
-            "description": "Only for OPENAI_COMPAT. Omit for OpenAI itself; set it to reach Ollama, vLLM, llama.cpp, or a gateway.",
-            "example": "http://ollama:11434/v1",
-            "type": "string"
-          },
-          "modelKey": {
-            "description": "API key for the model provider. Write-only.",
-            "example": "sk-...",
+            "description": "Catalog LLM endpoint supplying the provider, model, base URL and API key. Required on create. Referenced, not copied: rotating the key on the entry rotates it for this project too. Add entries under `/api/llm-providers`.",
             "type": "string"
           },
           "name": {
             "description": "Display name.",
             "example": "test-repo",
-            "type": "string"
-          },
-          "provider": {
-            "description": "Which adapter reviews this project. Required on create unless `llmProviderId` is set.",
-            "enum": [
-              "ANTHROPIC",
-              "OPENAI_COMPAT"
-            ],
-            "example": "OPENAI_COMPAT",
             "type": "string"
           },
           "skill": {
@@ -4053,16 +4046,16 @@
       "name": "Reviews"
     },
     {
+      "description": "Named GitLab hosts (URL only) and LLM endpoints, which carry the model API key. Entries are shared (admin-curated, no key) or private to their owner. `GET /api/instance` is the live public base URL used to build webhook URLs.",
+      "name": "Catalogs"
+    },
+    {
       "description": "Identity. Only an ADMIN token can create a user or mint a token \u2014 this is the single rule the whole multi-tenant model rests on. A USER token can list and revoke its own tokens and do nothing else here.",
       "name": "Users and tokens"
     },
     {
       "description": "Live status of merge requests mrr has reviewed. Distinct from a Review, which is one commit: this is where the MR stands now \u2014 reviewing, needs work, or clean.",
       "name": "Merge requests"
-    },
-    {
-      "description": "Named GitLab hosts (URL only) and LLM endpoints (no API key). `GET /api/instance` is the live public base URL used to build webhook URLs. Writes are admin-only; any authenticated user can list.",
-      "name": "Catalogs"
     },
     {
       "description": "Named instruction documents owned by the caller (or, for ADMIN, every user). Attaching a library skill to a project does not copy the body \u2014 edits here apply on the next review of every attached project. Delete is 409 while a project still uses the skill.",

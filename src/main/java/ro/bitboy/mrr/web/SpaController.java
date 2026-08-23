@@ -24,7 +24,9 @@ public class SpaController {
             "/reviews/{id}",
             "/admin",
             "/logs",
-            "/configure"
+            "/configure",
+            "/skills",
+            "/stats"
     })
     public String spa() {
         return "forward:/index.html";

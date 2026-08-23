@@ -17,6 +17,7 @@ import ro.bitboy.mrr.RuntimeSettings;
 import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.auth.Principal;
+import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.review.OpenMrScan;
 import ro.bitboy.mrr.store.Store;
@@ -74,9 +75,8 @@ public class ProjectController {
         require(request.name(), "name");
         require(request.gitlabProjectId(), "gitlabProjectId");
         require(request.gitlabToken(), "gitlabToken");
-        require(request.modelKey(), "modelKey");
-        String gitlabUrl = resolveGitlabUrl(request, null);
-        ResolvedLlm llm = resolveLlm(request, null);
+        String gitlabUrl = resolveGitlabUrl(caller, request, null);
+        LlmProvider llm = resolveLlm(caller, request, null);
 
         // Generated unless supplied, so registering a project never silently ends up with a
         // guessable webhook secret.
@@ -88,8 +88,7 @@ public class ProjectController {
                 Ids.newId(), caller.userId(), request.name().trim(), true,
                 gitlabUrl, request.gitlabProjectId(),
                 request.gitlabToken(), blankToNull(request.gitlabOperatorToken()), secret,
-                llm.provider(), llm.modelBaseUrl(),
-                llm.model(), request.modelKey(), request.skill(),
+                llm.id(), llm, request.skill(),
                 Boolean.TRUE.equals(request.skipDrafts()),
                 request.agentMaxTurns() == null ? 1 : Math.max(1, request.agentMaxTurns()),
                 request.agentTools() == null ? List.of() : request.agentTools(),
@@ -133,8 +132,8 @@ public class ProjectController {
     public Project update(Principal caller, @PathVariable String id, @RequestBody Upsert request) {
         ApiException.requireBody(request);
         Project existing = store.requireVisible(caller, id);
-        String gitlabUrl = resolveGitlabUrl(request, existing.gitlabUrl());
-        ResolvedLlm llm = resolveLlm(request, existing);
+        String gitlabUrl = resolveGitlabUrl(caller, request, existing.gitlabUrl());
+        LlmProvider llm = resolveLlm(caller, request, existing);
 
         Project updated = new Project(
                 existing.id(), existing.ownerId(),
@@ -145,10 +144,7 @@ public class ProjectController {
                 orKeep(request.gitlabToken(), existing.gitlabToken()),
                 orKeep(request.gitlabOperatorToken(), existing.gitlabOperatorToken()),
                 orKeep(request.webhookSecret(), existing.webhookSecret()),
-                llm.provider(),
-                llm.modelBaseUrl(),
-                llm.model(),
-                orKeep(request.modelKey(), existing.modelKey()),
+                llm.id(), llm,
                 request.skill() == null ? existing.skill() : request.skill(),
                 request.skipDrafts() == null ? existing.skipDrafts() : request.skipDrafts(),
                 request.agentMaxTurns() == null ? existing.agentMaxTurns()
@@ -180,9 +176,9 @@ public class ProjectController {
         store.deleteProject(id);
     }
 
-    private String resolveGitlabUrl(Upsert request, String existing) {
+    private String resolveGitlabUrl(Principal caller, Upsert request, String existing) {
         if (request.gitlabInstanceId() != null && !request.gitlabInstanceId().isBlank()) {
-            return store.findGitlabInstance(request.gitlabInstanceId().trim())
+            return store.findGitlabInstance(caller, request.gitlabInstanceId().trim())
                     .orElseThrow(() -> ApiException.notFound("gitlab instance")).url();
         }
         if (request.gitlabUrl() == null || request.gitlabUrl().isBlank()) {
@@ -194,33 +190,28 @@ public class ProjectController {
         return Urls.requireHttp(request.gitlabUrl(), "gitlabUrl");
     }
 
-    private ResolvedLlm resolveLlm(Upsert request, Project existing) {
-        if (request.llmProviderId() != null && !request.llmProviderId().isBlank()) {
-            var preset = store.findLlmProvider(request.llmProviderId().trim())
-                    .orElseThrow(() -> ApiException.notFound("llm provider"));
-            return new ResolvedLlm(preset.provider(), preset.model(), preset.modelBaseUrl());
+    /**
+     * A project's model configuration is a catalog entry, always. Inline provider/model/key
+     * are gone from the API: the key belongs on the entry, where it is set once and rotated
+     * for every project referencing it, instead of being retyped per project and then stale
+     * in four places.
+     */
+    private LlmProvider resolveLlm(Principal caller, Upsert request, Project existing) {
+        String id = request.llmProviderId() == null || request.llmProviderId().isBlank()
+                ? (existing == null ? null : existing.llmProviderId())
+                : request.llmProviderId().trim();
+        if (id == null) {
+            throw ApiException.badRequest("llmProviderId is required: pick an entry from "
+                    + "GET /api/llm-providers, or add one there first. The model and its API "
+                    + "key live on the entry, not on the project.");
         }
-        if (existing == null) {
-            if (request.provider() == null) {
-                throw ApiException.badRequest("provider must be ANTHROPIC or OPENAI_COMPAT");
-            }
-            require(request.model(), "model");
-            String base = request.modelBaseUrl() == null || request.modelBaseUrl().isBlank()
-                    ? null : Urls.requireHttp(request.modelBaseUrl(), "modelBaseUrl");
-            return new ResolvedLlm(request.provider(), request.model().trim(), base);
+        LlmProvider entry = store.findLlmProvider(caller, id)
+                .orElseThrow(() -> ApiException.notFound("llm provider"));
+        if (!entry.hasKey()) {
+            throw ApiException.badRequest("that entry has no API key, so no review could run. "
+                    + "It is a shared entry; add your own under Configure.");
         }
-        String base;
-        if (request.modelBaseUrl() == null) {
-            base = existing.modelBaseUrl();
-        } else if (request.modelBaseUrl().isBlank()) {
-            base = null;
-        } else {
-            base = Urls.requireHttp(request.modelBaseUrl(), "modelBaseUrl");
-        }
-        return new ResolvedLlm(
-                request.provider() == null ? existing.provider() : request.provider(),
-                orKeep(request.model(), existing.model()),
-                base);
+        return entry;
     }
 
     private static void require(String value, String field) {
@@ -261,18 +252,11 @@ public class ProjectController {
                     example = "glpat-yyyyyyyyyyyyyyyyyyyy") String gitlabOperatorToken,
             @Schema(description = "Shared secret GitLab sends as `X-Gitlab-Token`. Generated if omitted. Write-only.")
             String webhookSecret,
-            @Schema(description = "Catalog LLM endpoint. When set, copies provider, model, and "
-                    + "modelBaseUrl onto the project; those fields are ignored. The project keeps "
-                    + "its own copy afterwards.")
+            @Schema(description = "Catalog LLM endpoint supplying the provider, model, base URL "
+                    + "and API key. Required on create. Referenced, not copied: rotating the key "
+                    + "on the entry rotates it for this project too. Add entries under "
+                    + "`/api/llm-providers`.")
             String llmProviderId,
-            @Schema(description = "Which adapter reviews this project. Required on create unless "
-                    + "`llmProviderId` is set.", example = "OPENAI_COMPAT")
-            Project.Provider provider,
-            @Schema(description = "Only for OPENAI_COMPAT. Omit for OpenAI itself; set it to reach "
-                    + "Ollama, vLLM, llama.cpp, or a gateway.", example = "http://ollama:11434/v1")
-            String modelBaseUrl,
-            @Schema(description = "Model id, passed through verbatim.", example = "claude-opus-5") String model,
-            @Schema(description = "API key for the model provider. Write-only.", example = "sk-...") String modelKey,
             @Schema(description = "Legacy single instruction blob. On create, becomes the first "
                     + "enabled skill named `reviewer`. Prefer POST `/api/projects/{id}/skills`.",
                     example = "Focus on concurrency bugs and error handling.")
@@ -295,8 +279,6 @@ public class ProjectController {
             Boolean librarianEnabled) {
     }
 
-    private record ResolvedLlm(Project.Provider provider, String model, String modelBaseUrl) {
-    }
 
     @Schema(description = "A newly registered project, plus the two values GitLab needs.")
     public record Registered(
