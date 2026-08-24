@@ -14,6 +14,13 @@ services:
       # openssl rand -base64 32
       MRR_SECRET_KEY: ${MRR_SECRET_KEY:-}
       MRR_SECRET_KEY_FILE: ${MRR_SECRET_KEY_FILE:-}
+      # Empty = SQLite at /data/mrr.db, which is the default. Set MRR_DB_URL in .env to
+      # use an external Postgres instead — see "Database" in the README, and the db
+      # service commented out at the bottom of this file for a local one.
+      MRR_DB_URL: ${MRR_DB_URL:-}
+      MRR_DB_USER: ${MRR_DB_USER:-}
+      MRR_DB_PASSWORD: ${MRR_DB_PASSWORD:-}
+      MRR_DB_POOL_SIZE: ${MRR_DB_POOL_SIZE:-4}
       MRR_REVIEW_WORKERS: ${MRR_REVIEW_WORKERS:-2}
       MRR_SCAN_INTERVAL_MS: ${MRR_SCAN_INTERVAL_MS:-120000}
       MRR_MAX_DIFF_CHARS: ${MRR_MAX_DIFF_CHARS:-200000}
@@ -31,3 +38,33 @@ services:
       # without losing it. The entrypoint chowns this to uid 10001 on start
       # (Compose often creates ./data as root). Or: mkdir -p data && sudo chown -R 10001:10001 data
       - ${MRR_DATA:-./data}:/data
+
+# Postgres, if you would rather not keep the database on the container's disk. Uncomment
+# this service and the volume, add `depends_on: [db]` to mrr above, and set in .env:
+#
+#   MRR_DB_URL=jdbc:postgresql://db:5432/mrr
+#   MRR_DB_USER=mrr
+#   MRR_DB_PASSWORD=<the same value as POSTGRES_PASSWORD below>
+#   MRR_DB_POOL_SIZE=10
+#
+# Keep the /data mount either way: the root token and the memory files live there, and the
+# memory corpus stays on disk with the database only indexing it.
+#
+#  db:
+#    image: postgres:16-alpine
+#    container_name: mrr-db
+#    restart: unless-stopped
+#    environment:
+#      POSTGRES_DB: mrr
+#      POSTGRES_USER: mrr
+#      POSTGRES_PASSWORD: ${MRR_DB_PASSWORD:?set MRR_DB_PASSWORD in .env}
+#    volumes:
+#      - mrr-db:/var/lib/postgresql/data
+#    healthcheck:
+#      test: ["CMD-SHELL", "pg_isready -U mrr -d mrr"]
+#      interval: 10s
+#      timeout: 3s
+#      retries: 5
+#
+#volumes:
+#  mrr-db:

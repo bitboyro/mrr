@@ -11,12 +11,24 @@ spring:
           # hashed assets opt out of this in StaticCacheConfig and are cached for a year.
           no-cache: true
   datasource:
-    url: jdbc:sqlite:${MRR_DB_PATH:/data/mrr.db}
-    driver-class-name: org.sqlite.JDBC
+    # SQLite by default — one file under /data, nothing to run alongside mrr.
+    # Set MRR_DB_URL to point at an external Postgres instead:
+    #   MRR_DB_URL=jdbc:postgresql://db:5432/mrr  MRR_DB_USER=mrr  MRR_DB_PASSWORD=…
+    # MRR_DB_PATH is then unused. No driver-class-name: Spring Boot resolves the driver
+    # from the URL scheme, which is the whole reason the swap is a config change.
+    #
+    # The fallback below only applies when MRR_DB_URL is absent — an empty one resolves to
+    # an empty URL and would take the datasource down with it, which is what Compose hands
+    # us for an unset variable. BlankDbUrlMeansSqlite turns blank back into absent; keep
+    # the two in step if this default ever changes.
+    url: ${MRR_DB_URL:jdbc:sqlite:${MRR_DB_PATH:/data/mrr.db}}
+    username: ${MRR_DB_USER:}
+    password: ${MRR_DB_PASSWORD:}
     hikari:
       # SQLite takes a write lock per connection; a small pool avoids SQLITE_BUSY
-      # under concurrent webhook delivery.
-      maximum-pool-size: 4
+      # under concurrent webhook delivery. Postgres has no such constraint — raise
+      # this alongside MRR_REVIEW_WORKERS when you move to one.
+      maximum-pool-size: ${MRR_DB_POOL_SIZE:4}
   sql:
     init:
       mode: always

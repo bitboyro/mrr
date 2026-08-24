@@ -29,6 +29,10 @@
       the Messages API wire format is a maintenance liability on a surface that moves — the
       official SDK owns retries, error typing, and the request shape. The OpenAI-compatible
       adapter stays on RestClient, since it isn't calling Claude at all.
+
+      The Postgres driver is runtime-scoped and costs nothing until MRR_DB_URL names one:
+      no code imports it, and Spring Boot picks a driver from the URL scheme. SQLite stays
+      the default and the only backend a single-box deployment needs.
     -->
     <properties>
         <java.version>21</java.version>
@@ -75,6 +79,11 @@
             <groupId>org.xerial</groupId>
             <artifactId>sqlite-jdbc</artifactId>
             <version>${sqlite.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
         </dependency>
         <dependency>
             <groupId>org.springframework.ai</groupId>
