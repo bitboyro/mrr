@@ -10,7 +10,8 @@ import ro.bitboy.mrr.model.AgentSkill;
 import ro.bitboy.mrr.model.AgentTrace;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.Finding;
-import ro.bitboy.mrr.model.GitlabInstance;
+import ro.bitboy.mrr.model.ForgeInstance;
+import ro.bitboy.mrr.model.ForgeKind;
 import ro.bitboy.mrr.model.InstanceStats;
 import ro.bitboy.mrr.model.LibrarySkill;
 import ro.bitboy.mrr.model.LlmProvider;
@@ -117,16 +118,16 @@ public class Store {
      * account rather than retyped per user. Absent means someone deleted it deliberately —
      * this only fills in a catalog that has never had it.
      */
-    public boolean ensureSharedGitlabInstance(String name, String url) {
-        Integer existing = db.sql("SELECT count(*) FROM gitlab_instances WHERE owner_id IS NULL")
+    public boolean ensureSharedForgeInstance(String name, ForgeKind kind, String url) {
+        Integer existing = db.sql("SELECT count(*) FROM forge_instances WHERE owner_id IS NULL")
                 .query(Integer.class).single();
         if (existing != null && existing > 0) {
             return false;
         }
         db.sql("""
-                INSERT INTO gitlab_instances (id, owner_id, name, url, created_at)
-                VALUES (?, NULL, ?, ?, ?)
-                """).params(Ids.newId(), name, url, Instant.now().toString()).update();
+                INSERT INTO forge_instances (id, owner_id, name, kind, url, created_at)
+                VALUES (?, NULL, ?, ?, ?, ?)
+                """).params(Ids.newId(), name, kind.name(), url, Instant.now().toString()).update();
         return true;
     }
 
@@ -212,14 +213,16 @@ public class Store {
 
     public Project createProject(Project p) {
         db.sql("""
-                INSERT INTO projects (id, owner_id, name, enabled, gitlab_url, gitlab_project_id,
+                INSERT INTO projects (id, owner_id, name, enabled, forge, gitlab_url,
+                                      gitlab_project_id,
                                       gitlab_token, gitlab_operator_token, webhook_secret,
                                       llm_provider_id, skill, skip_drafts,
                                       agent_max_turns, agent_tools, auto_approve, librarian_enabled,
                                       created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)
-                .params(p.id(), p.ownerId(), p.name(), p.enabled() ? 1 : 0, p.gitlabUrl(),
+                .params(p.id(), p.ownerId(), p.name(), p.enabled() ? 1 : 0, p.forge().name(),
+                        p.gitlabUrl(),
                         p.gitlabProjectId(), secrets.seal(p.gitlabToken()),
                         secrets.seal(p.gitlabOperatorToken()),
                         secrets.seal(p.webhookSecret()), p.llmProviderId(), p.skill(),
@@ -232,13 +235,15 @@ public class Store {
 
     public void updateProject(Project p) {
         db.sql("""
-                UPDATE projects SET name = ?, enabled = ?, gitlab_url = ?, gitlab_project_id = ?,
+                UPDATE projects SET name = ?, enabled = ?, forge = ?, gitlab_url = ?,
+                       gitlab_project_id = ?,
                        gitlab_token = ?, gitlab_operator_token = ?, webhook_secret = ?,
                        llm_provider_id = ?, skill = ?, skip_drafts = ?, agent_max_turns = ?,
                        agent_tools = ?, auto_approve = ?, librarian_enabled = ?
                 WHERE id = ?
                 """)
-                .params(p.name(), p.enabled() ? 1 : 0, p.gitlabUrl(), p.gitlabProjectId(),
+                .params(p.name(), p.enabled() ? 1 : 0, p.forge().name(), p.gitlabUrl(),
+                        p.gitlabProjectId(),
                         secrets.seal(p.gitlabToken()), secrets.seal(p.gitlabOperatorToken()),
                         secrets.seal(p.webhookSecret()),
                         p.llmProviderId(), p.skill(), p.skipDrafts() ? 1 : 0,
@@ -964,7 +969,7 @@ public class Store {
         db.sql("DELETE FROM settings").update();
     }
 
-    // ── GitLab / LLM catalogs ────────────────────────────────────────────────────────
+    // ── forge / LLM catalogs ─────────────────────────────────────────────────────────
 
     /**
      * A caller sees the shared entries plus their own. Admins see everything, exactly as they
@@ -972,55 +977,56 @@ public class Store {
      */
     private static final String VISIBLE = " WHERE (owner_id IS NULL OR owner_id = ? OR ?) ";
 
-    public List<GitlabInstance> listGitlabInstances(Principal caller) {
-        return db.sql("SELECT * FROM gitlab_instances" + VISIBLE + "ORDER BY name")
+    public List<ForgeInstance> listForgeInstances(Principal caller) {
+        return db.sql("SELECT * FROM forge_instances" + VISIBLE + "ORDER BY name")
                 .params(caller.userId(), caller.isAdmin())
-                .query(Store::toGitlabInstance).list();
+                .query(Store::toForgeInstance).list();
     }
 
-    public Optional<GitlabInstance> findGitlabInstance(Principal caller, String id) {
-        return db.sql("SELECT * FROM gitlab_instances" + VISIBLE + "AND id = ?")
+    public Optional<ForgeInstance> findForgeInstance(Principal caller, String id) {
+        return db.sql("SELECT * FROM forge_instances" + VISIBLE + "AND id = ?")
                 .params(caller.userId(), caller.isAdmin(), id)
-                .query(Store::toGitlabInstance).optional();
+                .query(Store::toForgeInstance).optional();
     }
 
-    public GitlabInstance createGitlabInstance(Principal caller, boolean shared,
-                                               String name, String url) {
+    public ForgeInstance createForgeInstance(Principal caller, boolean shared, String name,
+                                             ForgeKind kind, String url) {
         String trimmed = requireName(name);
         String host = requireHttpUrl(url, "url");
-        GitlabInstance row = new GitlabInstance(Ids.newId(), shared ? null : caller.userId(),
-                trimmed, host, Instant.now());
+        ForgeInstance row = new ForgeInstance(Ids.newId(), shared ? null : caller.userId(),
+                trimmed, kind == null ? ForgeKind.DEFAULT : kind, host, Instant.now());
         try {
             db.sql("""
-                    INSERT INTO gitlab_instances (id, owner_id, name, url, created_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO forge_instances (id, owner_id, name, kind, url, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """)
-                    .params(row.id(), row.ownerId(), row.name(), row.url(),
+                    .params(row.id(), row.ownerId(), row.name(), row.kind().name(), row.url(),
                             row.createdAt().toString()).update();
         } catch (DataAccessException e) {
-            throw ApiException.conflict("a GitLab instance named '" + trimmed + "' already exists");
+            throw ApiException.conflict("a forge host named '" + trimmed + "' already exists");
         }
         return row;
     }
 
-    public GitlabInstance updateGitlabInstance(Principal caller, String id,
-                                               String name, String url) {
-        GitlabInstance current = findGitlabInstance(caller, id)
-                .orElseThrow(() -> ApiException.notFound("gitlab instance"));
+    public ForgeInstance updateForgeInstance(Principal caller, String id, String name,
+                                             ForgeKind kind, String url) {
+        ForgeInstance current = findForgeInstance(caller, id)
+                .orElseThrow(() -> ApiException.notFound("forge instance"));
         String nextName = name == null || name.isBlank() ? current.name() : requireName(name);
         String nextUrl = url == null || url.isBlank() ? current.url() : requireHttpUrl(url, "url");
+        ForgeKind nextKind = kind == null ? current.kind() : kind;
         try {
-            db.sql("UPDATE gitlab_instances SET name = ?, url = ? WHERE id = ?")
-                    .params(nextName, nextUrl, id).update();
+            db.sql("UPDATE forge_instances SET name = ?, kind = ?, url = ? WHERE id = ?")
+                    .params(nextName, nextKind.name(), nextUrl, id).update();
         } catch (DataAccessException e) {
-            throw ApiException.conflict("a GitLab instance named '" + nextName + "' already exists");
+            throw ApiException.conflict("a forge host named '" + nextName + "' already exists");
         }
-        return findGitlabInstance(caller, id).orElseThrow();
+        return findForgeInstance(caller, id).orElseThrow();
     }
 
-    public void deleteGitlabInstance(Principal caller, String id) {
-        findGitlabInstance(caller, id).orElseThrow(() -> ApiException.notFound("gitlab instance"));
-        db.sql("DELETE FROM gitlab_instances WHERE id = ?").param(id).update();
+    public void deleteForgeInstance(Principal caller, String id) {
+        findForgeInstance(caller, id).orElseThrow(() -> ApiException.notFound("forge instance"));
+        db.sql("DELETE FROM forge_instances WHERE id = ?").param(id).update();
     }
 
     public List<LlmProvider> listLlmProviders(Principal caller) {
@@ -1533,7 +1539,9 @@ public class Store {
     private Project toProject(ResultSet rs, int n) throws SQLException {
         return new Project(
                 rs.getString("id"), rs.getString("owner_id"), rs.getString("name"),
-                rs.getInt("enabled") == 1, rs.getString("gitlab_url"), rs.getString("gitlab_project_id"),
+                rs.getInt("enabled") == 1,
+                ForgeKind.parseOrDefault(columnText(rs, "forge")),
+                rs.getString("gitlab_url"), rs.getString("gitlab_project_id"),
                 secrets.open(rs.getString("gitlab_token")),
                 secrets.open(rs.getString("gitlab_operator_token")),
                 secrets.open(rs.getString("webhook_secret")),
@@ -1626,9 +1634,10 @@ public class Store {
                 instant(rs.getString("created_at")), instant(rs.getString("updated_at")));
     }
 
-    private static GitlabInstance toGitlabInstance(ResultSet rs, int n) throws SQLException {
-        return new GitlabInstance(rs.getString("id"), rs.getString("owner_id"),
-                rs.getString("name"), rs.getString("url"), instant(rs.getString("created_at")));
+    private static ForgeInstance toForgeInstance(ResultSet rs, int n) throws SQLException {
+        return new ForgeInstance(rs.getString("id"), rs.getString("owner_id"),
+                rs.getString("name"), ForgeKind.parseOrDefault(columnText(rs, "kind")),
+                rs.getString("url"), instant(rs.getString("created_at")));
     }
 
     private LlmProvider toLlmProvider(ResultSet rs, int n) throws SQLException {
@@ -1665,6 +1674,19 @@ public class Store {
             return MemoryStatus.valueOf(value);
         } catch (IllegalArgumentException e) {
             return MemoryStatus.NONE;
+        }
+    }
+
+    /**
+     * A column a test fixture or an older database may not have. {@code forge} and
+     * {@code kind} are both {@code DEFAULT 'GITLAB'} in the schema, so absence and null both
+     * mean the same thing and the caller's {@code parseOrDefault} lands on GITLAB either way.
+     */
+    private static String columnText(ResultSet rs, String column) {
+        try {
+            return rs.getString(column);
+        } catch (SQLException e) {
+            return null;
         }
     }
 

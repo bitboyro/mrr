@@ -1,6 +1,7 @@
 package ro.bitboy.mrr.review;
 
-import ro.bitboy.mrr.gitlab.GitLabClient;
+import ro.bitboy.mrr.forge.Diff;
+import ro.bitboy.mrr.forge.FilePatch;
 import ro.bitboy.mrr.model.AgentDocument;
 import ro.bitboy.mrr.model.AgentSkill;
 import ro.bitboy.mrr.model.Finding;
@@ -152,16 +153,16 @@ final class Prompts {
               the code is affected. Skip it only if you genuinely cannot tell.
             """;
 
-    static String user(GitLabClient.Diff diff, List<Finding> priorOpen) {
+    static String user(Diff diff, List<Finding> priorOpen) {
         return user(diff, priorOpen, List.of(), 20_000, null);
     }
 
-    static String user(GitLabClient.Diff diff, List<Finding> priorOpen,
+    static String user(Diff diff, List<Finding> priorOpen,
                        List<AgentDocument> documents, int maxDocumentChars) {
         return user(diff, priorOpen, documents, maxDocumentChars, null);
     }
 
-    static String user(GitLabClient.Diff diff, List<Finding> priorOpen,
+    static String user(Diff diff, List<Finding> priorOpen,
                        List<AgentDocument> documents, int maxDocumentChars,
                        String userContext) {
         StringBuilder sb = new StringBuilder();
@@ -226,16 +227,16 @@ final class Prompts {
      * One window of a large MR. Priors whose file is in this slice are judged here;
      * the rest wait for another slice or the merge turn.
      */
-    static String userSlice(GitLabClient.Diff diff, DiffWindows.Slice slice,
+    static String userSlice(Diff diff, DiffWindows.Slice slice,
                             List<AgentDocument> documents, int maxDocumentChars,
                             String userContext) {
         return userSlice(diff, slice, documents, maxDocumentChars, userContext, List.of());
     }
 
-    static String userSlice(GitLabClient.Diff diff, DiffWindows.Slice slice,
+    static String userSlice(Diff diff, DiffWindows.Slice slice,
                             List<AgentDocument> documents, int maxDocumentChars,
                             String userContext, List<Finding> priorOpen) {
-        GitLabClient.Diff view = diff.forSlice(slice.paths(), slice.text(), slice.clipped());
+        Diff view = diff.forSlice(slice.paths(), slice.text(), slice.clipped());
         List<Finding> local = priorsIn(priorOpen, slice.paths());
         String header = "This is slice " + slice.index() + " of " + slice.of()
                 + ". Review ONLY the files in this slice. Return the JSON object for this "
@@ -256,7 +257,7 @@ final class Prompts {
      * Merge N slice verdicts into one MR-wide JSON object. The diffs themselves are
      * omitted so this prompt stays inside the same window.
      */
-    static String synthesize(GitLabClient.Diff diff, List<Finding> priorOpen,
+    static String synthesize(Diff diff, List<Finding> priorOpen,
                              List<AgentDocument> documents, int maxDocumentChars,
                              String userContext, List<DiffWindows.Slice> slices,
                              List<String> partials, int maxPartialChars) {
@@ -334,6 +335,28 @@ final class Prompts {
         return sb.toString();
     }
 
+    /**
+     * Leads a finding's comment when the host cannot close the thread itself.
+     *
+     * <p>mrr is source of truth for whether a finding still stands, and a host limitation must
+     * never weaken that — so the finding is recorded {@code ADDRESSED} or {@code APPROVED}
+     * either way. What changes is what a human reads on the request: on a host with no
+     * conversation-resolve the thread stays visually open, and this marker is what stops it
+     * reading as an outstanding problem. Struck through on purpose: it says "this was dealt
+     * with" without claiming the host closed anything.
+     */
+    static final String ADDRESSED_MARKER = "~~**Addressed**~~";
+
+    /** The same comment with the marker on top. Idempotent — a re-run must not stack markers. */
+    static String withAddressedMarker(String body) {
+        String text = body == null ? "" : body;
+        if (text.stripLeading().startsWith(ADDRESSED_MARKER)) {
+            return text;
+        }
+        return ADDRESSED_MARKER + " — mrr recorded this as resolved; this host cannot close the "
+                + "thread.\n\n" + text;
+    }
+
     static final String OVERVIEW_PREFIX = "### mrr review";
 
     static boolean isOverview(String body) {
@@ -386,7 +409,7 @@ final class Prompts {
      * {@code maxChars} is the budget for the whole evidence block, not per finding.
      * Later findings are dropped once it is exhausted.
      */
-    static String priorEvidence(GitLabClient.Diff diff, List<Finding> priorOpen, int maxChars) {
+    static String priorEvidence(Diff diff, List<Finding> priorOpen, int maxChars) {
         if (priorOpen == null || priorOpen.isEmpty()) {
             return "";
         }
@@ -405,7 +428,7 @@ final class Prompts {
                 chunk.append(" — ").append(finding.title());
             }
             chunk.append('\n');
-            GitLabClient.FilePatch patch = patchFor(diff, finding.filePath());
+            FilePatch patch = patchFor(diff, finding.filePath());
             if (patch == null) {
                 chunk.append("No patch for this path in the current merge-request diff.\n\n");
             } else {
@@ -439,11 +462,11 @@ final class Prompts {
                 .toList();
     }
 
-    private static GitLabClient.FilePatch patchFor(GitLabClient.Diff diff, String path) {
+    private static FilePatch patchFor(Diff diff, String path) {
         if (diff == null || path == null || path.isBlank()) {
             return null;
         }
-        for (GitLabClient.FilePatch patch : diff.patches()) {
+        for (FilePatch patch : diff.patches()) {
             if (path.equals(patch.path())) {
                 return patch;
             }

@@ -12,7 +12,12 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import ro.bitboy.mrr.auth.Principal;
-import ro.bitboy.mrr.gitlab.GitLabClient;
+import ro.bitboy.mrr.forge.Discussion;
+import ro.bitboy.mrr.forge.FilePatch;
+import ro.bitboy.mrr.forge.GitMeta;
+import ro.bitboy.mrr.forge.MergeRequest;
+import ro.bitboy.mrr.forge.MrCommit;
+import ro.bitboy.mrr.forge.ForgeFactory;
 import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.model.MergeRequestInfo;
 import ro.bitboy.mrr.model.MrStatus;
@@ -37,14 +42,14 @@ public class MergeRequestController {
             org.slf4j.LoggerFactory.getLogger(MergeRequestController.class);
 
     private final Store store;
-    private final GitLabClient gitlab;
+    private final ForgeFactory forges;
     private final MemoryService memory;
     /** One GitLab backfill attempt per cycle per process, so the 1s poll does not hammer. */
     private final Set<String> gitMetaBackfilled = ConcurrentHashMap.newKeySet();
 
-    public MergeRequestController(Store store, GitLabClient gitlab, MemoryService memory) {
+    public MergeRequestController(Store store, ForgeFactory forges, MemoryService memory) {
         this.store = store;
-        this.gitlab = gitlab;
+        this.forges = forges;
         this.memory = memory;
     }
 
@@ -100,7 +105,7 @@ public class MergeRequestController {
             if (project == null) {
                 return reviews;
             }
-            GitLabClient.GitMeta meta = gitlab.gitMeta(project, iid);
+            GitMeta meta = forges.forProject(project).gitMeta(project, iid);
             store.updateMergeRequestInfo(reviews.getFirst().id(),
                     mr.withGitMeta(meta.commitCount(), meta.assigneesText(), meta.reviewersText(),
                             meta.detailedMergeStatus(), meta.divergedCommitsCount(),
@@ -137,10 +142,10 @@ public class MergeRequestController {
             description = "Live from GitLab, using the review PAT.")
     @ApiResponse(responseCode = "404", description = "No such project, MR, or not yours")
     @GetMapping("/api/projects/{projectId}/merge-requests/{iid}/commits")
-    public List<GitLabClient.MrCommit> commits(Principal caller, @PathVariable String projectId,
+    public List<MrCommit> commits(Principal caller, @PathVariable String projectId,
                                                @PathVariable long iid) {
         Project project = requireCycle(caller, projectId, iid);
-        return gitlab.mrCommits(project, iid);
+        return forges.forProject(project).mrCommits(project, iid);
     }
 
     @Operation(summary = "Paths a commit touched",
@@ -155,7 +160,7 @@ public class MergeRequestController {
                                     @PathVariable long iid,
                                     @PathVariable String sha) {
         Project project = requireCycle(caller, projectId, iid);
-        return gitlab.commitFiles(project, sha);
+        return forges.forProject(project).commitFiles(project, sha);
     }
 
     @Operation(summary = "One file's patch from one commit",
@@ -165,13 +170,13 @@ public class MergeRequestController {
                     `path` is a query parameter because paths contain slashes.""")
     @ApiResponse(responseCode = "404", description = "No such project, MR, commit file, or not yours")
     @GetMapping("/api/projects/{projectId}/merge-requests/{iid}/commits/{sha}/diff")
-    public GitLabClient.FilePatch commitFilePatch(Principal caller,
+    public FilePatch commitFilePatch(Principal caller,
                                                   @PathVariable String projectId,
                                                   @PathVariable long iid,
                                                   @PathVariable String sha,
                                                   @RequestParam String path) {
         Project project = requireCycle(caller, projectId, iid);
-        return gitlab.commitFilePatch(project, sha, path)
+        return forges.forProject(project).commitFilePatch(project, sha, path)
                 .orElseThrow(() -> ApiException.notFound("file in this commit"));
     }
 
@@ -183,7 +188,7 @@ public class MergeRequestController {
     @ApiResponse(responseCode = "400", description = "No operator token, or empty body")
     @ApiResponse(responseCode = "404", description = "No such project, MR, or not yours")
     @PostMapping("/api/projects/{projectId}/merge-requests/{iid}/discussions")
-    public GitLabClient.Discussion postThread(Principal caller, @PathVariable String projectId,
+    public Discussion postThread(Principal caller, @PathVariable String projectId,
                                               @PathVariable long iid,
                                               @RequestBody ThreadUpsert request) {
         Project project = requireCycle(caller, projectId, iid);
@@ -191,7 +196,7 @@ public class MergeRequestController {
         if (body == null || body.isBlank()) {
             throw ApiException.badRequest("body is required");
         }
-        return gitlab.postDiscussion(requireOperator(project), iid, body.trim());
+        return forges.forProject(project).postDiscussion(requireOperator(project), iid, body.trim());
     }
 
     @Operation(summary = "Merge the request from mrr",
@@ -202,10 +207,10 @@ public class MergeRequestController {
     @ApiResponse(responseCode = "400", description = "No operator token")
     @ApiResponse(responseCode = "404", description = "No such project, MR, or not yours")
     @PostMapping("/api/projects/{projectId}/merge-requests/{iid}/merge")
-    public GitLabClient.MergeRequest merge(Principal caller, @PathVariable String projectId,
+    public MergeRequest merge(Principal caller, @PathVariable String projectId,
                                            @PathVariable long iid) {
         Project project = requireCycle(caller, projectId, iid);
-        GitLabClient.MergeRequest merged = gitlab.merge(requireOperator(project), iid);
+        MergeRequest merged = forges.forProject(project).merge(requireOperator(project), iid);
         store.cancelRunning(project.id(), iid, "merge request was merged from mrr");
         store.closeMr(project.id(), iid, MrStatus.Status.MERGED);
         memory.markMrClosed(project.id(), iid, "merge");

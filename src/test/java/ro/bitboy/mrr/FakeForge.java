@@ -1,20 +1,48 @@
 package ro.bitboy.mrr;
 
-import org.springframework.web.client.RestClient;
-import ro.bitboy.mrr.gitlab.GitLabClient;
+import com.fasterxml.jackson.databind.JsonNode;
+import org.springframework.http.HttpHeaders;
+import ro.bitboy.mrr.forge.AnchorRef;
+import ro.bitboy.mrr.forge.Diff;
+import ro.bitboy.mrr.forge.Discussion;
+import ro.bitboy.mrr.forge.DiscussionView;
+import ro.bitboy.mrr.forge.FilePatch;
+import ro.bitboy.mrr.forge.Forge;
+import ro.bitboy.mrr.forge.ForgeCapabilities;
+import ro.bitboy.mrr.forge.ForgeEvent;
+import ro.bitboy.mrr.forge.GitMeta;
+import ro.bitboy.mrr.forge.MergeRequest;
+import ro.bitboy.mrr.forge.MrCommit;
+import ro.bitboy.mrr.forge.ProjectInfo;
+import ro.bitboy.mrr.forge.TreeEntry;
+import ro.bitboy.mrr.model.ForgeKind;
 import ro.bitboy.mrr.model.Project;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
-/** Recording GitLab double — no network. */
-public final class FakeGitLab extends GitLabClient {
+/**
+ * Recording forge double — no network.
+ *
+ * <p>This used to be {@code FakeForge extends GitLabClient}, inheritance standing in for an
+ * interface that did not exist, which is also why that class could not be final. Under
+ * {@link Forge} it is a plain implementation: nothing is inherited, nothing can be forgotten,
+ * and a method added to the interface breaks this at compile time instead of silently falling
+ * through to a real HTTP call.
+ *
+ * <p>{@link #capabilities} defaults to everything, which is GitLab. Set {@link #capabilities} to
+ * something narrower to drive the degraded paths.
+ */
+public final class FakeForge implements Forge {
+
+    public ForgeKind kind = ForgeKind.GITLAB;
+    public ForgeCapabilities capabilities = ForgeCapabilities.full();
 
     public Diff diff = new Diff("title", "desc", "fix/x", "main", "https://gitlab/mr/7",
             "Ada", "ada", List.of("A.java"), "--- A.java\n+int x;\n", false);
     public GitMeta gitMeta = new GitMeta(2, List.of(), List.of());
-    public Optional<DiffRefs> refs = Optional.empty();
+    public Optional<AnchorRef> refs = Optional.empty();
     public List<MergeRequest> openMrs = List.of();
     public Optional<MergeRequest> oneMr = Optional.empty();
     public Discussion nextDiscussion = new Discussion("ov-1", "note-1");
@@ -26,9 +54,13 @@ public final class FakeGitLab extends GitLabClient {
     public MergeRequest merged = new MergeRequest(42, "t", "merged", "sha", "https://gl/42", false);
     public String lastToken;
     public int merges;
+    public int approvals;
+    /** Every retraction, with the reason it carried — a host with no unapprove dismisses. */
+    public final List<String> unapprovals = new ArrayList<>();
 
     public final List<String> patchRequests = new ArrayList<>();
     public final List<String> posted = new ArrayList<>();
+    public final List<String> edits = new ArrayList<>();
     public final List<String> replies = new ArrayList<>();
     public final List<String> inlineAttempts = new ArrayList<>();
     public final List<String> resolved = new ArrayList<>();
@@ -37,8 +69,18 @@ public final class FakeGitLab extends GitLabClient {
     public RuntimeException postFailure;
     public RuntimeException replyFailure;
 
-    public FakeGitLab() {
-        super(RestClient.builder());
+    /** An anchor that is whatever the fake says it is. Real adapters keep theirs private. */
+    public record Anchor(String headSha) implements AnchorRef {
+    }
+
+    @Override
+    public ForgeKind kind() {
+        return kind;
+    }
+
+    @Override
+    public ForgeCapabilities capabilities(Project project) {
+        return capabilities;
     }
 
     @Override
@@ -53,7 +95,12 @@ public final class FakeGitLab extends GitLabClient {
     }
 
     @Override
-    public Optional<DiffRefs> diffRefs(Project project, long mrIid) {
+    public int commitCount(Project project, long mrIid) {
+        return gitMeta.commitCount() == null ? 0 : gitMeta.commitCount();
+    }
+
+    @Override
+    public Optional<AnchorRef> diffRefs(Project project, long mrIid) {
         return refs;
     }
 
@@ -71,7 +118,7 @@ public final class FakeGitLab extends GitLabClient {
     }
 
     @Override
-    public Optional<Discussion> postInlineDiscussion(Project project, long mrIid, DiffRefs refs,
+    public Optional<Discussion> postInlineDiscussion(Project project, long mrIid, AnchorRef anchor,
                                                      String filePath, int line, String markdown) {
         inlineAttempts.add(filePath + ":" + line);
         return Optional.empty();
@@ -81,10 +128,12 @@ public final class FakeGitLab extends GitLabClient {
     public void updateDiscussionNote(Project project, long mrIid, String discussionId,
                                      String noteId, String markdown) {
         posted.add("edit:" + discussionId + ":" + markdown);
+        edits.add(discussionId + ":" + markdown);
     }
 
     @Override
-    public void replyToDiscussion(Project project, long mrIid, String discussionId, String markdown) {
+    public void replyToDiscussion(Project project, long mrIid, String discussionId,
+                                  String markdown) {
         if (replyFailure != null) {
             throw replyFailure;
         }
@@ -92,13 +141,14 @@ public final class FakeGitLab extends GitLabClient {
     }
 
     @Override
-    public void setDiscussionResolved(Project project, long mrIid, String discussionId, boolean resolve) {
+    public void setDiscussionResolved(Project project, long mrIid, String discussionId,
+                                      boolean resolve) {
         resolved.add(discussionId + ":" + resolve);
-        // GitLab stamps the acting user, which here is always mrr's own token.
+        // The host stamps the acting user, which here is always mrr's own token.
         setResolvedBy(discussionId, resolve, resolve ? tokenUser : null);
     }
 
-    /** A human pressing Resolve in the GitLab UI. */
+    /** A human pressing Resolve in the forge's UI. */
     public void resolveAs(String discussionId, String username) {
         setResolvedBy(discussionId, true, username);
     }
@@ -162,5 +212,52 @@ public final class FakeGitLab extends GitLabClient {
         lastToken = project.gitlabToken();
         merges++;
         return merged;
+    }
+
+    @Override
+    public void approve(Project project, long mrIid) {
+        approvals++;
+    }
+
+    @Override
+    public void unapprove(Project project, long mrIid, String reason) {
+        unapprovals.add(reason);
+    }
+
+    @Override
+    public String fileAt(Project project, String path, String ref, Integer startLine,
+                         Integer endLine, int maxChars) {
+        return "";
+    }
+
+    @Override
+    public ProjectInfo projectInfo(Project project) {
+        return new ProjectInfo("main", null, project.name());
+    }
+
+    @Override
+    public Optional<String> commitSha(Project project, String ref) {
+        return Optional.empty();
+    }
+
+    @Override
+    public List<TreeEntry> tree(Project project, String ref, String path, int limit) {
+        return List.of();
+    }
+
+    @Override
+    public Optional<String> compare(Project project, String from, String to, int maxChars) {
+        return Optional.empty();
+    }
+
+    @Override
+    public boolean verifyWebhook(Project project, HttpHeaders headers, String rawBody) {
+        return ro.bitboy.mrr.auth.Ids.secureEquals(
+                headers.getFirst("X-Gitlab-Token"), project.webhookSecret());
+    }
+
+    @Override
+    public ForgeEvent parseEvent(HttpHeaders headers, JsonNode body) {
+        return ro.bitboy.mrr.forge.gitlab.GitLabWebhook.parse(body);
     }
 }

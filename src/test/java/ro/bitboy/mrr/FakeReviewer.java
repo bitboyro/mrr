@@ -2,7 +2,7 @@ package ro.bitboy.mrr;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.web.client.RestClient;
-import ro.bitboy.mrr.gitlab.GitLabClient;
+import ro.bitboy.mrr.forge.ForgeFactory;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.review.Reviewer;
 
@@ -18,7 +18,7 @@ public final class FakeReviewer extends Reviewer {
     public int aligns;
 
     public FakeReviewer() {
-        super(null, new GitLabClient(RestClient.builder()), TestStores.properties(),
+        super(null, ForgeFactory.fixed(new FakeForge()), TestStores.properties(),
                 new ObjectMapper(), null, p -> {
                     throw new IllegalStateException("no model");
                 }, Executors.newSingleThreadExecutor());
@@ -31,7 +31,7 @@ public final class FakeReviewer extends Reviewer {
     }
 
     @Override
-    public void alignGitlab(Project project, long mrIid) {
+    public void alignForge(Project project, long mrIid) {
         aligns++;
     }
 }

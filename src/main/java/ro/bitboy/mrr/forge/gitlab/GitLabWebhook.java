@@ -1,6 +1,7 @@
-package ro.bitboy.mrr.gitlab;
+package ro.bitboy.mrr.forge.gitlab;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import ro.bitboy.mrr.forge.ForgeEvent;
 import ro.bitboy.mrr.model.MergeRequestInfo;
 
 import java.time.Instant;
@@ -10,16 +11,55 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Reads a GitLab {@code merge_request} webhook body.
+ * Reads a GitLab {@code merge_request} or {@code note} webhook body and normalises it into a
+ * {@link ForgeEvent}.
  *
  * <p>Every accessor is defensive. GitLab's payload shape varies across versions, between
- * gitlab.com and self-hosted, and by action — a field that is present on {@code open} may be
- * absent on {@code update}. Metadata extraction must never be the reason a review fails, so
- * anything missing lands as null rather than throwing.
+ * gitlab.com and self-hosted, and by action — a field present on {@code open} may be absent on
+ * {@code update}. Metadata extraction must never be the reason a review fails, so anything
+ * missing lands as null rather than throwing.
  */
-public final class WebhookPayload {
+public final class GitLabWebhook {
 
-    private WebhookPayload() {
+    private GitLabWebhook() {
+    }
+
+    /**
+     * The whole delivery, in mrr's vocabulary.
+     *
+     * <p>GitLab's full action set is open, close, reopen, update, approval, approved,
+     * unapproval, unapproved, merge. Only the first three can carry new code; approvals never
+     * do, and {@code update} usually does not either — it fires on title edits, labels,
+     * assignees, reviewers and milestones — so the caller filters again on whether the head
+     * commit moved.
+     */
+    public static ForgeEvent parse(JsonNode body) {
+        String kind = objectKind(body);
+        if ("note".equals(kind)) {
+            return ForgeEvent.note(noteMrIid(body), new ForgeEvent.Note(
+                    noteDiscussionId(body), noteId(body), noteBody(body),
+                    noteAuthorUsername(body), isSystemNote(body), isMergeRequestNote(body)), kind);
+        }
+        if (!"merge_request".equals(kind)) {
+            return ForgeEvent.other(kind);
+        }
+        String action = action(body);
+        return ForgeEvent.mergeRequest(toAction(action), mrIid(body), headSha(body),
+                isDraft(body), mergeRequestInfo(body), action);
+    }
+
+    private static ForgeEvent.Action toAction(String action) {
+        if (action == null) {
+            return ForgeEvent.Action.OTHER;
+        }
+        return switch (action) {
+            case "open" -> ForgeEvent.Action.OPENED;
+            case "reopen" -> ForgeEvent.Action.REOPENED;
+            case "update" -> ForgeEvent.Action.UPDATED;
+            case "merge" -> ForgeEvent.Action.MERGED;
+            case "close" -> ForgeEvent.Action.CLOSED;
+            default -> ForgeEvent.Action.OTHER;
+        };
     }
 
     public static String objectKind(JsonNode body) {

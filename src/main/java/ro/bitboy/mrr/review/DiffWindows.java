@@ -1,6 +1,6 @@
 package ro.bitboy.mrr.review;
 
-import ro.bitboy.mrr.gitlab.GitLabClient.FilePatch;
+import ro.bitboy.mrr.forge.FilePatch;
 
 import java.util.ArrayList;
 import java.util.List;

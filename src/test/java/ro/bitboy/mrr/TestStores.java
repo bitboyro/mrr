@@ -5,6 +5,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.SimpleDriverDataSource;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import ro.bitboy.mrr.auth.Ids;
+import ro.bitboy.mrr.model.ForgeKind;
 import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.MergeRequestInfo;
 import ro.bitboy.mrr.model.Project;
@@ -69,8 +70,16 @@ public final class TestStores {
 
     public static Project project(LlmProvider llm, String ownerId, String name,
                                   String webhookSecret, boolean enabled, boolean skipDrafts) {
-        return new Project(Ids.newId(), ownerId, name, enabled,
-                "https://gitlab.com", "group/" + name, "glpat-x", null, webhookSecret,
+        return project(llm, ownerId, name, webhookSecret, enabled, skipDrafts, ForgeKind.GITLAB,
+                "https://gitlab.com", "group/" + name);
+    }
+
+    /** The same project on a named host — for the tests that care which forge it is on. */
+    public static Project project(LlmProvider llm, String ownerId, String name,
+                                  String webhookSecret, boolean enabled, boolean skipDrafts,
+                                  ForgeKind forge, String url, String repoId) {
+        return new Project(Ids.newId(), ownerId, name, enabled, forge,
+                url, repoId, "glpat-x", null, webhookSecret,
                 llm.id(), llm,
                 null, skipDrafts, 1, List.of(), false, false, null, null, null, null, null, null,
                 Instant.now());

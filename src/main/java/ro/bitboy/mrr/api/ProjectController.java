@@ -17,6 +17,10 @@ import ro.bitboy.mrr.RuntimeSettings;
 import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.auth.Principal;
+import ro.bitboy.mrr.forge.ForgeFactory;
+import ro.bitboy.mrr.forge.ForgeReport;
+import ro.bitboy.mrr.model.ForgeInstance;
+import ro.bitboy.mrr.model.ForgeKind;
 import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.review.OpenMrScan;
@@ -28,7 +32,7 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * The project registry. Every response is {@link Project#redacted()} — the GitLab PAT, the
+ * The project registry. Every response is {@link Project#redacted()} — the forge PAT, the
  * webhook secret, and the model key are write-only over this API.
  *
  * <p>The one exception is creation, which returns the webhook secret once: you need it to
@@ -49,16 +53,18 @@ public class ProjectController {
     private final RuntimeSettings settings;
     private final MemoryService memory;
     private final OpenMrScan openMrScan;
+    private final ForgeFactory forges;
 
     public ProjectController(Store store, RuntimeSettings settings, MemoryService memory,
-                             OpenMrScan openMrScan) {
+                             OpenMrScan openMrScan, ForgeFactory forges) {
         this.store = store;
         this.settings = settings;
         this.memory = memory;
         this.openMrScan = openMrScan;
+        this.forges = forges;
     }
 
-    @Operation(summary = "Register a GitLab project",
+    @Operation(summary = "Register a project on a forge",
             description = """
                     The caller becomes the owner. A webhook secret is generated unless you \
                     supply one.
@@ -75,7 +81,7 @@ public class ProjectController {
         require(request.name(), "name");
         require(request.gitlabProjectId(), "gitlabProjectId");
         require(request.gitlabToken(), "gitlabToken");
-        String gitlabUrl = resolveGitlabUrl(caller, request, null);
+        Host host = resolveHost(caller, request, null, null);
         LlmProvider llm = resolveLlm(caller, request, null);
 
         // Generated unless supplied, so registering a project never silently ends up with a
@@ -86,7 +92,7 @@ public class ProjectController {
 
         Project project = new Project(
                 Ids.newId(), caller.userId(), request.name().trim(), true,
-                gitlabUrl, request.gitlabProjectId(),
+                host.forge(), host.url(), request.gitlabProjectId(),
                 request.gitlabToken(), blankToNull(request.gitlabOperatorToken()), secret,
                 llm.id(), llm, request.skill(),
                 Boolean.TRUE.equals(request.skipDrafts()),
@@ -103,7 +109,8 @@ public class ProjectController {
         }
         openMrScan.enqueue(project);
 
-        return new Registered(project.redacted(), secret, settings.webhookUrl(project.id()));
+        return new Registered(project.redacted(), secret,
+                settings.webhookUrl(project.forge(), project.id()));
     }
 
     @Operation(summary = "List projects you can see",
@@ -132,14 +139,14 @@ public class ProjectController {
     public Project update(Principal caller, @PathVariable String id, @RequestBody Upsert request) {
         ApiException.requireBody(request);
         Project existing = store.requireVisible(caller, id);
-        String gitlabUrl = resolveGitlabUrl(caller, request, existing.gitlabUrl());
+        Host host = resolveHost(caller, request, existing.gitlabUrl(), existing.forge());
         LlmProvider llm = resolveLlm(caller, request, existing);
 
         Project updated = new Project(
                 existing.id(), existing.ownerId(),
                 orKeep(request.name(), existing.name()),
                 request.enabled() == null ? existing.enabled() : request.enabled(),
-                gitlabUrl,
+                host.forge(), host.url(),
                 orKeep(request.gitlabProjectId(), existing.gitlabProjectId()),
                 orKeep(request.gitlabToken(), existing.gitlabToken()),
                 orKeep(request.gitlabOperatorToken(), existing.gitlabOperatorToken()),
@@ -176,18 +183,36 @@ public class ProjectController {
         store.deleteProject(id);
     }
 
-    private String resolveGitlabUrl(Principal caller, Upsert request, String existing) {
-        if (request.gitlabInstanceId() != null && !request.gitlabInstanceId().isBlank()) {
-            return store.findGitlabInstance(caller, request.gitlabInstanceId().trim())
-                    .orElseThrow(() -> ApiException.notFound("gitlab instance")).url();
+    /** Where the project lives: which forge, and at what base URL. */
+    private record Host(ForgeKind forge, String url) {
+    }
+
+    /**
+     * A catalog entry supplies both the URL and the kind, copied onto the row — a host is not a
+     * credential, and a project that moved should not follow a catalog edit. Without an entry
+     * the two are given separately, and on update either can be omitted to keep what is there.
+     *
+     * <p>{@code forgeInstanceId} and {@code gitlabInstanceId} are the same field; the second is
+     * the name it had before mrr knew about a second host and is kept so existing callers work.
+     */
+    private Host resolveHost(Principal caller, Upsert request, String existingUrl,
+                             ForgeKind existingForge) {
+        String instanceId = request.forgeInstanceId() == null || request.forgeInstanceId().isBlank()
+                ? request.gitlabInstanceId() : request.forgeInstanceId();
+        if (instanceId != null && !instanceId.isBlank()) {
+            ForgeInstance entry = store.findForgeInstance(caller, instanceId.trim())
+                    .orElseThrow(() -> ApiException.notFound("forge instance"));
+            return new Host(entry.kind(), entry.url());
         }
+        ForgeKind forge = request.forge() != null ? request.forge()
+                : existingForge != null ? existingForge : ForgeKind.DEFAULT;
         if (request.gitlabUrl() == null || request.gitlabUrl().isBlank()) {
-            if (existing == null) {
+            if (existingUrl == null) {
                 throw ApiException.badRequest("gitlabUrl is required");
             }
-            return existing;
+            return new Host(forge, existingUrl);
         }
-        return Urls.requireHttp(request.gitlabUrl(), "gitlabUrl");
+        return new Host(forge, Urls.requireHttp(request.gitlabUrl(), "gitlabUrl"));
     }
 
     /**
@@ -233,13 +258,21 @@ public class ProjectController {
             @Schema(description = "Display name.", example = "test-repo") String name,
             @Schema(description = "Set false to make mrr ignore this project's webhooks without deleting it.")
             Boolean enabled,
-            @Schema(description = "Catalog GitLab host. When set, copies that URL onto the project "
-                    + "and `gitlabUrl` is ignored. The project keeps its own copy afterwards.")
-            String gitlabInstanceId,
-            @Schema(description = "Your GitLab's base URL. This is what makes self-hosted work. "
-                    + "Required on create unless `gitlabInstanceId` is set.",
+            @Schema(description = "Which forge hosts this project. GITLAB (default) also covers "
+                    + "self-hosted GitLab; FORGEJO covers Codeberg, Forgejo and Gitea; GITHUB "
+                    + "covers github.com and GHES. Ignored when a catalog host is picked, which "
+                    + "carries its own kind.") ForgeKind forge,
+            @Schema(description = "Catalog forge host. When set, copies that URL *and kind* onto "
+                    + "the project, and `gitlabUrl`/`forge` are ignored. The project keeps its "
+                    + "own copy afterwards.") String forgeInstanceId,
+            @Schema(description = "Former name of `forgeInstanceId`. Still accepted.",
+                    deprecated = true) String gitlabInstanceId,
+            @Schema(description = "Your forge's base URL. This is what makes self-hosted work. "
+                    + "Required on create unless a catalog host is set. Name kept for "
+                    + "compatibility; it is the base URL of whichever forge `forge` names.",
                     example = "https://gitlab.com") String gitlabUrl,
-            @Schema(description = "Numeric id or `group/project` path — both work.",
+            @Schema(description = "GitLab: numeric id or `group/project` path. Forgejo and "
+                    + "GitHub: `owner/repo`.",
                     example = "bitboy.ro/test-repo") String gitlabProjectId,
             @Schema(description = "PAT used to read the diff, post the review, and optionally Approve. "
                     + "Needs `api` scope, or fine-grained `read_code` + `read_merge_request` + "
@@ -285,8 +318,23 @@ public class ProjectController {
             @Schema(description = "The stored project, secrets masked.") Project project,
             @Schema(description = "Readable exactly once. Paste into GitLab's webhook *Secret token*.")
             String webhookSecret,
-            @Schema(description = "Paste into GitLab's webhook *URL*.",
+            @Schema(description = "Paste into the forge's webhook *URL*.",
                     example = "https://mrr.example.com/webhooks/gitlab/9c51deb6-89fd-4f8c-bd1b-309310563fa8")
             String webhookUrl) {
+    }
+
+    @Operation(summary = "What this project's forge can do",
+            description = """
+                    One row per capability the reviewer branches on, reading `OK`, `MISSING` or \
+                    `UNKNOWN`, each with what mrr does instead where the host falls short. \
+                    Checked live, so a Forgejo instance that gained conversation-resolve at its \
+                    last upgrade shows up here. Read this before the first review rather than \
+                    debugging a 403 afterwards.""")
+    @ApiResponse(responseCode = "404", description = "No such project, or not yours")
+    @GetMapping("/api/projects/{id}/forge")
+    public ForgeReport forge(Principal caller, @PathVariable String id) {
+        Project project = store.requireVisible(caller, id);
+        return ForgeReport.of(project.forge(), project.gitlabUrl(),
+                forges.capabilitiesOf(project));
     }
 }

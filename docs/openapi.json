@@ -376,14 +376,23 @@
         },
         "type": "object"
       },
-      "GitlabInstance": {
-        "description": "Named GitLab host (URL only). No token.",
+      "ForgeInstance": {
+        "description": "Named forge host (URL and kind only). No token.",
         "properties": {
           "createdAt": {
             "format": "date-time",
             "type": "string"
           },
           "id": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "Which API this host speaks. A row written before mrr knew about a second forge reads GITLAB.",
+            "enum": [
+              "GITLAB",
+              "FORGEJO",
+              "GITHUB"
+            ],
             "type": "string"
           },
           "name": {
@@ -404,9 +413,49 @@
         },
         "type": "object"
       },
-      "GitlabUpsert": {
-        "description": "Create or update a GitLab host. On update, omitted fields are kept.",
+      "ForgeReport": {
+        "description": "Per-project forge capability report, checked when the project page loads.",
         "properties": {
+          "baseUrl": {
+            "description": "The URL mrr calls for this project.",
+            "type": "string"
+          },
+          "forge": {
+            "description": "Which forge this project is registered against.",
+            "enum": [
+              "GITLAB",
+              "FORGEJO",
+              "GITHUB"
+            ],
+            "type": "string"
+          },
+          "forgeName": {
+            "description": "Human-readable forge name.",
+            "type": "string"
+          },
+          "requirements": {
+            "description": "One row per capability the reviewer branches on.",
+            "items": {
+              "$ref": "#/components/schemas/Requirement"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ForgeUpsert": {
+        "description": "Create or update a forge host. On update, omitted fields are kept.",
+        "properties": {
+          "kind": {
+            "description": "Which API this host speaks. Defaults to GITLAB, which is what every entry written before mrr knew about a second forge is.",
+            "enum": [
+              "GITLAB",
+              "FORGEJO",
+              "GITHUB"
+            ],
+            "example": "GITLAB",
+            "type": "string"
+          },
           "name": {
             "example": "gitlab.com",
             "type": "string"
@@ -423,14 +472,15 @@
         "type": "object"
       },
       "InstanceInfo": {
-        "description": "Live public base URL. Used to build GitLab webhook URLs.",
+        "description": "Live public base URL. Used to build webhook URLs.",
         "properties": {
           "baseUrl": {
             "example": "https://mrr.example.com",
             "type": "string"
           },
           "webhookUrlTemplate": {
-            "example": "https://mrr.example.com/webhooks/gitlab/{projectId}",
+            "description": "`{forge}` is the project's forge slug \u2014 gitlab, forgejo or github.",
+            "example": "https://mrr.example.com/webhooks/{forge}/{projectId}",
             "type": "string"
           }
         },
@@ -1009,7 +1059,7 @@
         "type": "object"
       },
       "Project": {
-        "description": "A registered GitLab project. Secrets \u2014 `gitlabToken`, `gitlabOperatorToken` and `webhookSecret` \u2014 are write-only: accepted on create and update, always masked on read. The model and its API key come from the referenced catalog entry.",
+        "description": "A registered project on a forge. Secrets \u2014 `gitlabToken`, `gitlabOperatorToken` and `webhookSecret` \u2014 are write-only: accepted on create and update, always masked on read. The model and its API key come from the referenced catalog entry. `gitlabUrl`/`gitlabToken` are the forge base URL and token whichever forge `forge` names; the names are kept for compatibility.",
         "properties": {
           "agentMaxTurns": {
             "description": "Maximum model turns per review, including the first. 1 is a single shot with no tools, which is the default and preserves original behaviour.",
@@ -1035,23 +1085,32 @@
             "description": "False makes mrr acknowledge this project's webhooks and skip them.",
             "type": "boolean"
           },
+          "forge": {
+            "description": "Which host this project's merge requests live on. Fixed at registration; one project is bound to one remote.",
+            "enum": [
+              "GITLAB",
+              "FORGEJO",
+              "GITHUB"
+            ],
+            "type": "string"
+          },
           "gitlabOperatorToken": {
             "description": "Optional PAT for merging and posting an overall thread from mrr. Kept separate so the review bot never needs Merge. Masked on read.",
             "example": "****ab12",
             "type": "string"
           },
           "gitlabProjectId": {
-            "description": "Numeric id or `group/project` path.",
+            "description": "GitLab: numeric id or `group/project` path. Forgejo and GitHub: `owner/repo`.",
             "example": "bitboy.ro/test-repo",
             "type": "string"
           },
           "gitlabToken": {
-            "description": "Review-loop PAT. Masked on read.",
+            "description": "Review-loop PAT for the forge. Masked on read.",
             "example": "****v38q",
             "type": "string"
           },
           "gitlabUrl": {
-            "description": "Base URL of the GitLab holding this project \u2014 this is what makes self-hosted work.",
+            "description": "Base URL of the forge holding this project \u2014 this is what makes self-hosted work.",
             "example": "https://gitlab.com",
             "type": "string"
           },
@@ -1074,6 +1133,7 @@
               "PROVIDER",
               "OUTPUT",
               "MCP",
+              "FORGE",
               "GITLAB",
               "REFUSAL",
               "UNKNOWN"
@@ -1173,7 +1233,7 @@
             "type": "string"
           },
           "webhookUrl": {
-            "description": "Paste into GitLab's webhook *URL*.",
+            "description": "Paste into the forge's webhook *URL*.",
             "example": "https://mrr.example.com/webhooks/gitlab/9c51deb6-89fd-4f8c-bd1b-309310563fa8",
             "type": "string"
           }
@@ -1221,6 +1281,33 @@
         },
         "type": "object"
       },
+      "Requirement": {
+        "description": "One capability, and what mrr does when the host lacks it.",
+        "properties": {
+          "detail": {
+            "description": "What this means for reviews on this project.",
+            "type": "string"
+          },
+          "name": {
+            "example": "resolvableThreads",
+            "type": "string"
+          },
+          "status": {
+            "description": "OK: supported. MISSING: not supported, and mrr degrades as described. UNKNOWN: a live probe could not tell, so mrr fails closed and treats it as missing.",
+            "enum": [
+              "OK",
+              "MISSING",
+              "UNKNOWN"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "example": "Close a thread on the host",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "Review": {
         "description": "One review of one commit on one merge request.\n\nKeyed on `(projectId, mrIid, headSha)` \u2014 that triple is what makes redelivered webhooks free. The `mr` block is a snapshot taken when the review ran, not a live view of the merge request.",
         "properties": {
@@ -1250,6 +1337,7 @@
               "PROVIDER",
               "OUTPUT",
               "MCP",
+              "FORGE",
               "GITLAB",
               "REFUSAL",
               "UNKNOWN"
@@ -1542,8 +1630,22 @@
             "description": "Set false to make mrr ignore this project's webhooks without deleting it.",
             "type": "boolean"
           },
+          "forge": {
+            "description": "Which forge hosts this project. GITLAB (default) also covers self-hosted GitLab; FORGEJO covers Codeberg, Forgejo and Gitea; GITHUB covers github.com and GHES. Ignored when a catalog host is picked, which carries its own kind.",
+            "enum": [
+              "GITLAB",
+              "FORGEJO",
+              "GITHUB"
+            ],
+            "type": "string"
+          },
+          "forgeInstanceId": {
+            "description": "Catalog forge host. When set, copies that URL *and kind* onto the project, and `gitlabUrl`/`forge` are ignored. The project keeps its own copy afterwards.",
+            "type": "string"
+          },
           "gitlabInstanceId": {
-            "description": "Catalog GitLab host. When set, copies that URL onto the project and `gitlabUrl` is ignored. The project keeps its own copy afterwards.",
+            "deprecated": true,
+            "description": "Former name of `forgeInstanceId`. Still accepted.",
             "type": "string"
           },
           "gitlabOperatorToken": {
@@ -1552,7 +1654,7 @@
             "type": "string"
           },
           "gitlabProjectId": {
-            "description": "Numeric id or `group/project` path \u2014 both work.",
+            "description": "GitLab: numeric id or `group/project` path. Forgejo and GitHub: `owner/repo`.",
             "example": "bitboy.ro/test-repo",
             "type": "string"
           },
@@ -1562,7 +1664,7 @@
             "type": "string"
           },
           "gitlabUrl": {
-            "description": "Your GitLab's base URL. This is what makes self-hosted work. Required on create unless `gitlabInstanceId` is set.",
+            "description": "Your forge's base URL. This is what makes self-hosted work. Required on create unless a catalog host is set. Name kept for compatibility; it is the base URL of whichever forge `forge` names.",
             "example": "https://gitlab.com",
             "type": "string"
           },
@@ -1642,16 +1744,17 @@
   },
   "openapi": "3.1.0",
   "paths": {
-    "/api/gitlab-instances": {
+    "/api/forge-instances": {
       "get": {
-        "operationId": "listGitlab",
+        "description": "Every host you can see, of every kind.",
+        "operationId": "listForges",
         "responses": {
           "200": {
             "content": {
               "*/*": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/GitlabInstance"
+                    "$ref": "#/components/schemas/ForgeInstance"
                   },
                   "type": "array"
                 }
@@ -1660,18 +1763,18 @@
             "description": "OK"
           }
         },
-        "summary": "List GitLab instances",
+        "summary": "List forge hosts",
         "tags": [
           "Catalogs"
         ]
       },
       "post": {
-        "operationId": "createGitlab",
+        "operationId": "createForge",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GitlabUpsert"
+                "$ref": "#/components/schemas/ForgeUpsert"
               }
             }
           },
@@ -1682,7 +1785,7 @@
             "content": {
               "*/*": {
                 "schema": {
-                  "$ref": "#/components/schemas/GitlabInstance"
+                  "$ref": "#/components/schemas/ForgeInstance"
                 }
               }
             },
@@ -1692,22 +1795,22 @@
             "content": {
               "*/*": {
                 "schema": {
-                  "$ref": "#/components/schemas/GitlabInstance"
+                  "$ref": "#/components/schemas/ForgeInstance"
                 }
               }
             },
             "description": "Caller is not an ADMIN"
           }
         },
-        "summary": "Add a GitLab instance",
+        "summary": "Add a forge host",
         "tags": [
           "Catalogs"
         ]
       }
     },
-    "/api/gitlab-instances/{id}": {
+    "/api/forge-instances/{id}": {
       "delete": {
-        "operationId": "deleteGitlab",
+        "operationId": "deleteForge",
         "parameters": [
           {
             "in": "path",
@@ -1726,14 +1829,14 @@
             "description": "Caller is not an ADMIN"
           }
         },
-        "summary": "Delete a GitLab instance",
+        "summary": "Delete a forge host",
         "tags": [
           "Catalogs"
         ]
       },
       "put": {
-        "description": "Omitted fields are kept. Existing projects that copied this URL are not rewritten.",
-        "operationId": "updateGitlab",
+        "description": "Omitted fields are kept. Existing projects that copied this URL and kind are not rewritten.",
+        "operationId": "updateForge",
         "parameters": [
           {
             "in": "path",
@@ -1748,7 +1851,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/GitlabUpsert"
+                "$ref": "#/components/schemas/ForgeUpsert"
               }
             }
           },
@@ -1759,14 +1862,146 @@
             "content": {
               "*/*": {
                 "schema": {
-                  "$ref": "#/components/schemas/GitlabInstance"
+                  "$ref": "#/components/schemas/ForgeInstance"
                 }
               }
             },
             "description": "Caller is not an ADMIN"
           }
         },
-        "summary": "Update a GitLab instance",
+        "summary": "Update a forge host",
+        "tags": [
+          "Catalogs"
+        ]
+      }
+    },
+    "/api/gitlab-instances": {
+      "get": {
+        "deprecated": true,
+        "description": "Deprecated alias for `GET /api/forge-instances`, filtered to GitLab.",
+        "operationId": "listGitlab",
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ForgeInstance"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "List GitLab hosts",
+        "tags": [
+          "Catalogs"
+        ]
+      },
+      "post": {
+        "operationId": "createForge_1",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForgeUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForgeInstance"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForgeInstance"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Add a forge host",
+        "tags": [
+          "Catalogs"
+        ]
+      }
+    },
+    "/api/gitlab-instances/{id}": {
+      "delete": {
+        "operationId": "deleteForge_1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "403": {
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Delete a forge host",
+        "tags": [
+          "Catalogs"
+        ]
+      },
+      "put": {
+        "description": "Omitted fields are kept. Existing projects that copied this URL and kind are not rewritten.",
+        "operationId": "updateForge_1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForgeUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForgeInstance"
+                }
+              }
+            },
+            "description": "Caller is not an ADMIN"
+          }
+        },
+        "summary": "Update a forge host",
         "tags": [
           "Catalogs"
         ]
@@ -2128,7 +2363,7 @@
             "description": "A required field is missing or `provider` is invalid"
           }
         },
-        "summary": "Register a GitLab project",
+        "summary": "Register a project on a forge",
         "tags": [
           "Projects"
         ]
@@ -2388,6 +2623,38 @@
         "summary": "Update a document",
         "tags": [
           "Agent context"
+        ]
+      }
+    },
+    "/api/projects/{id}/forge": {
+      "get": {
+        "description": "One row per capability the reviewer branches on, reading `OK`, `MISSING` or `UNKNOWN`, each with what mrr does instead where the host falls short. Checked live, so a Forgejo instance that gained conversation-resolve at its last upgrade shows up here. Read this before the first review rather than debugging a 403 afterwards.",
+        "operationId": "forge",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForgeReport"
+                }
+              }
+            },
+            "description": "No such project, or not yours"
+          }
+        },
+        "summary": "What this project's forge can do",
+        "tags": [
+          "Projects"
         ]
       }
     },
@@ -3935,25 +4202,25 @@
         ]
       }
     },
-    "/webhooks/gitlab/{projectId}": {
+    "/webhooks/{forge}/{projectId}": {
       "post": {
-        "description": "Register this URL in GitLab under *Settings \u2192 Webhooks* with **Merge request events** ticked, using the secret returned when the project was created.\n\nReturns immediately. Fetching the diff and calling a model happen on a background worker, because GitLab times deliveries out and retries them \u2014 blocking here would mean re-reviewing.\n\nOnly `open`, `reopen`, and `update` actions are reviewed. `merge` and `close` cancel any in-flight review and mark the cycle MERGED or CLOSED so the UI follows GitLab. Approvals are acknowledged and ignored.\n\nDeduplicated on `(project, mr_iid, last_commit.id)`. A redelivery, or an `update` that changed only a label, returns the existing review with `created: false` and spends nothing.",
+        "description": "Register this URL in the project's webhook settings with merge/pull request events ticked, using the secret returned when the project was created.\n\n`{forge}` is `gitlab`, `forgejo` (also `gitea`, `codeberg`) or `github`, and must match the project's own forge. **`/webhooks/gitlab/{projectId}` keeps working forever** \u2014 every hook already registered in a GitLab UI points at it, and mrr does not create hooks.\n\nReturns immediately. Fetching the diff and calling a model happen on a background worker, because hosts time deliveries out and retry them \u2014 blocking here would mean re-reviewing.\n\nOnly opened, reopened and updated actions are reviewed. Merge and close cancel any in-flight review and mark the cycle MERGED or CLOSED so the UI follows the host. Approvals are acknowledged and ignored.\n\nDeduplicated on `(project, mr_iid, head sha)`. A redelivery, or an update that changed only a label, returns the existing review with `created: false` and spends nothing.",
         "operationId": "receive",
         "parameters": [
           {
-            "description": "The mrr project id, from the registration response.",
+            "description": "gitlab | forgejo | gitea | codeberg | github. Must be the project's own forge.",
             "in": "path",
-            "name": "projectId",
+            "name": "forge",
             "required": true,
             "schema": {
               "type": "string"
             }
           },
           {
-            "description": "The project's webhook secret, as GitLab sends it. Compared constant-time.",
-            "in": "header",
-            "name": "X-Gitlab-Token",
-            "required": false,
+            "description": "The mrr project id, from the registration response.",
+            "in": "path",
+            "name": "projectId",
+            "required": true,
             "schema": {
               "type": "string"
             }
@@ -3998,7 +4265,7 @@
                 }
               }
             },
-            "description": "Body is not JSON, or lacks `iid` / `last_commit.id`"
+            "description": "`{forge}` names no forge mrr knows, `{forge}` is not this project's forge, the body is not JSON, or it lacks the request number or head sha"
           },
           "401": {
             "content": {
@@ -4008,7 +4275,7 @@
                 }
               }
             },
-            "description": "`X-Gitlab-Token` missing or wrong"
+            "description": "The forge's signature or token header is missing or wrong"
           },
           "404": {
             "content": {
@@ -4022,7 +4289,7 @@
           }
         },
         "security": [],
-        "summary": "Receive a GitLab merge-request event",
+        "summary": "Receive a merge- or pull-request event from a forge",
         "tags": [
           "Webhook"
         ]
@@ -4042,12 +4309,12 @@
   ],
   "tags": [
     {
-      "description": "The record of every review mrr has run: the webhook that triggered it, the merge request as it stood at that commit, the exact prompt sent to the model, and what came back.\n\nA review is a snapshot, not a live view of the MR \u2014 retitle an MR and push again and you get a second review carrying the new title, with the first left intact.",
-      "name": "Reviews"
+      "description": "Named forge hosts (URL and kind, no token) and LLM endpoints, which carry the model API key. Entries are shared (admin-curated, no key) or private to their owner. `GET /api/instance` is the live public base URL used to build webhook URLs.",
+      "name": "Catalogs"
     },
     {
-      "description": "Named GitLab hosts (URL only) and LLM endpoints, which carry the model API key. Entries are shared (admin-curated, no key) or private to their owner. `GET /api/instance` is the live public base URL used to build webhook URLs.",
-      "name": "Catalogs"
+      "description": "The record of every review mrr has run: the webhook that triggered it, the merge request as it stood at that commit, the exact prompt sent to the model, and what came back.\n\nA review is a snapshot, not a live view of the MR \u2014 retitle an MR and push again and you get a second review carrying the new title, with the first left intact.",
+      "name": "Reviews"
     },
     {
       "description": "Identity. Only an ADMIN token can create a user or mint a token \u2014 this is the single rule the whole multi-tenant model rests on. A USER token can list and revoke its own tokens and do nothing else here.",
@@ -4062,16 +4329,16 @@
       "name": "Skill library"
     },
     {
-      "description": "Where GitLab delivers merge-request events. The only endpoint that does not take an mrr API token \u2014 GitLab has no way to hold one.",
-      "name": "Webhook"
-    },
-    {
       "description": "Per-project OKF memory. Reviewers always write mrs/{iid}.md. The librarian addon, when enabled, writes project/ via Initialize or Refresh. Disable never deletes files.",
       "name": "Memory"
     },
     {
       "description": "The registry of GitLab projects mrr reviews. One row carries everything needed to review that project: where its GitLab lives, the token to read it with, which model to use, and the review instructions to use as the system prompt.\n\nOwned. A USER sees only its own; an ADMIN sees all. Asking for someone else's returns 404, not 403.",
       "name": "Projects"
+    },
+    {
+      "description": "Where a forge delivers merge- and pull-request events. The only endpoint that does not take an mrr API token \u2014 a forge has no way to hold one.",
+      "name": "Webhook"
     },
     {
       "description": "Runtime log levels and the in-memory log ring. Admin only. Levels are not persisted: a restart restores `logging.level` from config. Set `ro.bitboy.mrr` to DEBUG to log full agent message bodies. `GET /api/logs` is the tail.",

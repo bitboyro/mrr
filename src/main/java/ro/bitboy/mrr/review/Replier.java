@@ -9,7 +9,10 @@ import org.springframework.stereotype.Component;
 import ro.bitboy.mrr.MrrProperties;
 import ro.bitboy.mrr.RuntimeSettings;
 import ro.bitboy.mrr.auth.Ids;
-import ro.bitboy.mrr.gitlab.GitLabClient;
+import ro.bitboy.mrr.forge.Diff;
+import ro.bitboy.mrr.forge.Forge;
+import ro.bitboy.mrr.forge.ForgeCapabilities;
+import ro.bitboy.mrr.forge.ForgeFactory;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.Finding;
 import ro.bitboy.mrr.model.Project;
@@ -62,7 +65,7 @@ public class Replier {
             """;
 
     private final Store store;
-    private final GitLabClient gitlab;
+    private final ForgeFactory forges;
     private final RuntimeSettings settings;
     private final Agent agent;
     private final Function<Project, ReviewModel> models;
@@ -71,20 +74,20 @@ public class Replier {
     private final VerdictParser parser;
 
     @Autowired
-    public Replier(Store store, GitLabClient gitlab, ReviewModelFactory models,
+    public Replier(Store store, ForgeFactory forges, ReviewModelFactory models,
                    RuntimeSettings settings) {
-        this(store, gitlab, settings, models::forProject, Executors.newFixedThreadPool(1));
+        this(store, forges, settings, models::forProject, Executors.newFixedThreadPool(1));
     }
 
-    public Replier(Store store, GitLabClient gitlab, MrrProperties properties,
+    public Replier(Store store, ForgeFactory forges, MrrProperties properties,
             Function<Project, ReviewModel> models, ExecutorService workers) {
-        this(store, gitlab, RuntimeSettings.frozen(properties), models, workers);
+        this(store, forges, RuntimeSettings.frozen(properties), models, workers);
     }
 
-    public Replier(Store store, GitLabClient gitlab, RuntimeSettings settings,
+    public Replier(Store store, ForgeFactory forges, RuntimeSettings settings,
             Function<Project, ReviewModel> models, ExecutorService workers) {
         this.store = store;
-        this.gitlab = gitlab;
+        this.forges = forges;
         this.settings = settings;
         this.agent = new Agent();
         this.models = models;
@@ -163,7 +166,7 @@ public class Replier {
 
         // The diff is what makes the answer specific rather than a restatement of the finding.
         try {
-            GitLabClient.Diff diff = gitlab.changes(project, mrIid,
+            Diff diff = forges.forProject(project).changes(project, mrIid,
                     settings.review().maxDiffChars());
             prompt.append("The diff under review:\n\n").append(diff.text());
         } catch (Exception e) {
@@ -198,7 +201,7 @@ public class Replier {
                 finding == null ? null : finding.id(), sourceNoteId,
                 SYSTEM + "\n\n---\n\n" + user, posted, run.trace(), Instant.now());
         if (sourceNoteId == null || sourceNoteId.isBlank()) {
-            gitlab.replyToDiscussion(project, mrIid, discussionId, posted);
+            forges.forProject(project).replyToDiscussion(project, mrIid, discussionId, posted);
             store.createReply(draft);
             store.saveReplyUsage(draft.id(), answer.usage());
             closeIfAddressed(project, mrIid, discussionId, finding, verdict);
@@ -217,7 +220,7 @@ public class Replier {
                          String posted, String sourceNoteId, ReviewModel.Usage usage,
                          Finding finding, VerdictParser.ReplyVerdict verdict) {
         try {
-            gitlab.replyToDiscussion(project, mrIid, discussionId, posted);
+            forges.forProject(project).replyToDiscussion(project, mrIid, discussionId, posted);
         } catch (RuntimeException e) {
             if (sourceNoteId != null && !sourceNoteId.isBlank()) {
                 store.abandonReply(replyId);
@@ -235,22 +238,47 @@ public class Replier {
         log.info("replied on thread {} of {}!{}", discussionId, project.name(), mrIid);
     }
 
+    /**
+     * The model agreed the reply settled the finding.
+     *
+     * <p>mrr's own record is written first and unconditionally: internal state is never weakened
+     * by a host limitation, so a forge that cannot close a thread must not be able to leave a
+     * finding OPEN that mrr has decided is addressed. Only the host-side half is conditional —
+     * resolve where the host supports it, and a struck-through marker on the comment where it
+     * does not, so the thread still reads correctly to a human.
+     */
     private void closeIfAddressed(Project project, long mrIid, String discussionId,
                                   Finding finding, VerdictParser.ReplyVerdict verdict) {
         if (verdict == null || !verdict.addressed() || finding == null) {
             return;
         }
+        if (finding.state() == Finding.State.OPEN) {
+            store.markAddressed(finding.id());
+        }
+        if (finding.discussionId() == null) {
+            return;
+        }
+        Forge forge = forges.forProject(project);
+        ForgeCapabilities caps;
         try {
-            if (finding.discussionId() != null) {
-                gitlab.resolveDiscussion(project, mrIid, finding.discussionId());
-            }
-            if (finding.state() == Finding.State.OPEN) {
-                store.markAddressed(finding.id());
-            }
-            log.info("finding {} addressed on reply — thread resolved", finding.id());
+            caps = forge.capabilities(project);
         } catch (Exception e) {
-            log.warn("could not resolve thread {} after reply: {}",
-                    discussionId, e.getMessage());
+            log.warn("could not read forge capabilities for {} after reply: {}",
+                    project.name(), e.getMessage());
+            return;
+        }
+        try {
+            if (caps.resolvableThreads()) {
+                forge.resolveDiscussion(project, mrIid, finding.discussionId());
+                log.info("finding {} addressed on reply — thread resolved", finding.id());
+            } else if (caps.editComment() && finding.noteId() != null) {
+                forge.updateDiscussionNote(project, mrIid, finding.discussionId(),
+                        finding.noteId(), Prompts.withAddressedMarker(finding.body()));
+                log.info("finding {} addressed on reply — thread marked (host cannot resolve)",
+                        finding.id());
+            }
+        } catch (Exception e) {
+            log.warn("could not close thread {} after reply: {}", discussionId, e.getMessage());
         }
     }
 

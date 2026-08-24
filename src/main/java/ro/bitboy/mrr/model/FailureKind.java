@@ -2,7 +2,7 @@ package ro.bitboy.mrr.model;
 
 /**
  * Why a review stopped before posting. Anything other than a successful verdict is fail-closed:
- * the UI shows it, GitLab is not touched.
+ * the UI shows it, the forge is not touched.
  */
 public enum FailureKind {
 
@@ -25,7 +25,16 @@ public enum FailureKind {
      * Same fail-closed rule: show in the UI, post nothing.
      */
     MCP,
-    /** GitLab itself failed before we had a verdict to post. */
+    /**
+     * The forge itself failed before we had a verdict to post.
+     *
+     * <p>{@link #GITLAB} is what this used to be called, and it stays because it is stored as
+     * text in {@code reviews.error_kind} on every historical row and must keep deserialising.
+     * Nothing writes it any more.
+     */
+    FORGE,
+    /** @deprecated historical rows only — {@link #FORGE} is what new failures record. */
+    @Deprecated
     GITLAB,
     /** The model declined to produce a review. */
     REFUSAL,
@@ -36,8 +45,9 @@ public enum FailureKind {
             return model.kind();
         }
         String haystack = error.getClass().getSimpleName() + " " + String.valueOf(error.getMessage());
-        if (haystack.contains("gitlab_error") || haystack.startsWith("ApiException GitLab ")) {
-            return GITLAB;
+        if (haystack.contains("forge_error") || haystack.contains("gitlab_error")
+                || haystack.startsWith("ApiException GitLab ")) {
+            return FORGE;
         }
         return UNKNOWN;
     }
@@ -51,6 +61,7 @@ public enum FailureKind {
             case PROVIDER -> "Model provider could not be reached. Nothing was posted.";
             case OUTPUT -> "The model finished without a usable JSON verdict. Nothing was posted.";
             case MCP -> "An MCP client the agent needs is unavailable. Nothing was posted.";
+            case FORGE -> "The forge could not be reached. Nothing was posted.";
             case GITLAB -> "GitLab could not be reached. Nothing was posted.";
             case REFUSAL -> "The model declined to review. Nothing was posted.";
             case UNKNOWN -> "The review failed before posting.";

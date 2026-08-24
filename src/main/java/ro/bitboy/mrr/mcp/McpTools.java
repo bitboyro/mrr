@@ -9,7 +9,8 @@ import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import ro.bitboy.mrr.auth.Principal;
-import ro.bitboy.mrr.gitlab.GitLabClient;
+import ro.bitboy.mrr.forge.MergeRequest;
+import ro.bitboy.mrr.forge.ForgeFactory;
 import ro.bitboy.mrr.memory.MemoryDocument;
 import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.model.MrStatus;
@@ -38,19 +39,19 @@ public class McpTools {
     public static final String TOKEN_KEY = "mrr.token";
 
     private final Store store;
-    private final GitLabClient gitlab;
+    private final ForgeFactory forges;
     private final Reviewer reviewer;
     private final MemoryService memory;
 
-    public McpTools(Store store, GitLabClient gitlab, Reviewer reviewer, MemoryService memory) {
+    public McpTools(Store store, ForgeFactory forges, Reviewer reviewer, MemoryService memory) {
         this.store = store;
-        this.gitlab = gitlab;
+        this.forges = forges;
         this.reviewer = reviewer;
         this.memory = memory;
     }
 
     @Tool(name = "list_projects",
-            description = "List the GitLab projects registered with mrr that you have access to. "
+            description = "List the projects registered with mrr that you have access to. "
                     + "Call this first to find the project id needed by the other tools.")
     public List<Project> listProjects(ToolContext toolContext) {
         Principal caller = caller(toolContext);
@@ -59,12 +60,12 @@ public class McpTools {
 
     @Tool(name = "list_merge_requests",
             description = "List the currently open merge requests for a registered project, "
-                    + "as reported by GitLab. Use when you need to know what is in flight.")
-    public List<GitLabClient.MergeRequest> listMergeRequests(
+                    + "as reported by its forge. Use when you need to know what is in flight.")
+    public List<MergeRequest> listMergeRequests(
             @ToolParam(description = "The mrr project id, from list_projects") String projectId,
             ToolContext toolContext) {
         Project project = store.requireVisible(caller(toolContext), projectId);
-        return gitlab.openMergeRequests(project);
+        return forges.forProject(project).openMergeRequests(project);
     }
 
     @Tool(name = "list_reviews",
@@ -149,7 +150,7 @@ public class McpTools {
     public String updateComment(
             @ToolParam(description = "The review id whose posted comment should be edited")
             String reviewId,
-            @ToolParam(description = "The new comment body, in GitLab-flavoured Markdown")
+            @ToolParam(description = "The new comment body, in the forge's flavour of Markdown")
             String markdown,
             ToolContext toolContext) {
         Review review = visibleReview(caller(toolContext), reviewId);
@@ -158,8 +159,8 @@ public class McpTools {
         }
         Project project = store.findProject(review.projectId()).orElseThrow();
 
-        gitlab.updateDiscussionNote(project, review.mrIid(), review.discussionId(),
-                review.noteId(), markdown);
+        forges.forProject(project).updateDiscussionNote(project, review.mrIid(),
+                review.discussionId(), review.noteId(), markdown);
         store.saveResponse(reviewId, markdown);
         store.markReady(reviewId, review.discussionId(), review.noteId());
 

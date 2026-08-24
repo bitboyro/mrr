@@ -42,6 +42,7 @@ public class SchemaPatch {
     @PostConstruct
     void patch() {
         logBackend();
+        addColumn("projects", "forge", "TEXT NOT NULL DEFAULT 'GITLAB'");
         addColumn("projects", "gitlab_operator_token", "TEXT");
         addColumn("projects", "agent_max_turns", "INTEGER NOT NULL DEFAULT 1");
         addColumn("projects", "agent_tools", "TEXT");
@@ -194,15 +195,17 @@ public class SchemaPatch {
                 )
                 """).update();
         db.sql("""
-                CREATE TABLE IF NOT EXISTS gitlab_instances (
+                CREATE TABLE IF NOT EXISTS forge_instances (
                     id         TEXT PRIMARY KEY,
                     owner_id   TEXT REFERENCES users(id),
                     name       TEXT NOT NULL,
+                    kind       TEXT NOT NULL DEFAULT 'GITLAB',
                     url        TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     UNIQUE (owner_id, name)
                 )
                 """).update();
+        addColumn("forge_instances", "kind", "TEXT NOT NULL DEFAULT 'GITLAB'");
         db.sql("""
                 CREATE TABLE IF NOT EXISTS llm_providers (
                     id             TEXT PRIMARY KEY,
@@ -221,13 +224,42 @@ public class SchemaPatch {
                     ON llm_providers(name) WHERE owner_id IS NULL
                 """).update();
         db.sql("""
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_gitlab_instances_shared_name
-                    ON gitlab_instances(name) WHERE owner_id IS NULL
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_forge_instances_shared_name
+                    ON forge_instances(name) WHERE owner_id IS NULL
                 """).update();
+        migrateGitlabInstances();
         refuseLegacyShape();
         backfillOverviewThreads();
         migrateLegacySkill();
         backfillSkillLibrary();
+    }
+
+    /**
+     * {@code gitlab_instances} becomes {@code forge_instances} carrying a {@code kind}.
+     *
+     * <p>Additive, like everything else here: the rows are copied in as {@code GITLAB} — which
+     * is what they are — and the old table is left in place rather than dropped. Dropping it
+     * would be the one destructive step in a patch file that is otherwise {@code ADD COLUMN}
+     * and {@code CREATE TABLE IF NOT EXISTS}, and an unused table costs nothing. Only ever
+     * copies into an empty {@code forge_instances}, so it cannot resurrect an entry someone
+     * deleted after upgrading.
+     */
+    private void migrateGitlabInstances() {
+        if (columnsOf("gitlab_instances").isEmpty()) {
+            return;
+        }
+        Integer already = db.sql("SELECT count(*) FROM forge_instances")
+                .query(Integer.class).single();
+        if (already != null && already > 0) {
+            return;
+        }
+        int moved = db.sql("""
+                INSERT INTO forge_instances (id, owner_id, name, kind, url, created_at)
+                SELECT id, owner_id, name, 'GITLAB', url, created_at FROM gitlab_instances
+                """).update();
+        if (moved > 0) {
+            log.info("schema: moved {} GitLab host(s) into forge_instances", moved);
+        }
     }
 
     /**

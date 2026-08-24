@@ -1,4 +1,4 @@
-package ro.bitboy.mrr.gitlab;
+package ro.bitboy.mrr.forge.gitlab;
 
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -7,23 +7,33 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.client.RestClient;
+import ro.bitboy.mrr.model.ForgeKind;
 import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.Project;
+import ro.bitboy.mrr.forge.AnchorRef;
+import ro.bitboy.mrr.forge.Diff;
+import ro.bitboy.mrr.forge.Discussion;
+import ro.bitboy.mrr.forge.GitMeta;
+import ro.bitboy.mrr.forge.MergeRequest;
+import ro.bitboy.mrr.forge.MrCommit;
+import ro.bitboy.mrr.web.ApiException;
 
 import java.time.Instant;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-class GitLabClientTest {
+class GitLabForgeTest {
 
     private MockWebServer gitlab;
-    private GitLabClient client;
+    private GitLabForge client;
 
     @BeforeEach
     void setUp() throws Exception {
         gitlab = new MockWebServer();
         gitlab.start();
-        client = new GitLabClient(RestClient.builder());
+        client = new GitLabForge(RestClient.builder());
     }
 
     @AfterEach
@@ -79,7 +89,7 @@ class GitLabClientTest {
                             {"new_path":"B.java","diff":"@@ b @@"}]}
                 """));
 
-        GitLabClient.Diff diff = client.changes(project("g/p"), 3, 10_000);
+        Diff diff = client.changes(project("g/p"), 3, 10_000);
 
         assertThat(gitlab.takeRequest().getHeader("PRIVATE-TOKEN")).isEqualTo("glpat-test");
         assertThat(diff.authorName()).isEqualTo("Ada Lovelace");
@@ -97,7 +107,7 @@ class GitLabClientTest {
                  "changes":[{"new_path":"Big.java","diff":"%s"}]}
                 """.formatted("x".repeat(5_000))));
 
-        GitLabClient.Diff diff = client.changes(project("g/p"), 1, 500);
+        Diff diff = client.changes(project("g/p"), 1, 500);
 
         assertThat(diff.truncated()).isTrue();
         assertThat(diff.text()).endsWith("[diff truncated by mrr]");
@@ -113,7 +123,7 @@ class GitLabClientTest {
     void postsTheReviewAsADiscussionAndReturnsBothIds() throws Exception {
         gitlab.enqueue(json("{\"id\":\"abc123\",\"notes\":[{\"id\":9001}]}"));
 
-        GitLabClient.Discussion posted = client.postDiscussion(project("g/p"), 4, "## review");
+        Discussion posted = client.postDiscussion(project("g/p"), 4, "## review");
 
         RecordedRequest request = gitlab.takeRequest();
         assertThat(request.getMethod()).isEqualTo("POST");
@@ -122,6 +132,42 @@ class GitLabClientTest {
         assertThat(request.getBody().readUtf8()).contains("## review");
         assertThat(posted.discussionId()).isEqualTo("abc123");
         assertThat(posted.noteId()).isEqualTo("9001");
+    }
+
+    @Test
+    void aRejectedPositionFallsBackToAnUnanchoredThread() throws Exception {
+        gitlab.enqueue(json("""
+                {"diff_refs":{"base_sha":"b","start_sha":"s","head_sha":"h"}}"""));
+        AnchorRef anchor = client.diffRefs(project("g/p"), 4).orElseThrow();
+        gitlab.takeRequest();
+        // GitLab's own way of saying "not a renderable line" — an unchanged line, an invented
+        // path. Routine, not a failure.
+        gitlab.enqueue(new MockResponse().setResponseCode(400).setBody("{}"));
+
+        Optional<Discussion> posted = client.postInlineDiscussion(
+                project("g/p"), 4, anchor, "A.java", 3, "## finding");
+
+        assertThat(posted).isEmpty();
+    }
+
+    /**
+     * Regression: a 5xx or a timeout from this same call used to be caught by the same
+     * {@code catch (ApiException)} as a rejected position, which silently turned "the host is
+     * down" into "post an unanchored thread instead" — and if GitLab had actually created the
+     * discussion before the response was lost, that meant a duplicate finding with the original
+     * left untracked. Only a genuine 4xx may read as "rejected"; everything else must propagate.
+     */
+    @Test
+    void aHostFailureDuringAPositionPostThrowsRatherThanFallingBack() throws Exception {
+        gitlab.enqueue(json("""
+                {"diff_refs":{"base_sha":"b","start_sha":"s","head_sha":"h"}}"""));
+        AnchorRef anchor = client.diffRefs(project("g/p"), 4).orElseThrow();
+        gitlab.takeRequest();
+        gitlab.enqueue(new MockResponse().setResponseCode(503).setBody("upstream down"));
+
+        assertThatThrownBy(() -> client.postInlineDiscussion(
+                project("g/p"), 4, anchor, "A.java", 3, "## finding"))
+                .isInstanceOf(ApiException.class);
     }
 
     @Test
@@ -202,7 +248,7 @@ class GitLabClientTest {
 
         var mrs = client.openMergeRequests(project("g/p"));
 
-        assertThat(mrs).extracting(GitLabClient.MergeRequest::iid).containsExactly(1L, 2L);
+        assertThat(mrs).extracting(MergeRequest::iid).containsExactly(1L, 2L);
         assertThat(gitlab.takeRequest().getPath()).endsWith("page=1");
         assertThat(gitlab.takeRequest().getPath()).endsWith("page=2");
     }
@@ -215,7 +261,7 @@ class GitLabClientTest {
                  "changes":[{"new_path":"A.java","diff":"@@ a @@"}]}
                 """));
 
-        GitLabClient.Diff diff = client.changes(project("g/p"), 1);
+        Diff diff = client.changes(project("g/p"), 1);
 
         assertThat(diff.truncated()).isTrue();
         assertThat(diff.text()).contains("[diff truncated by GitLab]");
@@ -348,7 +394,7 @@ class GitLabClientTest {
                 """));
         gitlab.enqueue(json("[{\"id\":\"c1\"}]").setHeader("X-Total", "7"));
 
-        GitLabClient.GitMeta meta = client.gitMeta(project("g/p"), 3);
+        GitMeta meta = client.gitMeta(project("g/p"), 3);
 
         assertThat(gitlab.takeRequest().getPath())
                 .isEqualTo("/api/v4/projects/g%2Fp/merge_requests/3?include_diverged_commits_count=true");
@@ -383,7 +429,7 @@ class GitLabClientTest {
 
         assertThat(gitlab.takeRequest().getPath())
                 .isEqualTo("/api/v4/projects/g%2Fp/merge_requests/3/commits?per_page=100&page=1");
-        assertThat(commits).extracting(GitLabClient.MrCommit::sha)
+        assertThat(commits).extracting(MrCommit::sha)
                 .containsExactly("aaa111", "bbb222");
         assertThat(commits.get(0).authorName()).isEqualTo("Ada");
         assertThat(commits.get(1).authoredDate()).isEqualTo("2026-01-02T00:00:00Z");
@@ -471,7 +517,7 @@ class GitLabClientTest {
                 {"iid":3,"title":"t","state":"merged","sha":"abc","web_url":"https://gl/3","draft":false}
                 """));
 
-        GitLabClient.MergeRequest merged = client.merge(project("g/p"), 3);
+        MergeRequest merged = client.merge(project("g/p"), 3);
 
         RecordedRequest request = gitlab.takeRequest();
         assertThat(request.getMethod()).isEqualTo("PUT");
@@ -489,7 +535,7 @@ class GitLabClientTest {
     private Project project(String gitlabProjectId) {
         LlmProvider llm = new LlmProvider("l1", "u1", "entry", Project.Provider.OPENAI_COMPAT,
                 "m", null, "k", Instant.now());
-        return new Project("p1", "u1", "test", true,
+        return new Project("p1", "u1", "test", true, ForgeKind.GITLAB,
                 gitlab.url("/").toString().replaceAll("/+$", ""), gitlabProjectId,
                 "glpat-test", null, "secret", llm.id(), llm,
                 null, false, 1, java.util.List.of(), false,

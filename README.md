@@ -1,14 +1,16 @@
 # mrr - merge request review
 
-AI code review for GitLab merge requests. One container, your GitLab, your model key.
+AI code review for merge and pull requests. One container, your forge, your model key.
 
 GitLab Free gives you webhooks and the full REST API but no AI review. `mrr` fills the gap
-from outside: a merge request is opened or pushed to, GitLab calls `mrr`, `mrr` pulls the
+from outside: a merge request is opened or pushed to, the forge calls `mrr`, `mrr` pulls the
 diff, sends it to a model with your project's review instructions, and posts the review back
-as a comment on the MR.
+as a comment on the request.
 
-Works with **gitlab.com and self-hosted GitLab** — the base URL is per project. Multiple users
-can register their own projects, and an MCP server lets an agent inspect and amend reviews.
+Works with **GitLab, Codeberg / Forgejo / Gitea, and GitHub** — and with self-hosted instances
+of all three, because the base URL is per project. Multiple users can register their own
+projects, and an MCP server lets an agent inspect and amend reviews. See
+[Which forge](#which-forge) for what each host does and does not support.
 
 **Start at [Run it](#run-it), then open the UI — its front page is the setup guide.**
 
@@ -31,10 +33,50 @@ thread lists them, edited in place on later commits rather than reposted.
 - **Nothing partial is posted.** A review that fails — quota, rate limit, unreachable provider,
   a response that isn't a verdict — posts nothing at all and is kept as `FAILED` with the raw
   response. Re-run it once the cause is fixed.
-- **GitLab is source of truth for whether the MR still exists.** Merged or closed cancels a
-  review still in flight, so nothing lands on a dead MR.
+- **The forge is source of truth for whether the request still exists.** Merged or closed
+  cancels a review still in flight, so nothing lands on a dead request.
 
 Everything is kept: the raw webhook payload, the exact prompt, the model's response.
+
+## Which forge
+
+One project is bound to one remote — mirroring a repository across two hosts means registering
+it twice. mrr's process is the invariant, and every host is translated into it rather than the
+other way round; where a host cannot do something that process needs, the degradation is
+**named and visible on the project page**, never a quiet second behaviour.
+
+| | GitLab | Codeberg / Forgejo / Gitea | GitHub |
+|---|---|---|---|
+| Repository field | numeric id or `group/project` | `owner/repo` | `owner/repo` |
+| Self-hosted | yes | yes | yes (GHES) |
+| Webhook auth | secret in `X-Gitlab-Token` | HMAC-SHA256 | HMAC-SHA256 |
+| Findings anchored to a diff line | yes | yes | yes |
+| Close a thread on the host | yes | **probed per instance** | yes, over GraphQL |
+| Reply inside a thread | yes | probed per instance | yes |
+| Approve | yes | yes | yes |
+| Retract an approval | yes | dismissal | **no unapprove — dismissal** |
+| Merge from mrr | yes | yes | yes |
+
+Three things are worth knowing before you register a project:
+
+- **Forgejo conversation-resolve is version-dependent.** Recent Forgejo and Gitea resolve
+  conversations in the web UI, but whether the REST API exposes it varies per deployment. mrr
+  reads the instance's own `swagger.v1.json` when it first needs to know, and records the
+  answer. Where resolve is absent, mrr still records the finding as addressed — internal state
+  is never weakened by a host limitation — and edits the comment to lead with a struck-through
+  **Addressed** marker so the thread reads correctly to a human.
+- **GitHub cannot resolve a review thread over REST at all.** mrr uses the GraphQL
+  `resolveReviewThread` mutation. A fine-grained PAT needs **Pull requests: Read and write**
+  *and* **Contents: Read and write** — counter-intuitive for an operation about pull requests,
+  and the usual cause of a 403 that looks like anything else.
+- **GitHub has no unapprove.** With `autoApprove` on, a reintroduced finding makes mrr dismiss
+  its own approving review with a message. That is a different act with a different audit trail
+  than an un-approval, which is why the project page says so rather than letting you find out
+  from an audit log.
+
+`mrIid` throughout the API is the per-repository request number: `iid` on GitLab, `index` on
+Forgejo, `number` on GitHub. `gitlabUrl` and `gitlabToken` on a project are the forge base URL
+and the forge token, whichever forge that is — the names are kept for compatibility.
 
 ## Run it
 
@@ -74,10 +116,14 @@ mkdir -p data && sudo chown -R 10001:10001 data
 ## Set it up
 
 Open **http://localhost:8130** and paste the root token. The page you land on is the setup
-guide: adding your project, which GitLab token to mint and with which permissions, the
-webhook, and what a review looks like once it lands. About five minutes, no curl.
+guide: adding your project, which token to mint and with which permissions, the webhook, and
+what a review looks like once it lands. About five minutes, no curl.
 
-Admins also get **Configure** (`/configure`) for live instance settings, GitLab and LLM
+The webhook URL is `/webhooks/<forge>/<project-id>` — the project page shows the exact one.
+**`/webhooks/gitlab/<project-id>` keeps working forever**, because every hook already
+registered in a GitLab UI points at it and mrr does not create hooks.
+
+Admins also get **Configure** (`/configure`) for live instance settings, forge and LLM
 catalogs, stats, and the skill library, and **Admin** for users and tokens.
 
 Everything the UI does is REST, so a script can do it too — see [API and MCP](#api-and-mcp).
@@ -100,7 +146,7 @@ Everything the UI does is REST, so a script can do it too — see [API and MCP](
 | `MRR_MAX_DIFF_CHUNKS` | `8` | Cap on review slices for one MR |
 | `MRR_MAX_FILE_CHARS` | `80000` | Files fetched via `read_file` are truncated |
 | `MRR_MEMORY_ROOT` | `/data/memory` | Per-project memory files |
-| `MRR_SCAN_INTERVAL_MS` | `120000` | GitLab catch-up for missed commits and merged/closed MRs |
+| `MRR_SCAN_INTERVAL_MS` | `120000` | Forge catch-up for missed commits and merged/closed requests |
 | `MRR_LIBRARIAN_MAX_TURNS` | `6` | Librarian agent turn cap (independent of reviews) |
 | `MRR_MAX_MEMORY_CHARS` | `8000` | Prefetched memory / file excerpts for the librarian |
 | `MRR_MAX_MODEL_TOKENS` | `16000` | `max_tokens` / Anthropic max output (covers thinking) |
@@ -109,7 +155,7 @@ Everything the UI does is REST, so a script can do it too — see [API and MCP](
 
 These are boot defaults. Admins can change the live ones on `/configure` without a restart;
 `SERVER_PORT`, the database variables, `MRR_ROOT_TOKEN_FILE`, `MRR_MEMORY_ROOT`, and the MCP
-endpoint need one. There are no model or GitLab credentials in the environment — those are per
+endpoint need one. There are no model or forge credentials in the environment — those are per
 project.
 
 ### Database
@@ -149,7 +195,7 @@ your infrastructure already snapshots — not yet for running two instances.
 
 ### Encrypting the stored credentials
 
-Each project's GitLab PATs, webhook secret, and model key live in `mrr.db`. Set a key and they
+Each project's forge PATs, webhook secret, and model key live in `mrr.db`. Set a key and they
 are encrypted at rest with AES-256-GCM; leave it unset and they are stored in plaintext, which
 mrr warns about on every boot.
 
@@ -203,10 +249,15 @@ MRR_TOKEN=mrr_... ./scripts/export-contracts.sh    # both files, against a runni
 - **Postgres is not horizontal scale.** It takes the database off the container's disk, but
   memory is markdown under `MRR_MEMORY_ROOT` with the table as an index, so a second instance
   needs that directory shared as well — and would still hit the single-flight limit above.
-- **mrr comments as whoever owns the GitLab token.** On a shared project, give it a dedicated
+- **mrr comments as whoever owns the forge token.** On a shared project, give it a dedicated
   bot account rather than a person's PAT.
 - **Inline anchoring needs the line to be in the diff.** A finding about untouched code gets an
   unanchored thread instead — correct, just less convenient.
+- **Not every host can do everything.** See [Which forge](#which-forge); the project page lists
+  the gaps for that project, and what mrr does instead, before the first review runs.
+- **Rebase and conflict warnings are GitLab-only.** `detailed_merge_status` and the
+  diverged-commit count have no equivalent elsewhere, so the UI shows nothing there. They are
+  advisory, never review inputs.
 
 ## Develop
 
@@ -227,7 +278,7 @@ A **live instance** that must keep reviewing while you switch branches should no
 ```
 
 The pane at the bottom prints the public URL, root token, and webhook URLs. A new quick-tunnel
-hostname must be pasted into GitLab each start.
+hostname must be pasted into the forge each start.
 
 `mvn test` needs no database — SQLite covers the suite. The Postgres tests are skipped unless
 you point them at a throwaway server:

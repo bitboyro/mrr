@@ -11,6 +11,7 @@ import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.User;
 import ro.bitboy.mrr.secret.AesGcmSecretBox;
 import ro.bitboy.mrr.secret.PlaintextSecretBox;
+import ro.bitboy.mrr.model.ForgeKind;
 
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -44,7 +45,7 @@ class StoreSecretsTest {
         User owner = store.createUser("owner", Role.ADMIN);
         LlmProvider llm = TestStores.llmProvider(owner.id(), MODEL_KEY);
         Project project = new Project(
-                ro.bitboy.mrr.auth.Ids.newId(), owner.id(), "test-repo", true,
+                ro.bitboy.mrr.auth.Ids.newId(), owner.id(), "test-repo", true, ForgeKind.GITLAB,
                 "https://gitlab.com", "group/test-repo", PAT, OPERATOR_PAT, WEBHOOK,
                 llm.id(), llm,
                 null, false, 1, java.util.List.of(), false, false,

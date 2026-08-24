@@ -50,7 +50,7 @@ class ReviewModelFactoryTest {
         LlmProvider llm = new LlmProvider(p.llm().id(), p.llm().ownerId(), p.llm().name(),
                 p.llm().provider(), model, p.llm().modelBaseUrl(), p.llm().modelKey(),
                 p.llm().createdAt());
-        return new Project(p.id(), p.ownerId(), p.name(), p.enabled(), p.gitlabUrl(),
+        return new Project(p.id(), p.ownerId(), p.name(), p.enabled(), p.forge(), p.gitlabUrl(),
                 p.gitlabProjectId(), p.gitlabToken(), p.gitlabOperatorToken(),
                 p.webhookSecret(), llm.id(), llm, p.skill(), p.skipDrafts(),
                 p.agentMaxTurns(), p.agentTools(), p.autoApprove(), p.librarianEnabled(),

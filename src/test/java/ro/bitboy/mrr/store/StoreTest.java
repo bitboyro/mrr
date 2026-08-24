@@ -19,7 +19,7 @@ import ro.bitboy.mrr.model.AgentSkill;
 import ro.bitboy.mrr.model.AgentTrace;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.Finding;
-import ro.bitboy.mrr.model.GitlabInstance;
+import ro.bitboy.mrr.model.ForgeInstance;
 import ro.bitboy.mrr.model.InstanceStats;
 import ro.bitboy.mrr.model.LibrarySkill;
 import ro.bitboy.mrr.model.LlmProvider;
@@ -33,6 +33,7 @@ import ro.bitboy.mrr.model.ReviewModel;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.User;
 import ro.bitboy.mrr.web.ApiException;
+import ro.bitboy.mrr.model.ForgeKind;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -139,7 +140,7 @@ class StoreTest {
     @Test
     void operatorTokenIsStoredAndMaskedOnRead() {
         LlmProvider llm = TestStores.llmProvider(alice.id());
-        Project created = TestStores.persist(store, new Project(Ids.newId(), alice.id(), "app", true,
+        Project created = TestStores.persist(store, new Project(Ids.newId(), alice.id(), "app", true, ForgeKind.GITLAB,
                 "https://gitlab.com", "g/app", "glpat-review", "glpat-operator-token", Ids.newSecret(),
                 llm.id(), llm,
                 null, false, 1, List.of(), false, false, null, null, null, null, null, null,
@@ -603,7 +604,7 @@ class StoreTest {
         assertThat(runtime.baseUrl()).isEqualTo("http://localhost:8130");
         runtime.save(java.util.Map.of(RuntimeSettings.BASE_URL, "https://mrr.example.com/"));
         assertThat(runtime.baseUrl()).isEqualTo("https://mrr.example.com");
-        assertThat(runtime.webhookUrl("proj-1"))
+        assertThat(runtime.webhookUrl(ForgeKind.GITLAB, "proj-1"))
                 .isEqualTo("https://mrr.example.com/webhooks/gitlab/proj-1");
 
         Project project = TestStores.persist(store, project(alice.id(), "stats-app"));
@@ -633,33 +634,33 @@ class StoreTest {
 
     @Test
     void gitlabInstancesAreNamedUrlsWithNoToken() {
-        GitlabInstance gitlab = store.createGitlabInstance(adminOf(alice), true, " GitLab.com ", "https://gitlab.com/");
+        ForgeInstance gitlab = store.createForgeInstance(adminOf(alice), true, " GitLab.com ", ForgeKind.GITLAB, "https://gitlab.com/");
         assertThat(gitlab.name()).isEqualTo("GitLab.com");
         assertThat(gitlab.url()).isEqualTo("https://gitlab.com");
 
-        GitlabInstance self = store.createGitlabInstance(adminOf(alice), true, "corp", "https://git.example.com");
-        store.updateGitlabInstance(adminOf(alice), self.id(), "Corp GitLab", "https://git.example.com/gitlab/");
-        assertThat(store.findGitlabInstance(adminOf(alice), self.id())).get()
-                .extracting(GitlabInstance::name, GitlabInstance::url)
+        ForgeInstance self = store.createForgeInstance(adminOf(alice), true, "corp", ForgeKind.GITLAB, "https://git.example.com");
+        store.updateForgeInstance(adminOf(alice), self.id(), "Corp GitLab", null, "https://git.example.com/gitlab/");
+        assertThat(store.findForgeInstance(adminOf(alice), self.id())).get()
+                .extracting(ForgeInstance::name, ForgeInstance::url)
                 .containsExactly("Corp GitLab", "https://git.example.com/gitlab");
 
-        assertThat(store.listGitlabInstances(adminOf(alice)))
-                .extracting(GitlabInstance::name)
+        assertThat(store.listForgeInstances(adminOf(alice)))
+                .extracting(ForgeInstance::name)
                 .containsExactly("Corp GitLab", "GitLab.com");
 
-        assertThatThrownBy(() -> store.createGitlabInstance(adminOf(alice), true, "GitLab.com", "https://gitlab.com"))
+        assertThatThrownBy(() -> store.createForgeInstance(adminOf(alice), true, "GitLab.com", ForgeKind.GITLAB, "https://gitlab.com"))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(409));
-        assertThatThrownBy(() -> store.createGitlabInstance(adminOf(alice), true, "bad", "gitlab.com"))
+        assertThatThrownBy(() -> store.createForgeInstance(adminOf(alice), true, "bad", ForgeKind.GITLAB, "gitlab.com"))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
-        assertThatThrownBy(() -> store.updateGitlabInstance(adminOf(alice), "missing", "x", "https://gitlab.com"))
+        assertThatThrownBy(() -> store.updateForgeInstance(adminOf(alice), "missing", "x", null, "https://gitlab.com"))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(404));
 
-        store.deleteGitlabInstance(adminOf(alice), gitlab.id());
-        assertThat(store.findGitlabInstance(adminOf(alice), gitlab.id())).isEmpty();
-        assertThatThrownBy(() -> store.deleteGitlabInstance(adminOf(alice), gitlab.id()))
+        store.deleteForgeInstance(adminOf(alice), gitlab.id());
+        assertThat(store.findForgeInstance(adminOf(alice), gitlab.id())).isEmpty();
+        assertThatThrownBy(() -> store.deleteForgeInstance(adminOf(alice), gitlab.id()))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(404));
     }
@@ -699,25 +700,25 @@ class StoreTest {
 
     @Test
     void schemaPatchCreatesCatalogTablesOnExistingDatabases() {
-        db.sql("DROP TABLE IF EXISTS gitlab_instances").update();
+        db.sql("DROP TABLE IF EXISTS forge_instances").update();
         db.sql("DROP TABLE IF EXISTS llm_providers").update();
         new SchemaPatch(db, dataSource).patch();
-        GitlabInstance row = store.createGitlabInstance(adminOf(alice), true, "patched", "https://gitlab.example");
-        assertThat(store.findGitlabInstance(adminOf(alice), row.id())).isPresent();
+        ForgeInstance row = store.createForgeInstance(adminOf(alice), true, "patched", ForgeKind.GITLAB, "https://gitlab.example");
+        assertThat(store.findForgeInstance(adminOf(alice), row.id())).isPresent();
     }
 
     @Test
     void theGitlabUrlIsCopiedButTheLlmEntryIsFollowed() {
-        GitlabInstance gitlab = store.createGitlabInstance(adminOf(alice), true, "gitlab.com", "https://gitlab.com");
+        ForgeInstance gitlab = store.createForgeInstance(adminOf(alice), true, "gitlab.com", ForgeKind.GITLAB, "https://gitlab.com");
         LlmProvider opus = store.createLlmProvider(adminOf(alice), false, "Opus",
                 Project.Provider.ANTHROPIC, "claude-opus-5", null, "sk-x");
-        Project project = store.createProject(new Project(Ids.newId(), alice.id(), "calc", true,
+        Project project = store.createProject(new Project(Ids.newId(), alice.id(), "calc", true, ForgeKind.GITLAB,
                 gitlab.url(), "group/calc", "glpat-x", null, Ids.newSecret(),
                 opus.id(), opus,
                 null, false, 1, List.of(), false, false, null, null, null, null, null, null,
                 Instant.now()));
 
-        store.updateGitlabInstance(adminOf(alice), gitlab.id(), "GitLab", "https://gitlab.example.com");
+        store.updateForgeInstance(adminOf(alice), gitlab.id(), "GitLab", null, "https://gitlab.example.com");
         store.updateLlmProvider(adminOf(alice), opus.id(), "Opus 4", Project.Provider.ANTHROPIC,
                 "claude-opus-4", null, null);
 
@@ -730,7 +731,7 @@ class StoreTest {
     void anEntryCannotBeDeletedWhileAProjectReferencesIt() {
         LlmProvider entry = store.createLlmProvider(adminOf(alice), false, "In use",
                 Project.Provider.ANTHROPIC, "claude-opus-5", null, "sk-x");
-        Project project = store.createProject(new Project(Ids.newId(), alice.id(), "calc", true,
+        Project project = store.createProject(new Project(Ids.newId(), alice.id(), "calc", true, ForgeKind.GITLAB,
                 "https://gitlab.com", "group/calc", "glpat-x", null, Ids.newSecret(),
                 entry.id(), entry,
                 null, false, 1, List.of(), false, false, null, null, null, null, null, null,
@@ -823,7 +824,7 @@ class StoreTest {
 
     private Project project(String ownerId, String name) {
         LlmProvider llm = TestStores.llmProvider(ownerId);
-        return new Project(Ids.newId(), ownerId, name, true,
+        return new Project(Ids.newId(), ownerId, name, true, ForgeKind.GITLAB,
                 "https://gitlab.com", "group/" + name, "glpat-x", null, Ids.newSecret(),
                 llm.id(), llm,
                 null, false, 1, List.of(), false, false, null, null, null, null, null, null, Instant.now());

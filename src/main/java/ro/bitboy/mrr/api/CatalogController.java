@@ -15,7 +15,8 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import ro.bitboy.mrr.RuntimeSettings;
 import ro.bitboy.mrr.auth.Principal;
-import ro.bitboy.mrr.model.GitlabInstance;
+import ro.bitboy.mrr.model.ForgeInstance;
+import ro.bitboy.mrr.model.ForgeKind;
 import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.store.Store;
@@ -25,7 +26,7 @@ import ro.bitboy.mrr.web.Urls;
 import java.util.List;
 
 /**
- * The GitLab and LLM catalogs, and the public base URL.
+ * The forge and LLM catalogs, and the public base URL.
  *
  * <p>Each entry is either shared — {@code ownerId} null, curated by an admin, visible to
  * everyone — or owned by the user who created it. A caller lists the shared ones plus their
@@ -33,15 +34,16 @@ import java.util.List;
  * only an admin may create a shared one.
  *
  * <p>An LLM entry carries the API key a project bills against, which is why a shared entry may
- * not hold one: it would be a credential handed to every account on the instance. GitLab PATs
+ * not hold one: it would be a credential handed to every account on the instance. Forge PATs
  * stay on the project, because a PAT is scoped to one project's code.
  */
 @RestController
 @Tag(name = "Catalogs",
         description = """
-                Named GitLab hosts (URL only) and LLM endpoints, which carry the model API \
-                key. Entries are shared (admin-curated, no key) or private to their owner. \
-                `GET /api/instance` is the live public base URL used to build webhook URLs.""")
+                Named forge hosts (URL and kind, no token) and LLM endpoints, which carry the \
+                model API key. Entries are shared (admin-curated, no key) or private to their \
+                owner. `GET /api/instance` is the live public base URL used to build webhook \
+                URLs.""")
 public class CatalogController {
 
     private final Store store;
@@ -58,42 +60,60 @@ public class CatalogController {
         return new InstanceInfo(settings.baseUrl(), settings.webhookUrlTemplate());
     }
 
-    @Operation(summary = "List GitLab instances")
-    @GetMapping("/api/gitlab-instances")
-    public List<GitlabInstance> listGitlab(Principal caller) {
-        return store.listGitlabInstances(caller);
+    @Operation(summary = "List forge hosts",
+            description = "Every host you can see, of every kind.")
+    @GetMapping("/api/forge-instances")
+    public List<ForgeInstance> listForges(Principal caller) {
+        return store.listForgeInstances(caller);
     }
 
-    @Operation(summary = "Add a GitLab instance")
+    /**
+     * The name this listing had before mrr knew about a second forge. Kept permanently, and
+     * filtered to GITLAB — a client that asked for GitLab instances should not start receiving
+     * GitHub ones because the table was renamed underneath it.
+     */
+    @Operation(summary = "List GitLab hosts",
+            description = "Deprecated alias for `GET /api/forge-instances`, filtered to GitLab.",
+            deprecated = true)
+    @GetMapping("/api/gitlab-instances")
+    public List<ForgeInstance> listGitlab(Principal caller) {
+        return store.listForgeInstances(caller).stream()
+                .filter(row -> row.kind() == ForgeKind.GITLAB)
+                .toList();
+    }
+
+    @Operation(summary = "Add a forge host")
     @ApiResponse(responseCode = "201", description = "Created")
     @ApiResponse(responseCode = "403", description = "Caller is not an ADMIN")
-    @PostMapping("/api/gitlab-instances")
+    @PostMapping({"/api/forge-instances", "/api/gitlab-instances"})
     @ResponseStatus(HttpStatus.CREATED)
-    public GitlabInstance createGitlab(Principal caller, @RequestBody GitlabUpsert request) {
+    public ForgeInstance createForge(Principal caller, @RequestBody ForgeUpsert request) {
         requireSharedIsAdmin(caller, request.shared());
-        requireGitlabCreate(request);
-        return store.createGitlabInstance(caller, request.shared(), request.name().trim(),
+        requireForgeCreate(request);
+        return store.createForgeInstance(caller, request.shared(), request.name().trim(),
+                request.kind() == null ? ForgeKind.DEFAULT : request.kind(),
                 Urls.requireHttp(request.url(), "url"));
     }
 
-    @Operation(summary = "Update a GitLab instance",
-            description = "Omitted fields are kept. Existing projects that copied this URL are not rewritten.")
+    @Operation(summary = "Update a forge host",
+            description = "Omitted fields are kept. Existing projects that copied this URL and "
+                    + "kind are not rewritten.")
     @ApiResponse(responseCode = "403", description = "Caller is not an ADMIN")
-    @PutMapping("/api/gitlab-instances/{id}")
-    public GitlabInstance updateGitlab(Principal caller, @PathVariable String id,
-                                       @RequestBody GitlabUpsert request) {
-        requireGitlabUpdate(request);
+    @PutMapping({"/api/forge-instances/{id}", "/api/gitlab-instances/{id}"})
+    public ForgeInstance updateForge(Principal caller, @PathVariable String id,
+                                     @RequestBody ForgeUpsert request) {
+        requireForgeUpdate(request);
         String url = request.url() == null ? null : Urls.requireHttp(request.url(), "url");
-        return store.updateGitlabInstance(caller, id, request.name(), url);
+        return store.updateForgeInstance(caller, id, request.name(), request.kind(), url);
     }
 
-    @Operation(summary = "Delete a GitLab instance")
+    @Operation(summary = "Delete a forge host")
     @ApiResponse(responseCode = "403", description = "Caller is not an ADMIN")
-    @DeleteMapping("/api/gitlab-instances/{id}")
+    @DeleteMapping({"/api/forge-instances/{id}", "/api/gitlab-instances/{id}"})
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void deleteGitlab(Principal caller, @PathVariable String id) {
+    public void deleteForge(Principal caller, @PathVariable String id) {
         requireAdmin(caller);
-        store.deleteGitlabInstance(caller, id);
+        store.deleteForgeInstance(caller, id);
     }
 
     @Operation(summary = "List LLM providers")
@@ -153,7 +173,7 @@ public class CatalogController {
         }
     }
 
-    private static void requireGitlabCreate(GitlabUpsert request) {
+    private static void requireForgeCreate(ForgeUpsert request) {
         if (request == null) {
             throw ApiException.badRequest("body is required");
         }
@@ -161,7 +181,7 @@ public class CatalogController {
         requireHttpUrl(request.url(), "url");
     }
 
-    private static void requireGitlabUpdate(GitlabUpsert request) {
+    private static void requireForgeUpdate(ForgeUpsert request) {
         if (request == null) {
             throw ApiException.badRequest("body is required");
         }
@@ -212,16 +232,21 @@ public class CatalogController {
         Urls.requireHttp(url, field);
     }
 
-    @Schema(description = "Live public base URL. Used to build GitLab webhook URLs.")
+    @Schema(description = "Live public base URL. Used to build webhook URLs.")
     public record InstanceInfo(
             @Schema(example = "https://mrr.example.com") String baseUrl,
-            @Schema(example = "https://mrr.example.com/webhooks/gitlab/{projectId}")
+            @Schema(description = "`{forge}` is the project's forge slug — gitlab, forgejo or "
+                    + "github.",
+                    example = "https://mrr.example.com/webhooks/{forge}/{projectId}")
             String webhookUrlTemplate) {
     }
 
-    @Schema(description = "Create or update a GitLab host. On update, omitted fields are kept.")
-    public record GitlabUpsert(
+    @Schema(description = "Create or update a forge host. On update, omitted fields are kept.")
+    public record ForgeUpsert(
             @Schema(example = "gitlab.com") String name,
+            @Schema(description = "Which API this host speaks. Defaults to GITLAB, which is what "
+                    + "every entry written before mrr knew about a second forge is.",
+                    example = "GITLAB") ForgeKind kind,
             @Schema(example = "https://gitlab.com") String url,
             @Schema(description = "Admin only. Makes the entry visible to every account.")
             boolean shared) {
