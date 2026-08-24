@@ -12,6 +12,7 @@ import ro.bitboy.mrr.store.Store;
 import ro.bitboy.mrr.secret.PlaintextSecretBox;
 import ro.bitboy.mrr.secret.SecretBox;
 
+import javax.sql.DataSource;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
@@ -27,10 +28,15 @@ public final class TestStores {
 
     /** For the tests that care what actually lands in the column. */
     public static Store sqlite(Path dir, SecretBox secrets) {
+        return new Store(JdbcClient.create(sqliteDataSource(dir)), secrets);
+    }
+
+    /** The datasource behind {@link #sqlite(Path)}, for tests that also need SchemaPatch. */
+    public static DataSource sqliteDataSource(Path dir) {
         var dataSource = new SimpleDriverDataSource(
                 new org.sqlite.JDBC(), "jdbc:sqlite:" + dir.resolve("mrr-test.db"));
         new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(dataSource);
-        return new Store(JdbcClient.create(dataSource), secrets);
+        return dataSource;
     }
 
     public static MrrProperties properties() {

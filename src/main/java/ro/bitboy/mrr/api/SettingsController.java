@@ -113,7 +113,7 @@ public class SettingsController {
         live.put(RuntimeSettings.ANTHROPIC_EFFORT, review.anthropicEffort());
         Map<String, String> restartOnly = new LinkedHashMap<>();
         restartOnly.put("serverPort", Integer.toString(serverPort));
-        restartOnly.put("dbPath", dbUrl == null ? "" : dbUrl.replace("jdbc:sqlite:", ""));
+        restartOnly.put("dbPath", displayDbUrl(dbUrl));
         restartOnly.put("rootTokenFile", settings.defaults().rootTokenFile());
         restartOnly.put("memoryRoot", settings.defaults().memoryRoot());
         restartOnly.put("mcpEndpoint", mcpEndpoint);
@@ -121,6 +121,25 @@ public class SettingsController {
         restartOnly.put("logRingCapacity", Integer.toString(LogRing.CAPACITY));
         restartOnly.put("logRingMaxMessageChars", Integer.toString(LogRing.MAX_MESSAGE_CHARS));
         return new SettingsView(live, settings.sources(), restartOnly);
+    }
+
+    /**
+     * The datasource URL as the Configure page should show it: a bare file path on SQLite,
+     * which is what this field has always meant, and the JDBC URL as given on Postgres.
+     *
+     * <p>A Postgres URL can carry credentials in its query string, so those are redacted.
+     * The page is admin-only, but "admin" is not "may read the database password", and the
+     * value ends up on screen and in screenshots. {@code MRR_DB_PASSWORD} is the supported
+     * place for it and is never rendered.
+     */
+    static String displayDbUrl(String url) {
+        if (url == null || url.isBlank()) {
+            return "";
+        }
+        if (url.startsWith("jdbc:sqlite:")) {
+            return url.substring("jdbc:sqlite:".length());
+        }
+        return url.replaceAll("(?i)([?&](?:password|user)=)[^&]*", "$1***");
     }
 
     private static void requireAdmin(Principal caller) {

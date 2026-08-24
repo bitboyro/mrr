@@ -41,8 +41,13 @@ import java.util.Optional;
  * Every SQL statement in mrr. One class instead of four repositories and a service layer —
  * the whole data access surface fits on two screens and stays that way.
  *
- * <p>Timestamps are ISO-8601 TEXT because SQLite has no date type. Queries stay
- * dialect-neutral so a Postgres swap remains a config change.
+ * <p>Timestamps are ISO-8601 TEXT because SQLite has no date type. Every query here runs
+ * unchanged on SQLite and on an external Postgres, which is what makes {@code MRR_DB_URL}
+ * a config change rather than a port: no dialect object, no branch on the backend. The
+ * rules are at the top of {@code schema.sql}; the ones that bite in queries rather than DDL
+ * are {@code COALESCE} over {@code IFNULL}, {@code ON CONFLICT DO NOTHING} over
+ * {@code INSERT OR IGNORE}, an alias on every subquery in FROM, and an explicit
+ * {@code lower(…) … ESCAPE} on LIKE, since the two disagree on case and on escaping.
  *
  * <p>The four project secret columns pass through {@link SecretBox} on the way in and out —
  * this class is the only place that happens, and {@code toProject} is an instance method
@@ -689,12 +694,16 @@ public class Store {
     /**
      * Reserves {@code sourceNoteId} before the GitLab post. Returns false when another
      * worker already claimed it (unique index). Unposted rows are deleted if GitLab fails.
+     *
+     * <p>{@code ON CONFLICT DO NOTHING} rather than {@code INSERT OR IGNORE}: same meaning,
+     * and it is the spelling both backends understand.
      */
     public boolean claimUnpostedReply(Reply reply) {
         int n = db.sql("""
-                INSERT OR IGNORE INTO replies (id, project_id, mr_iid, discussion_id, finding_id,
-                                               source_note_id, prompt, response, trace, posted, created_at)
+                INSERT INTO replies (id, project_id, mr_iid, discussion_id, finding_id,
+                                     source_note_id, prompt, response, trace, posted, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                ON CONFLICT DO NOTHING
                 """)
                 .params(reply.id(), reply.projectId(), reply.mrIid(), reply.discussionId(),
                         reply.findingId(), reply.sourceNoteId(), reply.prompt(), reply.response(),
@@ -881,7 +890,8 @@ public class Store {
         String like = likePattern(q);
         String where = " WHERE s.project_id = ?"
                 + (statusFilter != null ? " AND s.current_status = ?" : "")
-                + (like != null ? " AND (IFNULL(r.mr_title, '') LIKE ? OR CAST(s.mr_iid AS TEXT) LIKE ?)" : "");
+                + (like != null ? " AND (lower(COALESCE(r.mr_title, '')) LIKE ? ESCAPE '\\'"
+                        + " OR CAST(s.mr_iid AS TEXT) LIKE ? ESCAPE '\\')" : "");
         var count = db.sql("""
                 SELECT COUNT(*) FROM mr_status s
                 LEFT JOIN reviews r ON r.id = s.latest_review_id
@@ -913,6 +923,13 @@ public class Store {
         }
     }
 
+    /**
+     * Lower-cased so the match is case-insensitive on both backends: SQLite's LIKE ignores
+     * ASCII case by default and Postgres' does not, so the query lower-cases the column and
+     * the pattern rather than inheriting whichever behaviour the backend happens to have.
+     * The wildcards are escaped with a backslash, which the query declares via ESCAPE —
+     * SQLite has no escape character at all unless one is named.
+     */
     private static String likePattern(String q) {
         if (q == null || q.isBlank()) {
             return null;
@@ -922,7 +939,7 @@ public class Store {
             trimmed = trimmed.substring(1);
         }
         String escaped = trimmed.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
-        return "%" + escaped + "%";
+        return "%" + escaped.toLowerCase(java.util.Locale.ROOT) + "%";
     }
 
     // ── instance settings / stats ────────────────────────────────────────────────────
@@ -1121,7 +1138,7 @@ public class Store {
 
     public InstanceStats instanceStats(long inFlight) {
         long mrsProcessed = db.sql("""
-                SELECT COUNT(*) FROM (SELECT DISTINCT project_id, mr_iid FROM reviews)
+                SELECT COUNT(*) FROM (SELECT DISTINCT project_id, mr_iid FROM reviews) mrs
                 """).query(Long.class).optional().orElse(0L);
         long reviewsTotal = db.sql("SELECT COUNT(*) FROM reviews").query(Long.class).optional().orElse(0L);
         Map<String, Long> byState = new LinkedHashMap<>();
@@ -1180,7 +1197,7 @@ public class Store {
                     SELECT input_tokens, output_tokens, cache_read_tokens, created_at FROM replies
                     UNION ALL
                     SELECT input_tokens, output_tokens, cache_read_tokens, created_at FROM memory_runs
-                )
+                ) token_rows
                 """ + where;
         var spec = sinceIso == null ? db.sql(sql) : db.sql(sql).param(sinceIso);
         return spec.query((rs, n) -> new InstanceStats.TokenTotals(

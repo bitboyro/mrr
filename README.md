@@ -59,6 +59,10 @@ the root token, and memory files. Swap image tags as you like; keep that directo
 instance is `mrr.db`, `root-token.txt`, and `memory/` copied to the new host with mrr stopped
 — that file holds PATs and model keys, so copy it over SSH, not a public channel.
 
+Pointing `MRR_DB_URL` at an external Postgres moves the database out of that directory but not
+the rest of it: the root token and the memory files still live on `/data`. See
+[Database](#database).
+
 The image starts as root only long enough to `chown` `/data` to uid **10001**, then drops to
 `mrr`. Compose often creates `./data` as `root:root`, which the non-root process cannot write.
 If you run with `--user 10001`, prepare the host dir first:
@@ -83,7 +87,11 @@ Everything the UI does is REST, so a script can do it too — see [API and MCP](
 | Variable | Default | |
 |---|---|---|
 | `MRR_BASE_URL` | `http://localhost:8130` | Public URL, used to print webhook URLs |
-| `MRR_DB_PATH` | `/data/mrr.db` | SQLite file |
+| `MRR_DB_PATH` | `/data/mrr.db` | SQLite file. Ignored when `MRR_DB_URL` is set |
+| `MRR_DB_URL` | *(unset)* | JDBC URL of an external Postgres — see [Database](#database). Empty counts as unset |
+| `MRR_DB_USER` | *(unset)* | Postgres user |
+| `MRR_DB_PASSWORD` | *(unset)* | Postgres password |
+| `MRR_DB_POOL_SIZE` | `4` | Connection pool. Sized for SQLite; raise it on Postgres |
 | `MRR_ROOT_TOKEN_FILE` | `/data/root-token.txt` | Where the bootstrap token is written |
 | `MRR_SECRET_KEY` | *(unset)* | Base64 or hex 32-byte key; encrypts the per-project credentials |
 | `MRR_SECRET_KEY_FILE` | *(unset)* | Same, read from a file — keeps the key out of the environment |
@@ -100,8 +108,44 @@ Everything the UI does is REST, so a script can do it too — see [API and MCP](
 | `SERVER_PORT` | `8130` | |
 
 These are boot defaults. Admins can change the live ones on `/configure` without a restart;
-`SERVER_PORT`, `MRR_DB_PATH`, `MRR_ROOT_TOKEN_FILE`, `MRR_MEMORY_ROOT`, and the MCP endpoint
-need one. There are no model or GitLab credentials in the environment — those are per project.
+`SERVER_PORT`, the database variables, `MRR_ROOT_TOKEN_FILE`, `MRR_MEMORY_ROOT`, and the MCP
+endpoint need one. There are no model or GitLab credentials in the environment — those are per
+project.
+
+### Database
+
+**SQLite by default.** One file at `MRR_DB_PATH`, nothing to run alongside mrr, and the right
+answer for the single-box deployment mrr is built for.
+
+**An external Postgres when you want one.** Set `MRR_DB_URL` and the same schema and the same
+queries run against Postgres instead; `MRR_DB_PATH` is then ignored.
+
+```bash
+MRR_DB_URL=jdbc:postgresql://db:5432/mrr
+MRR_DB_USER=mrr
+MRR_DB_PASSWORD=…
+MRR_DB_POOL_SIZE=10          # 4 is sized for SQLite's per-connection write lock
+```
+
+Create the database and the user; mrr creates its own tables on first boot, as it does on
+SQLite. The boot log names the backend it connected to (`schema: PostgreSQL 16.15`), which is
+the quickest way to confirm the URL took effect. Setting `MRR_DB_URL` to an empty value is the
+same as not setting it — you get SQLite, not a startup failure, which is what keeps
+`docker compose up` working when Compose passes the variable through empty. There is no dialect layer and no migration
+tool — `schema.sql` is written to the intersection of the two backends, so mrr's SQL is the
+same either way.
+
+**There is no migration between the two.** Pointing an existing instance at an empty Postgres
+gives you an empty instance, not a copy; move the data yourself, or register the projects
+again. Whichever backend holds them, the per-project credentials are sealed by the same
+`MRR_SECRET_KEY` — encryption happens above the database and does not care which one it is.
+
+**Postgres does not make mrr stateless.** The memory corpus is the canonical markdown under
+`MRR_MEMORY_ROOT` (`/data/memory`); the `memory_documents` table is only an index into those
+files, so a second instance sharing the database still needs that directory on shared storage
+to see the same memory. Combined with the single-flight limit below, a shared Postgres is
+useful for keeping review history off the container's disk and for backing mrr with something
+your infrastructure already snapshots — not yet for running two instances.
 
 ### Encrypting the stored credentials
 
@@ -153,8 +197,12 @@ MRR_TOKEN=mrr_... ./scripts/export-contracts.sh    # both files, against a runni
   `/data`, not a live host compromise. The `SecretBox` interface is where a KMS-backed
   implementation would go.
 - **A review in flight is per process.** `submit` is single-flight in this JVM, and two mrr
-  processes on one database are unsupported. After a restart the startup scan requeues rows
-  left `PENDING` / `PROCESSING`.
+  processes on one database are unsupported — on Postgres as much as on SQLite, since nothing
+  claims a review across processes. After a restart the startup scan requeues rows left
+  `PENDING` / `PROCESSING`.
+- **Postgres is not horizontal scale.** It takes the database off the container's disk, but
+  memory is markdown under `MRR_MEMORY_ROOT` with the table as an index, so a second instance
+  needs that directory shared as well — and would still hit the single-flight limit above.
 - **mrr comments as whoever owns the GitLab token.** On a shared project, give it a dedicated
   bot account rather than a person's PAT.
 - **Inline anchoring needs the line to be in the diff.** A finding about untouched code gets an
@@ -181,6 +229,19 @@ A **live instance** that must keep reviewing while you switch branches should no
 The pane at the bottom prints the public URL, root token, and webhook URLs. A new quick-tunnel
 hostname must be pasted into GitLab each start.
 
-Java 21, Spring Boot 3.4, SQLite, and the Anthropic SDK. No Spring Security, no JPA, no
-Actuator — see the comments in `pom.xml` for why. Release history is in
+`mvn test` needs no database — SQLite covers the suite. The Postgres tests are skipped unless
+you point them at a throwaway server:
+
+```bash
+docker run -d --name mrr-pg -e POSTGRES_PASSWORD=mrr -e POSTGRES_USER=mrr \
+    -e POSTGRES_DB=mrr -p 55432:5432 postgres:16-alpine
+MRR_TEST_PG_URL=jdbc:postgresql://localhost:55432/mrr \
+    MRR_TEST_PG_USER=mrr MRR_TEST_PG_PASSWORD=mrr mvn test -Dtest=PostgresStoreTest
+```
+
+They drop and recreate the schema, so do not aim them at anything you care about.
+`SchemaPortabilityTest` runs either way and fails the build on SQLite-only SQL.
+
+Java 21, Spring Boot 3.4, SQLite (or Postgres), and the Anthropic SDK. No Spring Security, no
+JPA, no Actuator — see the comments in `pom.xml` for why. Release history is in
 [CHANGELOG.md](CHANGELOG.md).

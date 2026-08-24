@@ -7,13 +7,24 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import ro.bitboy.mrr.auth.Ids;
 
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 /**
  * {@code schema.sql} is {@code CREATE TABLE IF NOT EXISTS}, so a database that already exists
  * will not pick up new columns. This adds them. Safe to run every boot.
+ *
+ * <p>Every statement here runs on SQLite and on Postgres alike — see the contract at the top
+ * of {@code schema.sql}. The one place that used to be dialect-bound was reading a table's
+ * columns, which was {@code PRAGMA table_info}; it is {@link DatabaseMetaData} now, so there
+ * is no branch on the backend anywhere in this class.
  */
 @Component
 public class SchemaPatch {
@@ -21,13 +32,16 @@ public class SchemaPatch {
     private static final Logger log = LoggerFactory.getLogger(SchemaPatch.class);
 
     private final JdbcClient db;
+    private final DataSource dataSource;
 
-    public SchemaPatch(JdbcClient db) {
+    public SchemaPatch(JdbcClient db, DataSource dataSource) {
         this.db = db;
+        this.dataSource = dataSource;
     }
 
     @PostConstruct
     void patch() {
+        logBackend();
         addColumn("projects", "gitlab_operator_token", "TEXT");
         addColumn("projects", "agent_max_turns", "INTEGER NOT NULL DEFAULT 1");
         addColumn("projects", "agent_tools", "TEXT");
@@ -339,6 +353,16 @@ public class SchemaPatch {
                 entry — the catalog is where the key lives now.""");
     }
 
+    /** Which backend this instance is talking to, so an operator can see it in the boot log. */
+    private void logBackend() {
+        try (Connection c = dataSource.getConnection()) {
+            DatabaseMetaData md = c.getMetaData();
+            log.info("schema: {} {}", md.getDatabaseProductName(), md.getDatabaseProductVersion());
+        } catch (SQLException e) {
+            log.warn("schema: could not read database metadata: {}", e.getMessage());
+        }
+    }
+
     private void addColumn(String table, String column, String definition) {
         Set<String> columns = columnsOf(table);
         if (columns.isEmpty() || columns.contains(column)) {
@@ -348,11 +372,54 @@ public class SchemaPatch {
         log.info("schema: added {}.{}", table, column);
     }
 
+    /**
+     * Column names of {@code table}, lowercased, or empty when the table does not exist yet —
+     * which is how {@link #addColumn} knows to leave a not-yet-created table alone.
+     *
+     * <p>{@link DatabaseMetaData#getColumns} rather than {@code PRAGMA table_info} so this works
+     * on both backends. Postgres folds unquoted identifiers to lower case and SQLite reports
+     * them as declared, so the result is normalised — every name in this schema is already
+     * lower case, and the callers pass lower case.
+     *
+     * <p>The table argument is a LIKE pattern, not a name: every table here contains an
+     * underscore, which would otherwise match any character and fold two tables into one
+     * answer. Hence the escape, and the exact-name check on the way out.
+     */
     private Set<String> columnsOf(String table) {
-        Set<String> names = new HashSet<>(
-                db.sql("PRAGMA table_info(" + table + ")")
-                        .query((rs, n) -> rs.getString("name"))
-                        .list());
+        Set<String> names = new HashSet<>();
+        try (Connection c = dataSource.getConnection()) {
+            DatabaseMetaData md = c.getMetaData();
+            try (ResultSet rs = md.getColumns(null, schemaOf(c), escapePattern(md, table), null)) {
+                while (rs.next()) {
+                    if (table.equalsIgnoreCase(rs.getString("TABLE_NAME"))) {
+                        names.add(rs.getString("COLUMN_NAME").toLowerCase(Locale.ROOT));
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("could not read the columns of " + table, e);
+        }
         return names;
+    }
+
+    /**
+     * The one schema mrr owns. Postgres reports {@code public} (or whatever the search path
+     * puts first), which keeps the lookup off {@code information_schema} and other databases'
+     * tables; SQLite has no schemas and reports null, which means "any" — correct there.
+     */
+    private static String schemaOf(Connection c) {
+        try {
+            return c.getSchema();
+        } catch (SQLException | AbstractMethodError e) {
+            return null;
+        }
+    }
+
+    private static String escapePattern(DatabaseMetaData md, String name) throws SQLException {
+        String escape = md.getSearchStringEscape();
+        if (escape == null || escape.isEmpty()) {
+            return name;
+        }
+        return name.replace("_", escape + "_").replace("%", escape + "%");
     }
 }

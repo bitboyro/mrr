@@ -115,18 +115,31 @@ public class MemoryStore {
         String q = query == null ? "" : query.trim();
         String sql = "SELECT * FROM memory_documents WHERE project_id = ?"
                 + (blank(space) ? "" : " AND space = ?")
-                + (q.isEmpty() ? "" : " AND (lower(title) LIKE ? OR lower(coalesce(subject,'')) LIKE ? OR lower(coalesce(tags,'')) LIKE ?)")
+                + (q.isEmpty() ? "" : " AND (lower(title) LIKE ? ESCAPE '\\'"
+                        + " OR lower(coalesce(subject,'')) LIKE ? ESCAPE '\\'"
+                        + " OR lower(coalesce(tags,'')) LIKE ? ESCAPE '\\')")
                 + " ORDER BY updated_at DESC LIMIT ?";
         var spec = db.sql(sql).param(projectId);
         if (!blank(space)) {
             spec = spec.param(space);
         }
         if (!q.isEmpty()) {
-            String like = "%" + q.toLowerCase() + "%";
+            String like = likePattern(q);
             spec = spec.param(like).param(like).param(like);
         }
         return spec.param(Math.clamp(limit, 1, 200)).query(this::toRow).list()
                 .stream().map(MemoryDocument::summary).toList();
+    }
+
+    /**
+     * A contains-match on {@code q} with its wildcards escaped, lower-cased to match the
+     * lower-cased columns. Searching for {@code mr_7} means the literal string, not "mr"
+     * followed by any character — and the ESCAPE the query names is what makes the backslash
+     * mean anything on SQLite, which otherwise has no escape character at all.
+     */
+    private static String likePattern(String q) {
+        String escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+        return "%" + escaped.toLowerCase(java.util.Locale.ROOT) + "%";
     }
 
     public boolean hasSpace(String projectId, String space) {

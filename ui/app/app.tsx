@@ -2474,7 +2474,7 @@ function Configure() {
 
   const restartOnly: { key: string; label: string; help: string }[] = [
     { key: "serverPort", label: "SERVER_PORT", help: "HTTP port this process listens on." },
-    { key: "dbPath", label: "MRR_DB_PATH", help: "SQLite file. Users, projects, and review history live here." },
+    { key: "dbPath", label: "MRR_DB_PATH / MRR_DB_URL", help: "Where users, projects, and review history live: the SQLite file by default, or the Postgres URL when MRR_DB_URL is set." },
     { key: "rootTokenFile", label: "MRR_ROOT_TOKEN_FILE", help: "Where the bootstrap admin token is written on first boot." },
     { key: "memoryRoot", label: "MRR_MEMORY_ROOT", help: "On-disk OKF files per project (project/ and mrs/)." },
     { key: "mcpEndpoint", label: "MCP endpoint", help: "Streamable HTTP path for the MCP server." },

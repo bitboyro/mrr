@@ -7,6 +7,8 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.SimpleDriverDataSource;
+
+import javax.sql.DataSource;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import ro.bitboy.mrr.MrrProperties;
 import ro.bitboy.mrr.RuntimeSettings;
@@ -45,6 +47,7 @@ class StoreTest {
 
     private Store store;
     private JdbcClient db;
+    private DataSource dataSource;
     private User admin;
     private User alice;
     private User bob;
@@ -56,7 +59,7 @@ class StoreTest {
     void setUp() {
         // A temp file, not ":memory:" — SimpleDriverDataSource opens a fresh connection per
         // call, and each one would get its own empty in-memory database.
-        var dataSource = new SimpleDriverDataSource(
+        dataSource = new SimpleDriverDataSource(
                 new org.sqlite.JDBC(), "jdbc:sqlite:" + tempDir.resolve("mrr-test.db"));
 
         // The same schema.sql and the same runner Spring Boot uses at boot, so the tests
@@ -566,7 +569,7 @@ class StoreTest {
                 """).params(skillId, project.id(), "reviewer", "Be careful.", Instant.now().toString())
                 .update();
 
-        new SchemaPatch(db).patch();
+        new SchemaPatch(db, dataSource).patch();
 
         AgentSkill skill = store.findSkill(project.id(), skillId).orElseThrow();
         assertThat(skill.libraryId()).isNotBlank();
@@ -698,7 +701,7 @@ class StoreTest {
     void schemaPatchCreatesCatalogTablesOnExistingDatabases() {
         db.sql("DROP TABLE IF EXISTS gitlab_instances").update();
         db.sql("DROP TABLE IF EXISTS llm_providers").update();
-        new SchemaPatch(db).patch();
+        new SchemaPatch(db, dataSource).patch();
         GitlabInstance row = store.createGitlabInstance(adminOf(alice), true, "patched", "https://gitlab.example");
         assertThat(store.findGitlabInstance(adminOf(alice), row.id())).isPresent();
     }
@@ -747,17 +750,17 @@ class StoreTest {
 
     @Test
     void schemaInitSurvivesAnOlderRepliesTableThenPatchAddsSourceNoteId() {
-        var dataSource = new SimpleDriverDataSource(
+        var oldDataSource = new SimpleDriverDataSource(
                 new org.sqlite.JDBC(), "jdbc:sqlite:" + tempDir.resolve("old-replies.db"));
-        JdbcClient old = JdbcClient.create(dataSource);
+        JdbcClient old = JdbcClient.create(oldDataSource);
         old.sql("""
                 CREATE TABLE replies (
                     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, mr_iid INTEGER NOT NULL,
                     discussion_id TEXT NOT NULL, finding_id TEXT, prompt TEXT, response TEXT,
                     trace TEXT, created_at TEXT NOT NULL)
                 """).update();
-        new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(dataSource);
-        new SchemaPatch(old).patch();
+        new ResourceDatabasePopulator(new ClassPathResource("schema.sql")).execute(oldDataSource);
+        new SchemaPatch(old, oldDataSource).patch();
         List<String> columns = old.sql("PRAGMA table_info(replies)")
                 .query((rs, n) -> rs.getString("name")).list();
         assertThat(columns).contains("source_note_id", "posted");

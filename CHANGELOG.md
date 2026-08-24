@@ -24,6 +24,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   SDK-thrown errors — is now appended to the message, so the log line names the actual cause
   instead of just the status code.
 
+### Added
+
+- **An external Postgres is now a supported backend, behind `MRR_DB_URL`.** SQLite remains the
+  default and nothing about a single-box deployment changes: leave `MRR_DB_URL` unset and mrr
+  keeps using the file at `MRR_DB_PATH`. Set it — `jdbc:postgresql://host:5432/mrr`, with
+  `MRR_DB_USER` and `MRR_DB_PASSWORD` — and the same schema and the same queries run against
+  Postgres instead. `MRR_DB_POOL_SIZE` (default 4, sized for SQLite's per-connection write
+  lock) is worth raising there.
+
+  A **blank** `MRR_DB_URL` counts as unset and falls back to SQLite. Spring prefers an empty
+  value to a placeholder default, which would leave the datasource with no URL at all — and
+  Compose injects `MRR_DB_URL=` for any variable the operator has not set, so plain
+  `docker compose up` has to keep working with the variable present and empty.
+
+  This is a config change rather than a port because there is no dialect layer: one
+  `schema.sql`, one set of statements, all inside the intersection of the two backends. Getting
+  there did mean fixing statements that were only ever valid on SQLite — `projects` was
+  declared before the `llm_providers` table it references, which Postgres rejects at
+  `CREATE TABLE`; `INSERT OR IGNORE` is now `ON CONFLICT DO NOTHING`; `IFNULL` is `COALESCE`;
+  the two subqueries in `FROM` are aliased; and `PRAGMA table_info` is `DatabaseMetaData`, so
+  `SchemaPatch` no longer knows what backend it is on.
+
+  Merge-request and memory search now lower-case both sides and declare `ESCAPE` explicitly.
+  SQLite's `LIKE` ignores ASCII case and Postgres' does not, so this keeps one search box
+  behaving the same on both — and it fixes wildcard escaping in memory search, where a query
+  containing `_` or `%` was previously matched as a pattern.
+
+  Two test classes hold the line: `SchemaPortabilityTest` reads the sources for SQLite-only
+  spellings and runs always, and `PostgresStoreTest` exercises the divergent queries against a
+  real server, skipped unless `MRR_TEST_PG_URL` is set so `mvn test` still needs no Docker.
+
+  **Postgres does not make mrr stateless.** The memory corpus is markdown on disk under
+  `MRR_MEMORY_ROOT`; `memory_documents` is only an index into it. A second instance needs that
+  directory on shared storage, and `submit` is still single-flight per process — see
+  [Known limits](README.md#known-limits).
+
 ### Changed
 
 - **The model API key moves from the project to the catalog, and the catalog gains owners.**

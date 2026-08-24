@@ -1,5 +1,16 @@
 -- mrr schema. Applied on every boot; every statement is IF NOT EXISTS, so this file
 -- is both the initial schema and the (currently empty) migration history.
+--
+-- It runs unchanged on SQLite (the default) and on an external Postgres, so keep every
+-- statement in the intersection of the two:
+--   * TEXT and INTEGER only — no AUTOINCREMENT, no SERIAL, no BOOLEAN, no TIMESTAMP.
+--     Timestamps are ISO-8601 TEXT; flags are INTEGER 0/1.
+--   * Declare a table before anything that REFERENCES it. Postgres resolves foreign key
+--     targets at CREATE TABLE; SQLite does not, so only Postgres catches a bad order.
+--   * No dialect-only syntax. Partial indexes (`... WHERE col IS NULL`) and
+--     `ON CONFLICT ... DO UPDATE` are in both and are fine; `INSERT OR IGNORE`,
+--     `IFNULL`, and `AUTOINCREMENT` are SQLite-only and are not.
+-- SchemaPortabilityTest enforces the parts of this that can be checked statically.
 
 CREATE TABLE IF NOT EXISTS users (
     id          TEXT PRIMARY KEY,
@@ -19,6 +30,34 @@ CREATE TABLE IF NOT EXISTS tokens (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens(user_id);
+
+-- Named LLM endpoints, including the API key. owner_id NULL is a shared row an admin
+-- curates for everyone and which may not hold a key; owner_id set is private to that
+-- user, may hold one, and is visible only to them and to admins. Projects reference a
+-- row rather than copying it, so the key is set and rotated here and nowhere else.
+--
+-- Declared before `projects` because that is what references it. SQLite resolves a foreign
+-- key target lazily and does not care about the order; Postgres resolves it at CREATE TABLE
+-- and fails on a forward reference. Keep referenced tables above their referrers.
+CREATE TABLE IF NOT EXISTS llm_providers (
+    id             TEXT PRIMARY KEY,
+    owner_id       TEXT REFERENCES users(id),        -- NULL = shared, curated by an admin
+    name           TEXT NOT NULL,
+    provider       TEXT NOT NULL,
+    model          TEXT NOT NULL,
+    model_base_url TEXT,
+    model_key      TEXT,                             -- sealed by SecretBox; NULL on shared rows
+    created_at     TEXT NOT NULL,
+    UNIQUE (owner_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_providers_owner ON llm_providers(owner_id);
+
+-- UNIQUE (owner_id, name) does not constrain shared rows: both backends treat NULLs as
+-- distinct in a unique index, so every shared entry has a "different" owner. This is what
+-- actually keeps their names unique.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_providers_shared_name
+    ON llm_providers(name) WHERE owner_id IS NULL;
 
 CREATE TABLE IF NOT EXISTS projects (
     id                TEXT PRIMARY KEY,
@@ -311,33 +350,9 @@ CREATE TABLE IF NOT EXISTS gitlab_instances (
 
 CREATE INDEX IF NOT EXISTS idx_gitlab_instances_owner ON gitlab_instances(owner_id);
 
--- UNIQUE (owner_id, name) does not constrain shared rows: SQLite treats NULLs as distinct in
--- a unique index, so every shared entry has a "different" owner. This is what actually keeps
--- their names unique.
+-- UNIQUE (owner_id, name) does not constrain shared rows: both backends treat NULLs as
+-- distinct in a unique index, so every shared entry has a "different" owner. This is what
+-- actually keeps their names unique.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_gitlab_instances_shared_name
     ON gitlab_instances(name) WHERE owner_id IS NULL;
-
--- Named LLM endpoints, including the API key. owner_id NULL is a shared row an admin
--- curates for everyone and which may not hold a key; owner_id set is private to that
--- user, may hold one, and is visible only to them and to admins. Projects reference a
--- row rather than copying it, so the key is set and rotated here and nowhere else.
-CREATE TABLE IF NOT EXISTS llm_providers (
-    id             TEXT PRIMARY KEY,
-    owner_id       TEXT REFERENCES users(id),        -- NULL = shared, curated by an admin
-    name           TEXT NOT NULL,
-    provider       TEXT NOT NULL,
-    model          TEXT NOT NULL,
-    model_base_url TEXT,
-    model_key      TEXT,                             -- sealed by SecretBox; NULL on shared rows
-    created_at     TEXT NOT NULL,
-    UNIQUE (owner_id, name)
-);
-
-CREATE INDEX IF NOT EXISTS idx_llm_providers_owner ON llm_providers(owner_id);
-
--- UNIQUE (owner_id, name) does not constrain shared rows: SQLite treats NULLs as distinct in
--- a unique index, so every shared entry has a "different" owner. This is what actually keeps
--- their names unique.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_providers_shared_name
-    ON llm_providers(name) WHERE owner_id IS NULL;
 
