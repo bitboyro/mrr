@@ -70,4 +70,23 @@ class OpenAiCompatTest {
         assertThat(OpenAiCompat.useResponses(null, "gpt-4o", READ_FILE, List.of()))
                 .isFalse();
     }
+
+    @Test
+    void lunaOnChatCompletionsNeedsMaxCompletionTokensEvenWithoutTools() {
+        assertThat(OpenAiCompat.chatMaxTokensField(null, "gpt-5.6-luna"))
+                .isEqualTo("max_completion_tokens");
+        assertThat(OpenAiCompat.chatMaxTokensField("https://api.openai.com/v1", "gpt-5.6-luna"))
+                .isEqualTo("max_completion_tokens");
+    }
+
+    @Test
+    void nonReasoningModelKeepsMaxTokens() {
+        assertThat(OpenAiCompat.chatMaxTokensField(null, "gpt-4o")).isEqualTo("max_tokens");
+    }
+
+    @Test
+    void customBaseUrlKeepsMaxTokensEvenForALunaNamedModel() {
+        assertThat(OpenAiCompat.chatMaxTokensField("http://127.0.0.1:11434/v1", "gpt-5.6-luna"))
+                .isEqualTo("max_tokens");
+    }
 }

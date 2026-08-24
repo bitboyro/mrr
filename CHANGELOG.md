@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The merge turn on a sliced review no longer 400s against reasoning models.** A multi-slice
+  review's merge step calls the model with no tools, so it never takes the
+  `/v1/responses` path that `gpt-5.4` / `gpt-5.6-*` need for tool calls — it stays on
+  `/v1/chat/completions`. Those same models reject `max_tokens` on that endpoint regardless of
+  tools and require `max_completion_tokens` instead, so every sliced review's merge call failed
+  with `PROVIDER` and posted nothing. `OpenAiModel` now picks the field name per
+  `OpenAiCompat.chatMaxTokensField`, the same first-party-and-reasoning-family check already
+  used to route tool calls to `/v1/responses`.
+
 - **A failed model call now says why.** `ModelException.fromHttp` classified the failure kind
   from the provider's HTTP response body but then discarded it, so a 400 (or any non-401/429
   status) logged only `Model endpoint failed with HTTP 400` with nothing about which field the

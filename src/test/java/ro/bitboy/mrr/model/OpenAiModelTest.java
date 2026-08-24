@@ -9,6 +9,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.client.RestClient;
+import ro.bitboy.mrr.MrrProperties;
+import ro.bitboy.mrr.RuntimeSettings;
+import ro.bitboy.mrr.TestStores;
 import ro.bitboy.mrr.model.ReviewModel.Result;
 import ro.bitboy.mrr.model.ReviewModel.ToolCall;
 import ro.bitboy.mrr.model.ReviewModel.ToolSpec;
@@ -57,6 +60,24 @@ class OpenAiModelTest {
         assertThat(body.path("tools").path(0).path("function").path("name").asText())
                 .isEqualTo("read_file");
         assertThat(body.has("reasoning_effort")).isFalse();
+    }
+
+    @Test
+    void chatCompletionsSendsMaxTokensOnANonFirstPartyEndpoint() throws Exception {
+        openai.enqueue(json("""
+                {"choices":[{"finish_reason":"stop","message":{"content":"{}"}}]}
+                """));
+        RuntimeSettings settings = RuntimeSettings.frozen(TestStores.properties());
+        String base = openai.url("/v1/").toString().replaceAll("/+$", "");
+        OpenAiModel withSettings = new OpenAiModel(RestClient.builder(), "sk-test", base,
+                "gpt-5.6-luna", settings);
+
+        withSettings.completeChat("sys", List.of(Turn.user("diff")), List.of());
+
+        JsonNode body = mapper.readTree(openai.takeRequest().getBody().readUtf8());
+        assertThat(body.has("max_tokens")).isTrue();
+        assertThat(body.path("max_tokens").asInt()).isEqualTo(16_000);
+        assertThat(body.has("max_completion_tokens")).isFalse();
     }
 
     @Test

@@ -24,6 +24,11 @@ import java.util.Map;
  * {@code /v1/responses} instead: chat-completions 400s function tools while the model is
  * reasoning. Reasoning items from that response are echoed on the next turn. No
  * {@code reasoning_effort} is sent — that is the workaround that turns thinking off.
+ *
+ * <p>Those same models 400 on {@code /v1/chat/completions} — tools or not — if the token
+ * limit is sent as {@code max_tokens}; the field is {@code max_completion_tokens} there.
+ * A tool-less call (the merge turn) never trips {@link OpenAiCompat#useResponses} and so
+ * stays on chat-completions, where this still applies.
  */
 public class OpenAiModel implements ReviewModel {
 
@@ -89,7 +94,7 @@ public class OpenAiModel implements ReviewModel {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", model);
         body.put("messages", messages);
-        applyMaxTokens(body, "max_tokens");
+        applyMaxTokens(body, OpenAiCompat.chatMaxTokensField(baseUrl, model));
         if (!tools.isEmpty()) {
             body.put("tools", tools.stream().map(OpenAiModel::toChatTool).toList());
         }

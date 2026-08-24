@@ -56,6 +56,16 @@ final class OpenAiCompat {
         return (tools != null && !tools.isEmpty()) || hasEcho(turns);
     }
 
+    /**
+     * Chat-completions' token-limit field. A first-party {@link #responsesFamily} model
+     * 400s there on {@code max_tokens} — tools or not — and wants {@code max_completion_tokens}
+     * instead; the merge turn has no tools, so it never reaches {@link #useResponses} and
+     * still needs this on the chat-completions path.
+     */
+    static String chatMaxTokensField(String baseUrl, String model) {
+        return firstParty(baseUrl) && responsesFamily(model) ? "max_completion_tokens" : "max_tokens";
+    }
+
     static boolean hasEcho(List<ReviewModel.Turn> turns) {
         if (turns == null) {
             return false;
