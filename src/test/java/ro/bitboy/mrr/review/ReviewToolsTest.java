@@ -20,6 +20,7 @@ import ro.bitboy.mrr.TestStores;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.store.Store;
+import ro.bitboy.mrr.model.ForgeKind;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -48,7 +49,7 @@ class ReviewToolsTest {
         memory = new MemoryService(new MemoryStore(db, properties));
         var user = store.createUser("alice", Role.USER);
         LlmProvider llm = TestStores.llmProvider(user.id());
-        Project project = TestStores.persist(store, new Project(Ids.newId(), user.id(), "calc", true,
+        Project project = TestStores.persist(store, new Project(Ids.newId(), user.id(), "calc", true, ForgeKind.GITLAB,
                 "https://gitlab.com", "g/calc", "glpat-x", null, Ids.newSecret(),
                 llm.id(), llm,
                 null, false, 1, List.of(), false, false, null, null, null, null, null, null, Instant.now()));

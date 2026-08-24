@@ -4,7 +4,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import ro.bitboy.mrr.FakeGitLab;
+import ro.bitboy.mrr.FakeForge;
 import ro.bitboy.mrr.TestStores;
 import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.model.Finding;
@@ -14,6 +14,8 @@ import ro.bitboy.mrr.model.ReviewModel.Result;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.User;
 import ro.bitboy.mrr.store.Store;
+import ro.bitboy.mrr.forge.ForgeCapabilities;
+import ro.bitboy.mrr.forge.ForgeFactory;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -29,7 +31,7 @@ class ReplierTest {
     Path tempDir;
 
     private Store store;
-    private FakeGitLab gitlab;
+    private FakeForge gitlab;
     private Project project;
     private ExecutorService workers;
     private RecordingModel model;
@@ -39,7 +41,7 @@ class ReplierTest {
         store = TestStores.sqlite(tempDir);
         User alice = store.createUser("alice", Role.USER);
         project = TestStores.persist(store, TestStores.project(alice.id(), "calc", "hook-secret"));
-        gitlab = new FakeGitLab();
+        gitlab = new FakeForge();
         workers = Executors.newSingleThreadExecutor();
         String reviewId = store.claimReview(project.id(), 7, "sha", "{}", TestStores.mrInfo())
                 .review().id();
@@ -155,7 +157,24 @@ class ReplierTest {
         assertThat(store.sourceNotePosted(project.id(), "disc-1", "note-99")).isTrue();
     }
 
+    @Test
+    void aHostThatCannotResolveStillClosesTheFindingAndMarksTheComment() {
+        // Internal state is never weakened by a host limitation: without this, a reply the
+        // model agreed with would leave the finding OPEN forever on such a host.
+        gitlab.capabilities = new ForgeCapabilities(true, false, true, true, false, true, true);
+        model = new RecordingModel(List.of(Result.of(
+                "{\"status\":\"addressed\",\"reply\":\"The reader is closed now.\"}", "end_turn")));
+
+        replier().reply(project.id(), 7, "disc-1", null, "fixed in HEAD", "ada");
+
+        assertThat(store.findingsOfMr(project.id(), 7)).singleElement()
+                .satisfies(f -> assertThat(f.state()).isEqualTo(Finding.State.ADDRESSED));
+        assertThat(gitlab.resolved).isEmpty();
+        assertThat(gitlab.edits).anySatisfy(edit ->
+                assertThat(edit).contains("~~**Addressed**~~"));
+    }
+
     private Replier replier() {
-        return new Replier(store, gitlab, TestStores.properties(), p -> model, workers);
+        return new Replier(store, ForgeFactory.fixed(gitlab), TestStores.properties(), p -> model, workers);
     }
 }

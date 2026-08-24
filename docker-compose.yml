@@ -7,8 +7,8 @@ services:
     ports:
       - "${MRR_PORT:-8130}:8130"
     environment:
-      # Public URL GitLab will call. Must be reachable from your GitLab instance —
-      # localhost works only if GitLab runs on this same machine.
+      # Public URL the forge will call. Must be reachable from your forge instance —
+      # localhost works only if the forge runs on this same machine.
       MRR_BASE_URL: ${MRR_BASE_URL:-http://localhost:8130}
       # Encrypts the per-project credentials at rest. Unset = plaintext, with a boot warning.
       # openssl rand -base64 32

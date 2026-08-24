@@ -60,6 +60,80 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   directory on shared storage, and `submit` is still single-flight per process — see
   [Known limits](README.md#known-limits).
 
+### Added
+
+- **Codeberg, Forgejo/Gitea and GitHub, beside GitLab.** A project now carries a `forge`
+  (`GITLAB | FORGEJO | GITHUB`), and the whole GitLab surface has been extracted behind
+  `ro.bitboy.mrr.forge.Forge` — 26 operations in mrr's own vocabulary, one adapter per host,
+  chosen by `ForgeFactory.forProject(project)`. That is the pattern the repository already used
+  twice (`ReviewModelFactory` for the LLM vendor, `SecretBoxConfig` for secrets at rest) rather
+  than a third one. Self-hosted works everywhere for the same reason it already did for GitLab:
+  the base URL and token come off the project row, never a constant.
+
+  **mrr's process is the invariant.** One finding is one resolvable thread anchored to a diff
+  line; mrr is source of truth for thread state; a human pressing Resolve is an `APPROVED`
+  finding against their username; one overview thread, edited in place; reviews keyed
+  `(project, mr_iid, head_sha)`; fail closed. `Reviewer`, `Replier`, `Store`, the prompts and
+  the finding lifecycle do not learn that a second host exists — the adapter normalises the
+  webhook into a `ForgeEvent` and the reviewer branches on a `ForgeCapabilities` record, never
+  on a forge name.
+
+  Where a host cannot do something that process needs, the answer is a **named, visible
+  degradation**, never a quiet second code path:
+
+  - **Forgejo conversation-resolve is version-dependent**, so it is not guessed at. mrr probes
+    the instance's own `swagger.v1.json` and records what came back — a probe that cannot answer
+    reads `UNKNOWN` rather than `MISSING`, and mrr fails closed either way. Where resolve is
+    absent the finding is *still* recorded `ADDRESSED` and the comment is edited to lead with a
+    struck-through **Addressed** marker, so the thread reads correctly to a human.
+  - **GitHub does not expose review threads over REST at all.** Resolution is the GraphQL
+    `resolveReviewThread` / `unresolveReviewThread` mutations, so `GitHubForge` carries a small
+    GraphQL path beside its REST calls — no new dependency. A fine-grained PAT needs **Pull
+    requests: Read and write** *and* **Contents: Read and write**; the second is
+    counter-intuitive and is the usual cause of an otherwise inexplicable 403.
+  - **GitHub has no unapprove.** `Forge.unapprove` carries a reason, and on GitHub that becomes
+    a dismissal of mrr's own approving review with a message — a different act with a different
+    audit trail, which is why `ForgeCapabilities.unapprove` is false and the project page says
+    so before the first review rather than after it.
+
+  `GET /api/projects/{id}/forge` is that report: one row per capability, reading `OK`,
+  `MISSING` or `UNKNOWN`, each with what mrr does instead. The project page shows it when
+  anything is not `OK` and stays quiet when everything is.
+
+  **Routing.** `POST /webhooks/{forge}/{projectId}` accepts `gitlab`, `forgejo` (also `gitea`,
+  `codeberg`) and `github`. **`/webhooks/gitlab/{projectId}` keeps working forever** — every
+  hook already registered in a GitLab UI points at it, and mrr does not create hooks. A path
+  naming a forge the project is not on is refused with the URL it should be using, rather than
+  failing the signature check with nothing to point at. GitLab still authenticates with
+  `X-Gitlab-Token`; Forgejo and GitHub sign the body with HMAC-SHA256.
+
+### Changed
+
+- **The GitLab catalog becomes a forge catalog.** `gitlab_instances` moves to `forge_instances`
+  with a `kind`; existing rows migrate as `GITLAB` and the old table is left in place rather
+  than dropped, so the migration stays as additive as everything else in `SchemaPatch`. The
+  endpoints are `/api/forge-instances`; **`/api/gitlab-instances` is a permanent alias**,
+  filtered to GitLab on read so a client that asked for GitLab hosts does not start receiving
+  GitHub ones. Picking a catalog host now copies its *kind* as well as its URL onto the project.
+
+- **`FailureKind.FORGE` replaces `GITLAB`** for new failures. `GITLAB` stays and stays
+  deserialisable — it is stored as text in `reviews.error_kind` on every historical row.
+
+- **`FakeGitLab extends GitLabClient` becomes `FakeForge implements Forge`.** Inheritance was
+  standing in for an interface that did not exist, which is also why that class could not be
+  final. One shared conformance suite now runs over three fixture sets: every adapter answers
+  the same questions in mrr's vocabulary from its host's real response shapes, and an operation
+  an adapter cannot satisfy is a `ForgeCapabilities` flag rather than a skipped test.
+
+- **The `gitlab_*` names are kept, on purpose.** `projects.gitlab_url`, `gitlab_project_id`,
+  `gitlab_token`, `gitlab_operator_token` and `reviews.mr_iid` do not change. SQLite could
+  rename them cheaply, but they are `Project`'s API field names and are baked into
+  `docs/openapi.json`, `docs/mcp-tools.json` and the UI, so a rename means a dual-read
+  deprecation window across all four for a cosmetic gain. Read them as: **`mrIid` is the
+  per-repository merge/pull request number** — `iid` on GitLab, `index` on Forgejo, `number` on
+  GitHub — and `gitlabUrl`/`gitlabToken` are the forge base URL and token, whichever forge that
+  is. Recorded so a future reader finds a decision rather than an oversight.
+
 ### Changed
 
 - **The model API key moves from the project to the catalog, and the catalog gains owners.**

@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "mrr",
-  description: "AI code review for GitLab merge requests",
+  description: "AI code review for merge and pull requests on GitLab, Forgejo/Codeberg, and GitHub",
   icons: {
     icon: "/favicon.png",
     apple: "/apple-touch-icon.png",

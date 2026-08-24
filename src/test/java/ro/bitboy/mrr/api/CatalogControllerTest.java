@@ -6,13 +6,14 @@ import org.junit.jupiter.api.io.TempDir;
 import ro.bitboy.mrr.RuntimeSettings;
 import ro.bitboy.mrr.TestStores;
 import ro.bitboy.mrr.auth.Principal;
-import ro.bitboy.mrr.model.GitlabInstance;
+import ro.bitboy.mrr.model.ForgeInstance;
 import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.User;
 import ro.bitboy.mrr.store.Store;
 import ro.bitboy.mrr.web.ApiException;
+import ro.bitboy.mrr.model.ForgeKind;
 
 import java.nio.file.Path;
 import java.util.Map;
@@ -49,16 +50,16 @@ class CatalogControllerTest {
     @Test
     void anyAuthenticatedUserCanReadInstanceInfoAndCatalogs() {
         settings.save(Map.of(RuntimeSettings.BASE_URL, "https://mrr.example.com/"));
-        catalog.createGitlab(admin, new CatalogController.GitlabUpsert("gitlab.com", "https://gitlab.com", true));
+        catalog.createForge(admin, new CatalogController.ForgeUpsert("gitlab.com", ForgeKind.GITLAB, "https://gitlab.com", true));
         catalog.createLlm(admin, new CatalogController.LlmUpsert("Opus", Project.Provider.ANTHROPIC,
                 "claude-opus-5", null, null, true));
 
         CatalogController.InstanceInfo info = catalog.instance(user);
         assertThat(info.baseUrl()).isEqualTo("https://mrr.example.com");
         assertThat(info.webhookUrlTemplate())
-                .isEqualTo("https://mrr.example.com/webhooks/gitlab/{projectId}");
+                .isEqualTo("https://mrr.example.com/webhooks/{forge}/{projectId}");
 
-        assertThat(catalog.listGitlab(user)).extracting(GitlabInstance::name)
+        assertThat(catalog.listGitlab(user)).extracting(ForgeInstance::name)
                 .containsExactly("gitlab.com");
         assertThat(catalog.listLlm(user)).extracting(LlmProvider::name)
                 .containsExactly("Opus");
@@ -66,12 +67,12 @@ class CatalogControllerTest {
 
     @Test
     void anyoneMayAddTheirOwnEntryButOnlyAnAdminMayShareOne() {
-        CatalogController.GitlabUpsert shared =
-                new CatalogController.GitlabUpsert("gitlab.com", "https://gitlab.com", true);
+        CatalogController.ForgeUpsert shared =
+                new CatalogController.ForgeUpsert("gitlab.com", ForgeKind.GITLAB, "https://gitlab.com", true);
         CatalogController.LlmUpsert sharedLlm = new CatalogController.LlmUpsert(
                 "Opus", Project.Provider.ANTHROPIC, "claude-opus-5", null, null, true);
 
-        assertThatThrownBy(() -> catalog.createGitlab(user, shared))
+        assertThatThrownBy(() -> catalog.createForge(user, shared))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(403));
         assertThatThrownBy(() -> catalog.createLlm(user, sharedLlm))
@@ -92,27 +93,27 @@ class CatalogControllerTest {
                         .contains("shared entry cannot carry an API key"));
 
         // A shared entry is visible to everyone; a private one only to its owner and admins.
-        catalog.createGitlab(admin, shared);
+        catalog.createForge(admin, shared);
         assertThat(catalog.listLlm(user)).extracting(LlmProvider::name).contains("Mine");
         assertThat(catalog.listLlm(other)).extracting(LlmProvider::name).doesNotContain("Mine");
     }
 
     @Test
     void catalogCreatesRejectBlankFields() {
-        assertThatThrownBy(() -> catalog.createGitlab(admin,
-                new CatalogController.GitlabUpsert(" ", "https://gitlab.com", true)))
+        assertThatThrownBy(() -> catalog.createForge(admin,
+                new CatalogController.ForgeUpsert(" ", ForgeKind.GITLAB, "https://gitlab.com", true)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
-        assertThatThrownBy(() -> catalog.createGitlab(admin,
-                new CatalogController.GitlabUpsert("gl", "gitlab.com", true)))
+        assertThatThrownBy(() -> catalog.createForge(admin,
+                new CatalogController.ForgeUpsert("gl", ForgeKind.GITLAB, "gitlab.com", true)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
-        assertThatThrownBy(() -> catalog.createGitlab(admin,
-                new CatalogController.GitlabUpsert("gl", "https://", true)))
+        assertThatThrownBy(() -> catalog.createForge(admin,
+                new CatalogController.ForgeUpsert("gl", ForgeKind.GITLAB, "https://", true)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
-        assertThatThrownBy(() -> catalog.createGitlab(admin,
-                new CatalogController.GitlabUpsert("gl", "https://?bad", true)))
+        assertThatThrownBy(() -> catalog.createForge(admin,
+                new CatalogController.ForgeUpsert("gl", ForgeKind.GITLAB, "https://?bad", true)))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
         assertThatThrownBy(() -> catalog.createLlm(admin,
@@ -132,6 +133,6 @@ class CatalogControllerTest {
         CatalogController.InstanceInfo info = catalog.instance(admin);
         assertThat(info.baseUrl()).isEqualTo("http://localhost:8130");
         assertThat(info.webhookUrlTemplate())
-                .isEqualTo("http://localhost:8130/webhooks/gitlab/{projectId}");
+                .isEqualTo("http://localhost:8130/webhooks/{forge}/{projectId}");
     }
 }

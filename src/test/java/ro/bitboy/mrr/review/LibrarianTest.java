@@ -7,7 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.SimpleDriverDataSource;
 import org.springframework.web.client.RestClient;
-import ro.bitboy.mrr.FakeGitLab;
+import ro.bitboy.mrr.FakeForge;
 import ro.bitboy.mrr.MrrProperties;
 import ro.bitboy.mrr.RuntimeSettings;
 import ro.bitboy.mrr.TestStores;
@@ -18,6 +18,7 @@ import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.ReviewModelFactory;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.store.Store;
+import ro.bitboy.mrr.forge.ForgeFactory;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -43,7 +44,8 @@ class LibrarianTest {
         MemoryStore memoryStore = new MemoryStore(JdbcClient.create(dataSource), properties);
         RuntimeSettings settings = RuntimeSettings.frozen(properties);
         librarian = new Librarian(store, memoryStore, new MemoryService(memoryStore),
-                new FakeGitLab(), new ReviewModelFactory(RestClient.builder(), settings),
+                ForgeFactory.fixed(new FakeForge()),
+                new ReviewModelFactory(RestClient.builder(), settings),
                 settings, new ObjectMapper());
         project = TestStores.persist(store, TestStores.project(
                 store.createUser("alice", Role.USER).id(), "calc", "hook-secret"));

@@ -1,7 +1,7 @@
 package ro.bitboy.mrr.review;
 
 import org.junit.jupiter.api.Test;
-import ro.bitboy.mrr.gitlab.GitLabClient;
+import ro.bitboy.mrr.forge.Diff;
 import ro.bitboy.mrr.model.AgentDocument;
 import ro.bitboy.mrr.model.AgentSkill;
 import ro.bitboy.mrr.model.Finding;
@@ -78,7 +78,7 @@ class PromptsTest {
 
     @Test
     void ownerNotesLandInTheUserPrompt() {
-        GitLabClient.Diff diff = new GitLabClient.Diff(
+        Diff diff = new Diff(
                 "Fix npe", "desc", "fix", "main", "https://gl/mr/1",
                 "Ada", "ada", List.of("A.java"), "diff --git a/A.java", false);
         String user = Prompts.user(diff, List.of(), List.of(), 20_000, "Implements JIRA-12.");
@@ -89,7 +89,7 @@ class PromptsTest {
 
     @Test
     void enabledDocumentsLandInTheUserPrompt() {
-        GitLabClient.Diff diff = new GitLabClient.Diff(
+        Diff diff = new Diff(
                 "Fix npe", "desc", "fix", "main", "https://gl/mr/1",
                 "Ada", "ada", List.of("A.java"), "diff --git a/A.java", false);
         String user = Prompts.user(diff, List.of(), List.of(
@@ -101,7 +101,7 @@ class PromptsTest {
 
     @Test
     void aSlicePromptOmitsPriorsFromOtherFiles() {
-        GitLabClient.Diff diff = new GitLabClient.Diff(
+        Diff diff = new Diff(
                 "Fix npe", "desc", "fix", "main", "https://gl/mr/1",
                 "Ada", "ada", List.of("A.java", "B.java"),
                 "--- A.java\n+a\n--- B.java\n+b\n", false);
@@ -116,7 +116,7 @@ class PromptsTest {
 
     @Test
     void aSlicePromptJudgesPriorsWhoseFileIsInTheWindow() {
-        GitLabClient.Diff diff = new GitLabClient.Diff(
+        Diff diff = new Diff(
                 "Fix npe", "desc", "fix", "main", "https://gl/mr/1",
                 "Ada", "ada", List.of("A.java", "B.java"),
                 "--- A.java\n+a\n--- B.java\n+b\n", false);
@@ -130,7 +130,7 @@ class PromptsTest {
 
     @Test
     void synthesizeIncludesCurrentPatchesForPriors() {
-        GitLabClient.Diff diff = new GitLabClient.Diff(
+        Diff diff = new Diff(
                 "Fix npe", "desc", "fix", "main", "https://gl/mr/1",
                 "Ada", "ada", List.of("A.java"),
                 "--- A.java\n+fixed\n", false);
@@ -146,7 +146,7 @@ class PromptsTest {
     @Test
     void priorEvidenceSharesOneBudgetAcrossAllFindings() {
         String blob = "--- A.java\n+" + "a".repeat(400) + "\n";
-        GitLabClient.Diff diff = new GitLabClient.Diff(
+        Diff diff = new Diff(
                 "Fix npe", "desc", "fix", "main", "https://gl/mr/1",
                 "Ada", "ada", List.of("A.java"), blob, false);
         List<Finding> priors = List.of(

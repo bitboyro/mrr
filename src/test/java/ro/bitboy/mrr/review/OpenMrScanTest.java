@@ -3,11 +3,11 @@ package ro.bitboy.mrr.review;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import ro.bitboy.mrr.FakeGitLab;
+import ro.bitboy.mrr.FakeForge;
 import ro.bitboy.mrr.FakeMemory;
 import ro.bitboy.mrr.FakeReviewer;
 import ro.bitboy.mrr.TestStores;
-import ro.bitboy.mrr.gitlab.GitLabClient;
+import ro.bitboy.mrr.forge.MergeRequest;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.MrStatus;
 import ro.bitboy.mrr.model.Project;
@@ -15,6 +15,7 @@ import ro.bitboy.mrr.model.Review;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.User;
 import ro.bitboy.mrr.store.Store;
+import ro.bitboy.mrr.forge.ForgeFactory;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -28,7 +29,7 @@ class OpenMrScanTest {
     Path tempDir;
 
     private Store store;
-    private FakeGitLab gitlab;
+    private FakeForge gitlab;
     private FakeReviewer reviewer;
     private FakeMemory memory;
     private OpenMrScan scan;
@@ -39,10 +40,10 @@ class OpenMrScanTest {
         store = TestStores.sqlite(tempDir);
         User alice = store.createUser("alice", Role.USER);
         project = TestStores.persist(store, TestStores.project(alice.id(), "calc", "hook-secret"));
-        gitlab = new FakeGitLab();
+        gitlab = new FakeForge();
         reviewer = new FakeReviewer();
         memory = new FakeMemory();
-        scan = new OpenMrScan(store, gitlab, reviewer, memory, 120_000);
+        scan = new OpenMrScan(store, ForgeFactory.fixed(gitlab), reviewer, memory, 120_000);
     }
 
     @Test
@@ -89,7 +90,7 @@ class OpenMrScanTest {
         store.upsertMrStatus(project.id(), 9, MrStatus.Status.NEEDS_WORK, id, "sha-old", 1);
         gitlab.openMrs = List.of();
         gitlab.oneMr = Optional.of(
-                new GitLabClient.MergeRequest(9, "t", "merged", "sha-old", "https://gl/9", false));
+                new MergeRequest(9, "t", "merged", "sha-old", "https://gl/9", false));
 
         OpenMrScan.ScanResult result = scan.scan(project);
 
@@ -171,7 +172,7 @@ class OpenMrScanTest {
         Project skipping = TestStores.persist(store, 
                 TestStores.project(project.ownerId(), "drafty", "other-secret", true, true));
         gitlab.openMrs = List.of(
-                new GitLabClient.MergeRequest(3, "wip", "opened", "sha-d", "https://gl/3", true));
+                new MergeRequest(3, "wip", "opened", "sha-d", "https://gl/3", true));
 
         OpenMrScan.ScanResult result = scan.scan(skipping);
 
@@ -179,7 +180,7 @@ class OpenMrScanTest {
         assertThat(reviewer.submitted).isEmpty();
     }
 
-    private static GitLabClient.MergeRequest openMr(long iid, String sha) {
-        return new GitLabClient.MergeRequest(iid, "t", "opened", sha, "https://gl/" + iid, false);
+    private static MergeRequest openMr(long iid, String sha) {
+        return new MergeRequest(iid, "t", "opened", sha, "https://gl/" + iid, false);
     }
 }

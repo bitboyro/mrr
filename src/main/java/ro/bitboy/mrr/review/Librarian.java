@@ -9,7 +9,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 import ro.bitboy.mrr.RuntimeSettings;
-import ro.bitboy.mrr.gitlab.GitLabClient;
+import ro.bitboy.mrr.forge.ProjectInfo;
+import ro.bitboy.mrr.forge.TreeEntry;
+import ro.bitboy.mrr.forge.Forge;
+import ro.bitboy.mrr.forge.ForgeFactory;
 import ro.bitboy.mrr.memory.MemoryActor;
 import ro.bitboy.mrr.memory.MemoryDocument;
 import ro.bitboy.mrr.memory.MemoryKind;
@@ -53,7 +56,7 @@ public class Librarian {
     private final Store store;
     private final MemoryStore memoryStore;
     private final MemoryService memory;
-    private final GitLabClient gitlab;
+    private final ForgeFactory forges;
     private final ReviewModelFactory models;
     private final RuntimeSettings settings;
     private final ObjectMapper mapper;
@@ -62,12 +65,12 @@ public class Librarian {
     private final ExecutorService workers;
 
     public Librarian(Store store, MemoryStore memoryStore, MemoryService memory,
-                     GitLabClient gitlab, ReviewModelFactory models,
+                     ForgeFactory forges, ReviewModelFactory models,
                      RuntimeSettings settings, ObjectMapper mapper) {
         this.store = store;
         this.memoryStore = memoryStore;
         this.memory = memory;
-        this.gitlab = gitlab;
+        this.forges = forges;
         this.models = models;
         this.settings = settings;
         this.mapper = mapper;
@@ -113,11 +116,12 @@ public class Librarian {
 
     private void run(String projectId, String runId) {
         Project project = store.findProject(projectId).orElseThrow();
-        GitLabClient.ProjectInfo info = gitlab.projectInfo(project);
-        Optional<String> tip = info.empty() ? Optional.empty() : gitlab.commitSha(project, info.defaultBranch());
-        List<GitLabClient.TreeEntry> tree = info.empty()
+        Forge forge = forges.forProject(project);
+        ProjectInfo info = forge.projectInfo(project);
+        Optional<String> tip = info.empty() ? Optional.empty() : forge.commitSha(project, info.defaultBranch());
+        List<TreeEntry> tree = info.empty()
                 ? List.of()
-                : gitlab.tree(project, info.defaultBranch(), null, 100);
+                : forge.tree(project, info.defaultBranch(), null, 100);
         List<MemoryDocument> mrCards = memory.list(projectId, MemoryStore.SPACE_MRS, null, 100);
 
         boolean emptyRepo = tree.isEmpty() && mrCards.isEmpty();
@@ -190,8 +194,8 @@ public class Librarian {
                 "overview", "overview", List.of(), status, null, null, body);
     }
 
-    private String prefetch(Project project, GitLabClient.ProjectInfo info, String tip,
-                            List<GitLabClient.TreeEntry> tree, List<MemoryDocument> mrCards) {
+    private String prefetch(Project project, ProjectInfo info, String tip,
+                            List<TreeEntry> tree, List<MemoryDocument> mrCards) {
         StringBuilder sb = new StringBuilder();
         sb.append("GitLab project: ").append(project.name()).append('\n');
         if (info.description() != null) {
@@ -204,7 +208,8 @@ public class Librarian {
         sb.append('\n');
         if (project.memoryHeadSha() != null && tip != null
                 && !project.memoryHeadSha().equals(tip)) {
-            gitlab.compare(project, project.memoryHeadSha(), tip, settings.review().maxDiffChars())
+            forges.forProject(project).compare(project, project.memoryHeadSha(), tip,
+                            settings.review().maxDiffChars())
                     .ifPresent(diff -> sb.append("\n## Default-branch compare since last refresh\n\n")
                             .append(truncate(diff, settings.review().maxMemoryChars())).append('\n'));
         }
@@ -219,7 +224,7 @@ public class Librarian {
         if (tree.isEmpty()) {
             sb.append("(empty)\n");
         } else {
-            for (GitLabClient.TreeEntry e : tree) {
+            for (TreeEntry e : tree) {
                 sb.append("- ").append(e.path()).append(" (").append(e.type()).append(")\n");
             }
         }
@@ -264,7 +269,8 @@ public class Librarian {
         if (path == null) {
             return;
         }
-        String text = gitlab.fileAt(project, path, ref, null, null, settings.review().maxFileChars());
+        String text = forges.forProject(project)
+                .fileAt(project, path, ref, null, null, settings.review().maxFileChars());
         if (text.startsWith("error:")) {
             return;
         }
@@ -272,9 +278,9 @@ public class Librarian {
         sb.append(truncate(text, settings.review().maxMemoryChars())).append("\n");
     }
 
-    private static String firstPresent(List<GitLabClient.TreeEntry> tree, List<String> names) {
+    private static String firstPresent(List<TreeEntry> tree, List<String> names) {
         for (String name : names) {
-            for (GitLabClient.TreeEntry e : tree) {
+            for (TreeEntry e : tree) {
                 if (e.blob() && (e.path().equals(name) || e.path().equalsIgnoreCase(name))) {
                     return e.path();
                 }
@@ -283,7 +289,7 @@ public class Librarian {
         return null;
     }
 
-    private String execute(ToolCall call, Project project, GitLabClient.ProjectInfo info,
+    private String execute(ToolCall call, Project project, ProjectInfo info,
                            String tip, String runId) {
         String name = call.name();
         try {
@@ -293,7 +299,8 @@ public class Librarian {
                 if (info.empty()) {
                     return "(empty repository)";
                 }
-                List<GitLabClient.TreeEntry> entries = gitlab.tree(project, info.defaultBranch(), path, 100);
+                List<TreeEntry> entries = forges.forProject(project)
+                        .tree(project, info.defaultBranch(), path, 100);
                 if (entries.isEmpty()) {
                     return "(empty)";
                 }
@@ -309,7 +316,8 @@ public class Librarian {
                 }
                 Integer start = args.path("start_line").isIntegralNumber() ? args.path("start_line").asInt() : null;
                 Integer end = args.path("end_line").isIntegralNumber() ? args.path("end_line").asInt() : null;
-                return gitlab.fileAt(project, path, ref, start, end, settings.review().maxFileChars());
+                return forges.forProject(project)
+                        .fileAt(project, path, ref, start, end, settings.review().maxFileChars());
             }
             return ReviewTools.executeMemory(mapper, memory, project.id(), MemoryActor.LIBRARIAN,
                     null, name, call.argumentsJson());

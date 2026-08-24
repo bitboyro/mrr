@@ -5,7 +5,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import ro.bitboy.mrr.FakeGitLab;
+import ro.bitboy.mrr.FakeForge;
 import ro.bitboy.mrr.FakeMemory;
 import ro.bitboy.mrr.TestStores;
 import ro.bitboy.mrr.auth.Ids;
@@ -18,6 +18,10 @@ import ro.bitboy.mrr.model.ReviewModel.Result;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.User;
 import ro.bitboy.mrr.store.Store;
+import ro.bitboy.mrr.forge.Diff;
+import ro.bitboy.mrr.forge.DiscussionView;
+import ro.bitboy.mrr.forge.ForgeCapabilities;
+import ro.bitboy.mrr.forge.ForgeFactory;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -35,7 +39,7 @@ class ReviewerTest {
     Path tempDir;
 
     private Store store;
-    private FakeGitLab gitlab;
+    private FakeForge gitlab;
     private FakeMemory memory;
     private Project project;
     private ExecutorService workers;
@@ -46,7 +50,7 @@ class ReviewerTest {
         store = TestStores.sqlite(tempDir);
         User alice = store.createUser("alice", Role.USER);
         project = TestStores.persist(store, TestStores.project(alice.id(), "calc", "hook-secret"));
-        gitlab = new FakeGitLab();
+        gitlab = new FakeForge();
         memory = new FakeMemory();
         workers = Executors.newSingleThreadExecutor();
     }
@@ -84,8 +88,8 @@ class ReviewerTest {
         reviewer.run(id);
         assertThat(gitlab.resolved).containsExactly("ov-1:true");
 
-        reviewer.alignGitlab(project, 7);
-        reviewer.alignGitlab(project, 7);
+        reviewer.alignForge(project, 7);
+        reviewer.alignForge(project, 7);
 
         assertThat(gitlab.resolved).containsExactly("ov-1:true");
     }
@@ -100,7 +104,7 @@ class ReviewerTest {
         assertThat(gitlab.resolved).containsExactly("ov-1:true");
 
         gitlab.discussions.clear();
-        reviewer.alignGitlab(project, 7);
+        reviewer.alignForge(project, 7);
 
         assertThat(gitlab.resolved).containsExactly("ov-1:true");
     }
@@ -135,12 +139,12 @@ class ReviewerTest {
                 "A.java", 1, Finding.Severity.MAJOR, "leak", "close it",
                 "disc-find", "n-2", true, Finding.State.ADDRESSED, Instant.now(), Instant.now()));
         store.upsertMrStatus(project.id(), 7, MrStatus.Status.CLEAN, reviewId, "sha-addr", 0);
-        gitlab.discussions.add(new ro.bitboy.mrr.gitlab.GitLabClient.DiscussionView(
+        gitlab.discussions.add(new ro.bitboy.mrr.forge.DiscussionView(
                 "ov-1", "note-1", "### mrr review", true, true, gitlab.tokenUser, false));
-        gitlab.discussions.add(new ro.bitboy.mrr.gitlab.GitLabClient.DiscussionView(
+        gitlab.discussions.add(new ro.bitboy.mrr.forge.DiscussionView(
                 "disc-find", "n-2", "**[Major]** leak", true, false, null, false));
 
-        reviewer().alignGitlab(project, 7);
+        reviewer().alignForge(project, 7);
 
         assertThat(gitlab.resolved).contains("disc-find:true");
     }
@@ -158,13 +162,13 @@ class ReviewerTest {
                 "A.java", 1, Finding.Severity.MAJOR, "leak", "close it",
                 "disc-find", "n-2", true, Finding.State.OPEN, Instant.now(), null));
         store.upsertMrStatus(project.id(), 7, MrStatus.Status.NEEDS_WORK, reviewId, "sha-open", 1);
-        gitlab.discussions.add(new ro.bitboy.mrr.gitlab.GitLabClient.DiscussionView(
+        gitlab.discussions.add(new ro.bitboy.mrr.forge.DiscussionView(
                 "ov-1", "note-1", "### mrr review", true, false, null, false));
-        gitlab.discussions.add(new ro.bitboy.mrr.gitlab.GitLabClient.DiscussionView(
+        gitlab.discussions.add(new ro.bitboy.mrr.forge.DiscussionView(
                 "disc-find", "n-2", "**[Major]** leak", true, false, null, false));
         gitlab.resolveAs("disc-find", "romanbotnari");
 
-        reviewer().alignGitlab(project, 7);
+        reviewer().alignForge(project, 7);
 
         Finding after = store.findingsOfMr(project.id(), 7).getFirst();
         assertThat(after.state()).isEqualTo(Finding.State.APPROVED);
@@ -190,10 +194,10 @@ class ReviewerTest {
                 "A.java", 1, Finding.Severity.MAJOR, "leak", "close it",
                 "disc-find", "n-2", true, Finding.State.OPEN, Instant.now(), null));
         store.upsertMrStatus(project.id(), 7, MrStatus.Status.NEEDS_WORK, reviewId, "sha-own", 1);
-        gitlab.discussions.add(new ro.bitboy.mrr.gitlab.GitLabClient.DiscussionView(
+        gitlab.discussions.add(new ro.bitboy.mrr.forge.DiscussionView(
                 "disc-find", "n-2", "**[Major]** leak", true, true, gitlab.tokenUser, false));
 
-        reviewer().alignGitlab(project, 7);
+        reviewer().alignForge(project, 7);
 
         Finding after = store.findingsOfMr(project.id(), 7).getFirst();
         assertThat(after.state()).isEqualTo(Finding.State.OPEN);
@@ -215,12 +219,12 @@ class ReviewerTest {
                 "A.java", 1, Finding.Severity.MAJOR, "leak", "close it",
                 "disc-find", "n-2", true, Finding.State.OPEN, Instant.now(), null));
         store.upsertMrStatus(project.id(), 7, MrStatus.Status.NEEDS_WORK, reviewId, "sha-nouser", 1);
-        gitlab.discussions.add(new ro.bitboy.mrr.gitlab.GitLabClient.DiscussionView(
+        gitlab.discussions.add(new ro.bitboy.mrr.forge.DiscussionView(
                 "disc-find", "n-2", "**[Major]** leak", true, false, null, false));
         gitlab.resolveAs("disc-find", "romanbotnari");
         gitlab.tokenUserFailure = new IllegalStateException("GitLab GET /user failed with 401");
 
-        reviewer().alignGitlab(project, 7);
+        reviewer().alignForge(project, 7);
 
         Finding after = store.findingsOfMr(project.id(), 7).getFirst();
         assertThat(after.state()).isEqualTo(Finding.State.APPROVED);
@@ -310,7 +314,7 @@ class ReviewerTest {
     void aDiffLargerThanTheWindowIsReviewedInSlicesThenMerged() {
         String a = "--- A.java\n+" + "a".repeat(200) + "\n";
         String b = "--- B.java\n+" + "b".repeat(200) + "\n";
-        gitlab.diff = new ro.bitboy.mrr.gitlab.GitLabClient.Diff(
+        gitlab.diff = new ro.bitboy.mrr.forge.Diff(
                 "title", "desc", "fix/x", "main", "https://gitlab/mr/7",
                 "Ada", "ada", List.of("A.java", "B.java"), a + b, false);
         model = new RecordingModel(List.of(
@@ -343,7 +347,7 @@ class ReviewerTest {
     void aMalformedSynthesisFailsClosed() {
         String a = "--- A.java\n+" + "a".repeat(200) + "\n";
         String b = "--- B.java\n+" + "b".repeat(200) + "\n";
-        gitlab.diff = new ro.bitboy.mrr.gitlab.GitLabClient.Diff(
+        gitlab.diff = new ro.bitboy.mrr.forge.Diff(
                 "title", "desc", "fix/x", "main", "https://gitlab/mr/7",
                 "Ada", "ada", List.of("A.java", "B.java"), a + b, false);
         model = new RecordingModel(List.of(
@@ -376,9 +380,9 @@ class ReviewerTest {
     }
 
     @Test
-    void aGitlabOutageWhilePostingFindingsFailsClosed() {
+    void aForgeOutageWhilePostingFindingsFailsClosed() {
         gitlab.postFailure = new ro.bitboy.mrr.web.ApiException(
-                org.springframework.http.HttpStatus.BAD_GATEWAY, "gitlab_error",
+                org.springframework.http.HttpStatus.BAD_GATEWAY, "forge_error",
                 "GitLab POST /discussions failed with 502");
         model = new RecordingModel(List.of(
                 Result.of("{\"summary\":\"bug\",\"findings\":[{\"file\":\"A.java\",\"line\":1,"
@@ -390,10 +394,85 @@ class ReviewerTest {
 
         Review review = store.findReview(id).orElseThrow();
         assertThat(review.state()).isEqualTo(Review.State.FAILED);
-        assertThat(review.errorKind()).isEqualTo(FailureKind.GITLAB);
+        assertThat(review.errorKind()).isEqualTo(FailureKind.FORGE);
         assertThat(review.response()).contains("leak");
         assertThat(store.findingsOfMr(project.id(), 7)).isEmpty();
         assertThat(gitlab.posted).isEmpty();
+    }
+
+    // ── hosts that cannot do everything GitLab can ───────────────────────────────────
+
+    @Test
+    void aHostThatCannotResolveThreadsStillRecordsTheFindingAndMarksTheComment() {
+        // Internal state is never weakened by a host limitation: the finding is ADDRESSED
+        // either way. What changes is that the comment says so, because the host cannot
+        // close the thread.
+        gitlab.capabilities = new ForgeCapabilities(true, false, true, true, false, true, true);
+        String reviewId = claim("sha-prior");
+        store.createFinding(new Finding(Ids.newId(), reviewId, project.id(), 7,
+                "A.java", 1, Finding.Severity.MAJOR, "leak", "**[Major]** leak\n\nclose it",
+                "disc-find", "n-2", true, Finding.State.OPEN, Instant.now(), null));
+        String findingId = store.openFindings(project.id(), 7).getFirst().id();
+        model = new RecordingModel(List.of(Result.of(
+                "{\"summary\":\"fixed\",\"findings\":[],\"prior\":[{\"id\":\""
+                        + findingId + "\",\"status\":\"addressed\",\"note\":\"closed\"}]}",
+                "end_turn")));
+
+        reviewer().run(claim("sha-fix"));
+
+        assertThat(store.findingsOfMr(project.id(), 7))
+                .singleElement()
+                .satisfies(f -> assertThat(f.state()).isEqualTo(Finding.State.ADDRESSED));
+        assertThat(gitlab.resolved).isEmpty();
+        assertThat(gitlab.edits).anySatisfy(edit ->
+                assertThat(edit).startsWith("disc-find:~~**Addressed**~~"));
+    }
+
+    @Test
+    void theMarkerIsNotStackedWhenAReviewRunsAgain() {
+        assertThat(Prompts.withAddressedMarker(
+                Prompts.withAddressedMarker("**[Major]** leak")))
+                .isEqualTo(Prompts.withAddressedMarker("**[Major]** leak"));
+    }
+
+    @Test
+    void aHostThatCannotEditCommentsPostsTheOverviewOnceAndLeavesIt() {
+        gitlab.capabilities = new ForgeCapabilities(true, true, true, true, true, true, false);
+        model = new RecordingModel(List.of(
+                Result.of("{\"summary\":\"ok\",\"findings\":[],\"prior\":[]}", "end_turn"),
+                Result.of("{\"summary\":\"still ok\",\"findings\":[],\"prior\":[]}", "end_turn")));
+        Reviewer reviewer = reviewer();
+
+        reviewer.run(claim("sha-1"));
+        reviewer.run(claim("sha-2"));
+
+        // Two reviews, one overview, and never an edit — a repost on every commit is exactly
+        // the noise the one-thread rule exists to prevent.
+        assertThat(gitlab.posted).hasSize(1);
+        assertThat(gitlab.edits).isEmpty();
+    }
+
+    @Test
+    void retractingAnApprovalCarriesAReasonSoADismissalCanExplainItself() {
+        Project approving = store.findProject(project.id()).orElseThrow();
+        store.updateProject(new Project(approving.id(), approving.ownerId(), approving.name(),
+                true, approving.forge(), approving.gitlabUrl(), approving.gitlabProjectId(),
+                approving.gitlabToken(), approving.gitlabOperatorToken(),
+                approving.webhookSecret(), approving.llmProviderId(), approving.llm(),
+                approving.skill(), false, 1, List.of(), true, false, null, null, null,
+                null, null, null, approving.createdAt()));
+        // mrr approved at the previous commit; this one reintroduces a finding.
+        store.upsertMrStatus(project.id(), 7, MrStatus.Status.CLEAN, null, "sha-clean", 0);
+        store.markMrrApproved(project.id(), 7, "sha-clean");
+        model = new RecordingModel(List.of(Result.of(
+                "{\"summary\":\"regressed\",\"findings\":[{\"file\":\"A.java\",\"line\":1,"
+                        + "\"severity\":\"major\",\"title\":\"leak\",\"body\":\"close it\"}],"
+                        + "\"prior\":[]}", "end_turn")));
+
+        reviewer().run(claim("sha-regress"));
+
+        assertThat(gitlab.unapprovals).singleElement()
+                .satisfies(reason -> assertThat(reason).contains("1 finding(s)"));
     }
 
     private String claim(String sha) {
@@ -405,7 +484,7 @@ class ReviewerTest {
     }
 
     private Reviewer reviewer(ro.bitboy.mrr.MrrProperties properties) {
-        return new Reviewer(store, gitlab, properties, new ObjectMapper(),
+        return new Reviewer(store, ForgeFactory.fixed(gitlab), properties, new ObjectMapper(),
                 memory, p -> model, workers);
     }
 }

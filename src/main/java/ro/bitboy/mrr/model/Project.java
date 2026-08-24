@@ -6,8 +6,20 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * A registered GitLab project. {@code gitlabUrl} is what makes self-hosted GitLab work —
- * nothing in mrr may assume gitlab.com.
+ * A registered project on a forge. {@code gitlabUrl} is what makes self-hosted work — nothing
+ * in mrr may assume gitlab.com, or github.com, or codeberg.org.
+ *
+ * <p>{@code forge} says which host it lives on. One project is bound to one remote: mirroring a
+ * repository across two hosts means registering it twice.
+ *
+ * <p><strong>The names are deliberate debt.</strong> {@code gitlabUrl} and {@code gitlabToken}
+ * are the forge base URL and the forge token, whichever forge that is, and {@code mrIid} on a
+ * review is the per-repository merge/pull request number — {@code iid} on GitLab, {@code index}
+ * on Forgejo, {@code number} on GitHub. SQLite could rename the columns cheaply, but these are
+ * this record's API field names and they are baked into {@code docs/openapi.json},
+ * {@code docs/mcp-tools.json} and the UI, so a rename means a dual-read deprecation window
+ * across all four for a cosmetic gain. Recorded here so a future reader finds a decision rather
+ * than an oversight.
  *
  * <p>{@code gitlabToken}, {@code gitlabOperatorToken} and {@code webhookSecret} are encrypted
  * at rest by {@link ro.bitboy.mrr.secret.SecretBox} when a key is configured, and stored in
@@ -19,9 +31,11 @@ import java.util.List;
  * references, so it is set and rotated in one place for every project using that entry.
  */
 @Schema(description = """
-        A registered GitLab project. Secrets — `gitlabToken`, `gitlabOperatorToken` and \
+        A registered project on a forge. Secrets — `gitlabToken`, `gitlabOperatorToken` and \
         `webhookSecret` — are write-only: accepted on create and update, always masked on \
-        read. The model and its API key come from the referenced catalog entry.""")
+        read. The model and its API key come from the referenced catalog entry. \
+        `gitlabUrl`/`gitlabToken` are the forge base URL and token whichever forge `forge` \
+        names; the names are kept for compatibility.""")
 public record Project(
         String id,
         @Schema(description = "The user that registered it. Only this user and admins can see it.")
@@ -29,11 +43,15 @@ public record Project(
         @Schema(example = "test-repo") String name,
         @Schema(description = "False makes mrr acknowledge this project's webhooks and skip them.")
         boolean enabled,
-        @Schema(description = "Base URL of the GitLab holding this project — this is what makes "
+        @Schema(description = "Which host this project's merge requests live on. Fixed at "
+                + "registration; one project is bound to one remote.") ForgeKind forge,
+        @Schema(description = "Base URL of the forge holding this project — this is what makes "
                 + "self-hosted work.", example = "https://gitlab.com") String gitlabUrl,
-        @Schema(description = "Numeric id or `group/project` path.", example = "bitboy.ro/test-repo")
+        @Schema(description = "GitLab: numeric id or `group/project` path. Forgejo and GitHub: "
+                + "`owner/repo`.", example = "bitboy.ro/test-repo")
         String gitlabProjectId,
-        @Schema(description = "Review-loop PAT. Masked on read.", example = "****v38q") String gitlabToken,
+        @Schema(description = "Review-loop PAT for the forge. Masked on read.",
+                example = "****v38q") String gitlabToken,
         @Schema(description = "Optional PAT for merging and posting an overall thread from mrr. "
                 + "Kept separate so the review bot never needs Merge. Masked on read.",
                 nullable = true, example = "****ab12") String gitlabOperatorToken,
@@ -85,6 +103,7 @@ public record Project(
     }
 
     public Project {
+        if (forge == null) forge = ForgeKind.DEFAULT;
         if (agentMaxTurns <= 0) agentMaxTurns = 1;
         agentTools = agentTools == null ? List.of() : List.copyOf(agentTools);
         if (memoryStatus == null) memoryStatus = MemoryStatus.NONE;
@@ -130,9 +149,9 @@ public record Project(
         return gitlabOperatorToken != null && !gitlabOperatorToken.isBlank();
     }
 
-    /** Same project, a different PRIVATE-TOKEN — used to act as the operator PAT. */
+    /** Same project, a different forge token — used to act as the operator PAT. */
     public Project withGitlabToken(String token) {
-        return new Project(id, ownerId, name, enabled, gitlabUrl, gitlabProjectId,
+        return new Project(id, ownerId, name, enabled, forge, gitlabUrl, gitlabProjectId,
                 token, gitlabOperatorToken, webhookSecret, llmProviderId, llm,
                 skill, skipDrafts, agentMaxTurns, agentTools, autoApprove,
                 librarianEnabled, memoryHeadSha, memoryStatus, memoryRefreshedAt,
@@ -148,7 +167,7 @@ public record Project(
 
     /** Never let secrets out over the API. */
     public Project redacted() {
-        return new Project(id, ownerId, name, enabled, gitlabUrl, gitlabProjectId,
+        return new Project(id, ownerId, name, enabled, forge, gitlabUrl, gitlabProjectId,
                 mask(gitlabToken), mask(gitlabOperatorToken), mask(webhookSecret),
                 llmProviderId, llm == null ? null : llm.redacted(),
                 skill, skipDrafts, agentMaxTurns,

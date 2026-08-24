@@ -179,14 +179,16 @@ run_info() {
     echo "  root token: not written yet — check the mrr pane banner"
   fi
   echo
-  echo "  GitLab webhook  (Settings → Webhooks)"
-  echo "    URL shape:  ${url:-https://<tunnel>}/webhooks/gitlab/<project-id>"
-  echo "    events:     Merge request events, and Comments if replies should land"
+  echo "  Forge webhook  (the project's webhook settings)"
+  echo "    URL shape:  ${url:-https://<tunnel>}/webhooks/<forge>/<project-id>"
+  echo "    events:     merge/pull request events, and comments if replies should land"
   echo "    secret:     the one shown once at project create — not stored in this pane"
+  # The forge slug is the project's own column, lowercased: a row written before mrr knew
+  # about a second host has none, and reads gitlab — which is the URL it was given.
   if command -v sqlite3 >/dev/null 2>&1 && [[ -f "$DATA/mrr.db" ]]; then
     echo
     sqlite3 -separator '  ' "$DATA/mrr.db" \
-      "SELECT '    ' || name || ':  ' || '${url:-https://<tunnel>}' || '/webhooks/gitlab/' || id FROM projects;" \
+      "SELECT '    ' || name || ':  ' || '${url:-https://<tunnel>}' || '/webhooks/' || lower(coalesce(nullif(forge,''),'GITLAB')) || '/' || id FROM projects;" \
       2>/dev/null || true
   fi
   echo

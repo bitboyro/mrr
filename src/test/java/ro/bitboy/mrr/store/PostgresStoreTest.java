@@ -89,7 +89,7 @@ class PostgresStoreTest {
         new SchemaPatch(db, dataSource).patch();
 
         assertThat(tableNames()).contains("users", "tokens", "projects", "llm_providers",
-                "gitlab_instances", "reviews", "findings", "replies", "mr_status",
+                "forge_instances", "reviews", "findings", "replies", "mr_status",
                 "memory_documents", "memory_runs", "settings", "skill_library");
     }
 

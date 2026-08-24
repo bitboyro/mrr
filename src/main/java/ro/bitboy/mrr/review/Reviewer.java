@@ -12,7 +12,13 @@ import ro.bitboy.mrr.RuntimeSettings;
 import ro.bitboy.mrr.memory.MemoryActor;
 import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.auth.Ids;
-import ro.bitboy.mrr.gitlab.GitLabClient;
+import ro.bitboy.mrr.forge.AnchorRef;
+import ro.bitboy.mrr.forge.Diff;
+import ro.bitboy.mrr.forge.Discussion;
+import ro.bitboy.mrr.forge.DiscussionView;
+import ro.bitboy.mrr.forge.Forge;
+import ro.bitboy.mrr.forge.ForgeCapabilities;
+import ro.bitboy.mrr.forge.ForgeFactory;
 import ro.bitboy.mrr.model.AgentDocument;
 import ro.bitboy.mrr.model.AgentSkill;
 import ro.bitboy.mrr.model.AgentTrace;
@@ -58,7 +64,7 @@ public class Reviewer {
     private static final Logger log = LoggerFactory.getLogger(Reviewer.class);
 
     private final Store store;
-    private final GitLabClient gitlab;
+    private final ForgeFactory forges;
     private final RuntimeSettings settings;
     private final VerdictParser parser;
     private final ObjectMapper mapper;
@@ -70,21 +76,21 @@ public class Reviewer {
     private final ConcurrentHashMap<String, Object> mrLocks = new ConcurrentHashMap<>();
 
     @Autowired
-    public Reviewer(Store store, GitLabClient gitlab, ReviewModelFactory models,
+    public Reviewer(Store store, ForgeFactory forges, ReviewModelFactory models,
                     RuntimeSettings settings, ObjectMapper mapper, MemoryService memory) {
-        this(store, gitlab, settings, mapper, memory, models::forProject,
+        this(store, forges, settings, mapper, memory, models::forProject,
                 newPool(settings.review().workers()));
     }
 
-    public Reviewer(Store store, GitLabClient gitlab, MrrProperties properties, ObjectMapper mapper,
+    public Reviewer(Store store, ForgeFactory forges, MrrProperties properties, ObjectMapper mapper,
              MemoryService memory, Function<Project, ReviewModel> models, ExecutorService workers) {
-        this(store, gitlab, RuntimeSettings.frozen(properties), mapper, memory, models, workers);
+        this(store, forges, RuntimeSettings.frozen(properties), mapper, memory, models, workers);
     }
 
-    public Reviewer(Store store, GitLabClient gitlab, RuntimeSettings settings, ObjectMapper mapper,
+    public Reviewer(Store store, ForgeFactory forges, RuntimeSettings settings, ObjectMapper mapper,
              MemoryService memory, Function<Project, ReviewModel> models, ExecutorService workers) {
         this.store = store;
-        this.gitlab = gitlab;
+        this.forges = forges;
         this.settings = settings;
         this.parser = new VerdictParser(mapper);
         this.mapper = mapper;
@@ -101,6 +107,32 @@ public class Reviewer {
 
     public int inFlightCount() {
         return inFlight.size();
+    }
+
+    /**
+     * The adapter for this project's host. Everything below asks for it per call rather than
+     * holding one: an adapter is stateless and takes its base URL and token off the row, and a
+     * cached one would be a place for two projects on different hosts to get confused.
+     */
+    private Forge forge(Project project) {
+        return forges.forProject(project);
+    }
+
+    /**
+     * What this project's host can do. The reviewer branches on this and never on a forge name
+     * — GitHub's missing unapprove and Forgejo's version-dependent resolve are facts about a
+     * deployment, not about a product, and a name would answer the wrong question.
+     */
+    private ForgeCapabilities can(Project project) {
+        try {
+            return forge(project).capabilities(project);
+        } catch (RuntimeException e) {
+            // A probe that will not answer must not fail a review. Assume the least: mrr's own
+            // state is still correct, and the degraded path is the safe one.
+            log.warn("could not read forge capabilities for {} — assuming the minimum: {}",
+                    project.name(), e.getMessage());
+            return new ForgeCapabilities(false, false, false, false, false, false, false);
+        }
     }
 
     private void ensurePoolSize() {
@@ -159,13 +191,13 @@ public class Reviewer {
 
         log.info("review {} processing {}!{} — fetching diff",
                 reviewId, project.name(), review.mrIid());
-        GitLabClient.Diff diff = gitlab.changes(project, review.mrIid());
+        Diff diff = forge(project).changes(project, review.mrIid());
 
         var info = review.mr().enrichedWith(
                 diff.title(), diff.webUrl(), diff.authorName(), diff.authorUsername(),
                 diff.sourceBranch(), diff.targetBranch(), diff.files().size());
         try {
-            var meta = gitlab.gitMeta(project, review.mrIid());
+            var meta = forge(project).gitMeta(project, review.mrIid());
             info = info.withGitMeta(meta.commitCount(), meta.assigneesText(), meta.reviewersText(),
                     meta.detailedMergeStatus(), meta.divergedCommitsCount(), meta.hasConflicts());
         } catch (Exception e) {
@@ -263,7 +295,7 @@ public class Reviewer {
         }
         // Adopt hand-resolves first: a finding a human signed off is closed, and the cycle,
         // the open count and the approval decision below must all see that.
-        List<GitLabClient.DiscussionView> threads = listThreads(project, review.mrIid());
+        List<DiscussionView> threads = listThreads(project, review.mrIid());
         adoptHumanResolves(project, review.mrIid(), threads);
         int open = store.openFindings(project.id(), review.mrIid()).size();
         MrStatus.Status status = open == 0 ? MrStatus.Status.CLEAN : MrStatus.Status.NEEDS_WORK;
@@ -271,22 +303,34 @@ public class Reviewer {
                 review.id(), review.headSha(), open);
         // The in-memory review still has null discussion ids until markReady; re-read.
         Review posted = store.findReview(review.id()).orElse(review);
-        syncGitlabThreads(project, posted, open == 0, threads);
+        syncForgeThreads(project, posted, open == 0, threads);
         if (!project.autoApprove()) {
+            return;
+        }
+        ForgeCapabilities caps = can(project);
+        if (!caps.approve()) {
+            log.info("auto-approve is on for {} but its host cannot approve — skipping",
+                    project.name());
             return;
         }
         try {
             if (open == 0) {
-                gitlab.approve(project, review.mrIid());
+                forge(project).approve(project, review.mrIid());
                 store.markMrrApproved(project.id(), review.mrIid(), review.headSha());
                 log.info("approved {}!{} at {}", project.name(), review.mrIid(),
                         review.headSha().substring(0, 8));
             } else {
                 MrStatus current = store.findMrStatus(project.id(), review.mrIid()).orElse(null);
                 if (current != null && current.mrrApproved()) {
-                    gitlab.unapprove(project, review.mrIid());
+                    // Approval semantics do not commute. A host with no unapprove dismisses
+                    // mrr's own approving review instead, which is why the reason travels with
+                    // the call — a dismissal without one reads as an unexplained override in
+                    // an audit log, and mrr should never be the author of that.
+                    forge(project).unapprove(project, review.mrIid(),
+                            "mrr reopened " + open + " finding(s) on " + shortSha(review.headSha()));
                     store.clearMrrApproved(project.id(), review.mrIid());
-                    log.info("unapproved {}!{} — {} finding(s) still open",
+                    log.info("{} {}!{} — {} finding(s) still open",
+                            caps.unapprove() ? "unapproved" : "dismissed mrr's approval on",
                             project.name(), review.mrIid(), open);
                 }
             }
@@ -296,11 +340,25 @@ public class Reviewer {
         }
     }
 
-    /** Closes the thread a previous review opened, when this commit fixed what it reported. */
+    private static String shortSha(String sha) {
+        return sha == null ? "?" : sha.substring(0, Math.min(8, sha.length()));
+    }
+
+    /**
+     * Closes the thread a previous review opened, when this commit fixed what it reported.
+     *
+     * <p>On a host that cannot close threads the finding is <em>still</em> recorded
+     * {@code ADDRESSED} — internal state is never weakened by a host limitation — and the
+     * comment is edited to lead with a struck-through <b>Addressed</b> marker so the thread
+     * reads correctly to a human. Failing to mark it does not fail the review either: mrr's
+     * own record is the one that matters, and a stale-looking comment costs less than a
+     * dropped verdict.
+     */
     private void resolveAddressed(Project project, Review review, ReviewModel.Verdict verdict,
                                   List<Finding> priorOpen) {
         Map<String, Finding> byId = priorOpen.stream()
                 .collect(Collectors.toMap(Finding::id, f -> f, (a, b) -> a));
+        ForgeCapabilities caps = can(project);
 
         for (ReviewModel.PriorVerdict prior : verdict.priorVerdicts()) {
             if (!prior.addressed()) {
@@ -314,12 +372,18 @@ public class Reviewer {
             }
             try {
                 if (finding.discussionId() != null) {
-                    gitlab.resolveDiscussion(project, review.mrIid(), finding.discussionId());
+                    if (caps.resolvableThreads()) {
+                        forge(project).resolveDiscussion(project, review.mrIid(),
+                                finding.discussionId());
+                    } else {
+                        markAddressedInPlace(project, review.mrIid(), finding, caps);
+                    }
                 }
                 store.markAddressed(finding.id());
-                String sha = review.headSha() == null ? "?"
-                        : review.headSha().substring(0, Math.min(8, review.headSha().length()));
-                log.info("finding {} addressed by {} — thread resolved", finding.id(), sha);
+                log.info("finding {} addressed by {} — {}", finding.id(),
+                        shortSha(review.headSha()),
+                        caps.resolvableThreads() ? "thread resolved"
+                                : "thread marked (host cannot resolve)");
             } catch (Exception e) {
                 // A thread that will not resolve is not worth failing the review over.
                 log.warn("could not resolve thread for finding {}: {}", finding.id(), e.getMessage());
@@ -327,28 +391,53 @@ public class Reviewer {
         }
     }
 
-    /** One thread per finding, anchored to the diff line where GitLab will accept it. */
+    /**
+     * The named degradation for a host with no conversation-resolve: edit the comment rather
+     * than pretend it closed. Silently diverging from the host is the one outcome that is not
+     * acceptable — mrr's whole claim is that its thread state and the host's agree, so where
+     * they cannot, the comment says so out loud.
+     */
+    private void markAddressedInPlace(Project project, long mrIid, Finding finding,
+                                      ForgeCapabilities caps) {
+        if (!caps.editComment() || finding.noteId() == null) {
+            return;
+        }
+        try {
+            forge(project).updateDiscussionNote(project, mrIid, finding.discussionId(),
+                    finding.noteId(), Prompts.withAddressedMarker(finding.body()));
+        } catch (Exception e) {
+            log.warn("could not mark finding {} addressed in place: {}",
+                    finding.id(), e.getMessage());
+        }
+    }
+
+    /** One thread per finding, anchored to the diff line where the host will accept it. */
     private List<Finding> openThreads(Project project, Review review, ReviewModel.Verdict verdict) {
         if (verdict.findings().isEmpty()) {
             return List.of();
         }
-        Optional<GitLabClient.DiffRefs> refs = gitlab.diffRefs(project, review.mrIid());
+        Forge forge = forge(project);
+        // The anchor is whatever this host needs — three SHAs on GitLab, a head commit on
+        // GitHub, a line position on Forgejo. It is opaque between here and the post.
+        Optional<AnchorRef> refs = can(project).inlineThreads()
+                ? forge.diffRefs(project, review.mrIid())
+                : Optional.empty();
         List<Finding> opened = new ArrayList<>();
 
         for (ReviewModel.NewFinding found : verdict.findings()) {
             String body = Prompts.findingComment(found);
 
-            Optional<GitLabClient.Discussion> inline = Optional.empty();
+            Optional<Discussion> inline = Optional.empty();
             if (refs.isPresent() && found.file() != null && found.line() != null) {
                 // Position reject is routine (unchanged line, invented path) and returns empty.
-                // A GitLab outage or 5xx still throws — that must fail the review, not drop
+                // A host outage or 5xx still throws — that must fail the review, not drop
                 // the finding.
-                inline = gitlab.postInlineDiscussion(project, review.mrIid(), refs.get(),
+                inline = forge.postInlineDiscussion(project, review.mrIid(), refs.get(),
                         found.file(), found.line(), body);
             }
 
-            GitLabClient.Discussion discussion = inline.orElseGet(
-                    () -> gitlab.postDiscussion(project, review.mrIid(), body));
+            Discussion discussion = inline.orElseGet(
+                    () -> forge.postDiscussion(project, review.mrIid(), body));
 
             opened.add(store.createFinding(new Finding(
                     Ids.newId(), review.id(), project.id(), review.mrIid(),
@@ -377,11 +466,18 @@ public class Reviewer {
             }
         }
 
-        if (discussionId != null && noteId != null) {
-            gitlab.updateDiscussionNote(project, review.mrIid(), discussionId, noteId, markdown);
+        // A host that cannot edit its own comments would repost the overview on every commit,
+        // which is exactly the noise the one-thread rule exists to prevent. There it is posted
+        // once and left; the per-finding threads still carry the detail.
+        if (discussionId != null && noteId != null && can(project).editComment()) {
+            forge(project).updateDiscussionNote(project, review.mrIid(), discussionId, noteId,
+                    markdown);
+        } else if (discussionId != null && noteId != null) {
+            log.info("overview on {}!{} left as posted — this host cannot edit a comment",
+                    project.name(), review.mrIid());
         } else {
-            GitLabClient.Discussion posted =
-                    gitlab.postDiscussion(project, review.mrIid(), markdown);
+            Discussion posted =
+                    forge(project).postDiscussion(project, review.mrIid(), markdown);
             discussionId = posted.discussionId();
             noteId = posted.noteId();
         }
@@ -399,11 +495,19 @@ public class Reviewer {
      * already resolved. Only write when the listed state actually differs. An id the
      * list did not return is left alone — that is how a first-page miss used to
      * re-resolve the overview every two minutes.
+     *
+     * <p>Skipped entirely on a host that cannot close a thread. There is no equivalent of the
+     * "all threads resolved" merge gate there either — the analogue is a CHANGES_REQUESTED
+     * review plus branch protection, which is a repository setting mrr does not own — so this
+     * would be writes with nothing on the other end.
      */
-    private void syncGitlabThreads(Project project, Review review, boolean clean,
-                                   List<GitLabClient.DiscussionView> threads) {
+    private void syncForgeThreads(Project project, Review review, boolean clean,
+                                  List<DiscussionView> threads) {
+        if (!can(project).resolvableThreads()) {
+            return;
+        }
         Map<String, Boolean> current = new LinkedHashMap<>();
-        for (GitLabClient.DiscussionView thread : threads) {
+        for (DiscussionView thread : threads) {
             current.put(thread.discussionId(), thread.resolved());
         }
         syncOverviewResolved(project, review, clean, threads, current);
@@ -411,9 +515,9 @@ public class Reviewer {
     }
 
     /** One listing per sync: adoption and the resolve/reopen pass read the same snapshot. */
-    private List<GitLabClient.DiscussionView> listThreads(Project project, long mrIid) {
+    private List<DiscussionView> listThreads(Project project, long mrIid) {
         try {
-            return gitlab.listDiscussions(project, mrIid);
+            return forge(project).listDiscussions(project, mrIid);
         } catch (Exception e) {
             log.warn("could not list discussions on {}!{}: {}",
                     project.name(), mrIid, e.getMessage());
@@ -436,9 +540,9 @@ public class Reviewer {
      * @return true when at least one finding changed state
      */
     private boolean adoptHumanResolves(Project project, long mrIid,
-                                       List<GitLabClient.DiscussionView> threads) {
+                                       List<DiscussionView> threads) {
         Map<String, String> resolvers = new LinkedHashMap<>();
-        for (GitLabClient.DiscussionView thread : threads) {
+        for (DiscussionView thread : threads) {
             if (thread.resolved() && thread.resolvedBy() != null) {
                 resolvers.put(thread.discussionId(), thread.resolvedBy());
             }
@@ -479,7 +583,7 @@ public class Reviewer {
      */
     private String botUsername(Project project) {
         try {
-            return gitlab.tokenUsername(project);
+            return forge(project).tokenUsername(project);
         } catch (RuntimeException e) {
             log.warn("could not read the GitLab token user for {} — adopting resolves anyway: {}",
                     project.name(), e.getMessage());
@@ -496,12 +600,12 @@ public class Reviewer {
         if (now == null || now == resolve) {
             return;
         }
-        gitlab.setDiscussionResolved(project, mrIid, discussionId, resolve);
+        forge(project).setDiscussionResolved(project, mrIid, discussionId, resolve);
         current.put(discussionId, resolve);
     }
 
     private void syncOverviewResolved(Project project, Review review, boolean clean,
-                                      List<GitLabClient.DiscussionView> threads,
+                                      List<DiscussionView> threads,
                                       Map<String, Boolean> current) {
         String live = store.findOverview(project.id(), review.mrIid())
                 .map(Store.Overview::discussionId)
@@ -511,7 +615,7 @@ public class Reviewer {
         if (live != null) {
             overviews.add(live);
         }
-        for (GitLabClient.DiscussionView thread : threads) {
+        for (DiscussionView thread : threads) {
             if (!thread.system() && thread.resolvable() && Prompts.isOverview(thread.body())) {
                 overviews.add(thread.discussionId());
             }
@@ -529,11 +633,11 @@ public class Reviewer {
     }
 
     /**
-     * Make GitLab's leftover overview threads match this MR's current cycle, without
+     * Make the host's leftover overview threads match this MR's current cycle, without
      * calling the model. Used by the scan so a boot race does not stay visible until
      * the next push.
      */
-    public void alignGitlab(Project project, long mrIid) {
+    public void alignForge(Project project, long mrIid) {
         MrStatus status = store.findMrStatus(project.id(), mrIid).orElse(null);
         if (status == null || status.currentStatus().isClosed()) {
             return;
@@ -551,7 +655,7 @@ public class Reviewer {
                     null, null, Instant.now(), null, 0, null);
         }
         synchronized (lockFor(project.id(), mrIid)) {
-            List<GitLabClient.DiscussionView> threads = listThreads(project, mrIid);
+            List<DiscussionView> threads = listThreads(project, mrIid);
             int open = status.openFindings();
             if (adoptHumanResolves(project, mrIid, threads)) {
                 open = store.openFindings(project.id(), mrIid).size();
@@ -559,7 +663,7 @@ public class Reviewer {
                         open == 0 ? MrStatus.Status.CLEAN : MrStatus.Status.NEEDS_WORK,
                         status.latestReviewId(), status.latestHeadSha(), open);
             }
-            syncGitlabThreads(project, review, open == 0, threads);
+            syncForgeThreads(project, review, open == 0, threads);
         }
     }
 
@@ -603,9 +707,14 @@ public class Reviewer {
                 r.id(), r.headSha(), store.openFindings(r.projectId(), r.mrIid()).size()));
     }
 
+    /**
+     * {@code gitlab_error} is still matched because it is what pre-multi-forge code emitted and
+     * what sits in {@code reviews.error_kind} on historical rows; new failures are FORGE.
+     */
     private static FailureKind kindOf(Exception e) {
-        if (e instanceof ApiException api && "gitlab_error".equals(api.code())) {
-            return FailureKind.GITLAB;
+        if (e instanceof ApiException api
+                && ("forge_error".equals(api.code()) || "gitlab_error".equals(api.code()))) {
+            return FailureKind.FORGE;
         }
         return FailureKind.of(e);
     }
@@ -639,7 +748,7 @@ public class Reviewer {
     private record Ask(ReviewModel.Result result, AgentTrace trace, int turns, int slices) {
     }
 
-    private Ask askModel(Review review, Project project, GitLabClient.Diff diff,
+    private Ask askModel(Review review, Project project, Diff diff,
                          List<Finding> priorOpen, List<AgentDocument> documents,
                          String userContext, String system,
                          List<ReviewModel.ToolSpec> tools,
@@ -651,7 +760,7 @@ public class Reviewer {
 
         if (slices.size() <= 1) {
             DiffWindows.Slice slice = slices.getFirst();
-            GitLabClient.Diff view = diff.forSlice(slice.paths(), slice.text(), slice.clipped());
+            Diff view = diff.forSlice(slice.paths(), slice.text(), slice.clipped());
             String user = Prompts.user(view, priorOpen, documents, maxDoc, userContext);
             store.markProcessing(reviewId, system + "\n\n---\n\n" + user);
             log.info("review {} calling {} / {} — {} file(s), {} chars{}, max_turns={}, branch={}",
@@ -731,7 +840,7 @@ public class Reviewer {
                 String path = args.path("path").asText(null);
                 Integer start = args.path("start_line").isIntegralNumber() ? args.path("start_line").asInt() : null;
                 Integer end = args.path("end_line").isIntegralNumber() ? args.path("end_line").asInt() : null;
-                String result = gitlab.fileAt(project, path, headSha, start, end,
+                String result = forge(project).fileAt(project, path, headSha, start, end,
                         settings.review().maxFileChars());
                 log.info("review {} tool {} {} {} chars",
                         reviewId, name, path == null ? "" : path, result.length());

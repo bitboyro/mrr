@@ -6,6 +6,7 @@ import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
+import ro.bitboy.mrr.model.ForgeKind;
 import ro.bitboy.mrr.model.User;
 import ro.bitboy.mrr.store.BundledSkills;
 import ro.bitboy.mrr.store.Store;
@@ -37,7 +38,8 @@ public class Defaults implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) {
-        if (store.ensureSharedGitlabInstance("gitlab.com", "https://gitlab.com")) {
+        if (store.ensureSharedForgeInstance("gitlab.com", ForgeKind.GITLAB,
+                "https://gitlab.com")) {
             log.info("defaults: added the shared gitlab.com catalog entry");
         }
         for (User user : store.listUsers()) {

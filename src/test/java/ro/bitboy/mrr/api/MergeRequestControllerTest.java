@@ -3,17 +3,21 @@ package ro.bitboy.mrr.api;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import ro.bitboy.mrr.FakeGitLab;
+import ro.bitboy.mrr.FakeForge;
 import ro.bitboy.mrr.FakeMemory;
 import ro.bitboy.mrr.TestStores;
 import ro.bitboy.mrr.auth.Principal;
-import ro.bitboy.mrr.gitlab.GitLabClient;
+import ro.bitboy.mrr.forge.Discussion;
+import ro.bitboy.mrr.forge.FilePatch;
+import ro.bitboy.mrr.forge.MergeRequest;
+import ro.bitboy.mrr.forge.MrCommit;
 import ro.bitboy.mrr.model.MrStatus;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.User;
 import ro.bitboy.mrr.store.Store;
 import ro.bitboy.mrr.web.ApiException;
+import ro.bitboy.mrr.forge.ForgeFactory;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -28,7 +32,7 @@ class MergeRequestControllerTest {
     Path tempDir;
 
     private Store store;
-    private FakeGitLab gitlab;
+    private FakeForge gitlab;
     private FakeMemory memory;
     private MergeRequestController controller;
     private Principal alice;
@@ -41,9 +45,9 @@ class MergeRequestControllerTest {
         alice = new Principal(user.id(), user.name(), user.role());
         project = TestStores.persist(store, TestStores.project(user.id(), "calc", "secret"));
         store.upsertMrStatus(project.id(), 7, MrStatus.Status.CLEAN, null, "sha", 0);
-        gitlab = new FakeGitLab();
+        gitlab = new FakeForge();
         memory = new FakeMemory();
-        controller = new MergeRequestController(store, gitlab, memory);
+        controller = new MergeRequestController(store, ForgeFactory.fixed(gitlab), memory);
     }
 
     @Test
@@ -59,7 +63,7 @@ class MergeRequestControllerTest {
         store.updateProject(withOperator(project, "glpat-operator"));
         project = store.findProject(project.id()).orElseThrow();
 
-        GitLabClient.MergeRequest merged = controller.merge(alice, project.id(), 7);
+        MergeRequest merged = controller.merge(alice, project.id(), 7);
 
         assertThat(merged.state()).isEqualTo("merged");
         assertThat(gitlab.merges).isEqualTo(1);
@@ -73,7 +77,7 @@ class MergeRequestControllerTest {
     void overallThreadUsesTheOperatorToken() {
         store.updateProject(withOperator(project, "glpat-operator"));
 
-        GitLabClient.Discussion posted = controller.postThread(alice, project.id(), 7,
+        Discussion posted = controller.postThread(alice, project.id(), 7,
                 new MergeRequestController.ThreadUpsert("Looks good."));
 
         assertThat(posted.discussionId()).isEqualTo("ov-1");
@@ -83,7 +87,7 @@ class MergeRequestControllerTest {
 
     @Test
     void commitListUsesTheReviewToken() {
-        gitlab.commits = List.of(new GitLabClient.MrCommit("abc", "msg", "Ada", "t", "msg"));
+        gitlab.commits = List.of(new MrCommit("abc", "msg", "Ada", "t", "msg"));
 
         var commits = controller.commits(alice, project.id(), 7);
 
@@ -94,8 +98,8 @@ class MergeRequestControllerTest {
     @Test
     void listingFilesCarriesNoPatchBodies() {
         gitlab.commitPatches = List.of(
-                new GitLabClient.FilePatch("A.java", "@@\n+int x;"),
-                new GitLabClient.FilePatch("B.java", "@@\n+int y;"));
+                new FilePatch("A.java", "@@\n+int x;"),
+                new FilePatch("B.java", "@@\n+int y;"));
 
         assertThat(controller.commitFiles(alice, project.id(), 7, "abc"))
                 .containsExactly("A.java", "B.java");
@@ -105,10 +109,10 @@ class MergeRequestControllerTest {
     @Test
     void unveilingAFileFetchesThatFileAlone() {
         gitlab.commitPatches = List.of(
-                new GitLabClient.FilePatch("A.java", "@@\n+int x;"),
-                new GitLabClient.FilePatch("B.java", "@@\n+int y;"));
+                new FilePatch("A.java", "@@\n+int x;"),
+                new FilePatch("B.java", "@@\n+int y;"));
 
-        GitLabClient.FilePatch patch =
+        FilePatch patch =
                 controller.commitFilePatch(alice, project.id(), 7, "abc", "B.java");
 
         assertThat(patch.path()).isEqualTo("B.java");
@@ -118,7 +122,7 @@ class MergeRequestControllerTest {
 
     @Test
     void unveilingAFileTheCommitDidNotTouchIs404() {
-        gitlab.commitPatches = List.of(new GitLabClient.FilePatch("A.java", "@@\n+int x;"));
+        gitlab.commitPatches = List.of(new FilePatch("A.java", "@@\n+int x;"));
 
         assertThatThrownBy(() -> controller.commitFilePatch(alice, project.id(), 7, "abc", "Z.java"))
                 .isInstanceOf(ApiException.class)
@@ -126,7 +130,7 @@ class MergeRequestControllerTest {
     }
 
     private static Project withOperator(Project p, String token) {
-        return new Project(p.id(), p.ownerId(), p.name(), p.enabled(), p.gitlabUrl(),
+        return new Project(p.id(), p.ownerId(), p.name(), p.enabled(), p.forge(), p.gitlabUrl(),
                 p.gitlabProjectId(), p.gitlabToken(), token, p.webhookSecret(),
                 p.llmProviderId(), p.llm(), p.skill(), p.skipDrafts(),
                 p.agentMaxTurns(), p.agentTools(), p.autoApprove(), p.librarianEnabled(),

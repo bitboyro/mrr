@@ -1,4 +1,4 @@
-package ro.bitboy.mrr.gitlab;
+package ro.bitboy.mrr.forge.gitlab;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -8,7 +8,7 @@ import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-class WebhookPayloadTest {
+class GitLabWebhookTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -40,7 +40,7 @@ class WebhookPayloadTest {
 
     @Test
     void liftsTheMergeRequestSnapshotOutOfADelivery() throws Exception {
-        MergeRequestInfo mr = WebhookPayload.mergeRequestInfo(MAPPER.readTree(FULL));
+        MergeRequestInfo mr = GitLabWebhook.mergeRequestInfo(MAPPER.readTree(FULL));
 
         assertThat(mr.title()).isEqualTo("Guard against divide by zero");
         assertThat(mr.url()).isEqualTo("https://gitlab.com/eng/calc/-/merge_requests/42");
@@ -72,10 +72,10 @@ class WebhookPayloadTest {
     void readsTheSchedulingFieldsUsedBeforeAnythingIsPersisted() throws Exception {
         var body = MAPPER.readTree(FULL);
 
-        assertThat(WebhookPayload.objectKind(body)).isEqualTo("merge_request");
-        assertThat(WebhookPayload.action(body)).isEqualTo("update");
-        assertThat(WebhookPayload.mrIid(body)).isEqualTo(42);
-        assertThat(WebhookPayload.headSha(body)).isEqualTo("cafe1234deadbeef");
+        assertThat(GitLabWebhook.objectKind(body)).isEqualTo("merge_request");
+        assertThat(GitLabWebhook.action(body)).isEqualTo("update");
+        assertThat(GitLabWebhook.mrIid(body)).isEqualTo(42);
+        assertThat(GitLabWebhook.headSha(body)).isEqualTo("cafe1234deadbeef");
     }
 
     /**
@@ -89,7 +89,7 @@ class WebhookPayloadTest {
                  "object_attributes":{"iid":7,"action":"open","last_commit":{"id":"abc"}}}
                 """);
 
-        MergeRequestInfo mr = WebhookPayload.mergeRequestInfo(body);
+        MergeRequestInfo mr = GitLabWebhook.mergeRequestInfo(body);
 
         assertThat(mr.action()).isEqualTo("open");
         assertThat(mr.title()).isNull();
@@ -97,12 +97,12 @@ class WebhookPayloadTest {
         assertThat(mr.actorName()).isNull();
         assertThat(mr.commitAt()).isNull();
         assertThat(mr.labels()).isNull();
-        assertThat(WebhookPayload.headSha(body)).isEqualTo("abc");
+        assertThat(GitLabWebhook.headSha(body)).isEqualTo("abc");
     }
 
     @Test
     void apiEnrichmentFillsGapsWithoutOverwritingWebhookOnlyFacts() throws Exception {
-        MergeRequestInfo fromHook = WebhookPayload.mergeRequestInfo(MAPPER.readTree(FULL));
+        MergeRequestInfo fromHook = GitLabWebhook.mergeRequestInfo(MAPPER.readTree(FULL));
 
         MergeRequestInfo enriched = fromHook.enrichedWith(
                 "Guard against divide by zero", "https://gitlab.com/eng/calc/-/merge_requests/42",
@@ -121,7 +121,7 @@ class WebhookPayloadTest {
 
     @Test
     void enrichmentDoesNotBlankFieldsTheApiOmits() throws Exception {
-        MergeRequestInfo fromHook = WebhookPayload.mergeRequestInfo(MAPPER.readTree(FULL));
+        MergeRequestInfo fromHook = GitLabWebhook.mergeRequestInfo(MAPPER.readTree(FULL));
 
         MergeRequestInfo enriched = fromHook.enrichedWith(null, null, null, null, null, null, null);
 
@@ -131,7 +131,7 @@ class WebhookPayloadTest {
 
     @Test
     void fallsBackToMergeStatusWhenDetailedStatusIsMissing() throws Exception {
-        MergeRequestInfo mr = WebhookPayload.mergeRequestInfo(MAPPER.readTree("""
+        MergeRequestInfo mr = GitLabWebhook.mergeRequestInfo(MAPPER.readTree("""
                 {"object_kind":"merge_request",
                  "object_attributes":{"iid":1,"action":"open","last_commit":{"id":"a"},
                    "merge_status":"cannot_be_merged","has_conflicts":true}}

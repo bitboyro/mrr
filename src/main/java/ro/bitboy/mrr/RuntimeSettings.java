@@ -2,6 +2,7 @@ package ro.bitboy.mrr;
 
 import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Component;
+import ro.bitboy.mrr.model.ForgeKind;
 import ro.bitboy.mrr.store.Store;
 import ro.bitboy.mrr.web.Urls;
 
@@ -64,14 +65,21 @@ public class RuntimeSettings {
         return str(BASE_URL, defaults.baseUrl()).replaceAll("/+$", "");
     }
 
-    /** Paste into GitLab *Settings → Webhooks* for this project. */
-    public String webhookUrl(String projectId) {
-        return baseUrl() + "/webhooks/gitlab/" + projectId;
+    /**
+     * Paste into the project's webhook settings on its forge.
+     *
+     * <p>The {@code gitlab} form of this URL is permanent — every hook already registered in a
+     * GitLab UI points at it, and mrr does not create hooks — so an existing project keeps the
+     * URL it was given.
+     */
+    public String webhookUrl(ForgeKind forge, String projectId) {
+        return baseUrl() + "/webhooks/"
+                + (forge == null ? ForgeKind.DEFAULT : forge).slug() + "/" + projectId;
     }
 
-    /** Shown before create, when the project id is not yet assigned. */
+    /** Shown before create, when neither the forge nor the project id is settled. */
     public String webhookUrlTemplate() {
-        return baseUrl() + "/webhooks/gitlab/{projectId}";
+        return baseUrl() + "/webhooks/{forge}/{projectId}";
     }
 
     public long scanIntervalMs() {

@@ -5,8 +5,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
-import ro.bitboy.mrr.FakeGitLab;
+import ro.bitboy.mrr.FakeForge;
 import ro.bitboy.mrr.FakeMemory;
 import ro.bitboy.mrr.FakeReplier;
 import ro.bitboy.mrr.FakeReviewer;
@@ -20,12 +21,14 @@ import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.User;
 import ro.bitboy.mrr.store.Store;
 import ro.bitboy.mrr.web.ApiException;
+import ro.bitboy.mrr.forge.ForgeFactory;
 
 import java.nio.file.Path;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 class WebhookControllerTest {
 
@@ -39,7 +42,7 @@ class WebhookControllerTest {
     private FakeReviewer reviewer;
     private FakeReplier replier;
     private FakeMemory memory;
-    private FakeGitLab gitlab;
+    private FakeForge gitlab;
     private WebhookController webhooks;
     private Project project;
 
@@ -51,13 +54,13 @@ class WebhookControllerTest {
         reviewer = new FakeReviewer();
         replier = new FakeReplier();
         memory = new FakeMemory();
-        gitlab = new FakeGitLab();
-        webhooks = new WebhookController(store, reviewer, replier, memory, gitlab, MAPPER);
+        gitlab = new FakeForge();
+        webhooks = new WebhookController(store, reviewer, replier, memory, ForgeFactory.fixed(gitlab), MAPPER);
     }
 
     @Test
     void rejectsABadWebhookToken() {
-        ResponseEntity<?> response = webhooks.receive(project.id(), "wrong", mr("open", "sha-1"));
+        ResponseEntity<?> response = webhooks.receive("gitlab", project.id(), headers("wrong"), mr("open", "sha-1"));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
         assertThat(reviewer.submitted).isEmpty();
@@ -65,7 +68,7 @@ class WebhookControllerTest {
 
     @Test
     void anOpenEventClaimsAndSubmits() {
-        ResponseEntity<?> response = webhooks.receive(project.id(), SECRET, mr("open", "sha-open"));
+        ResponseEntity<?> response = webhooks.receive("gitlab", project.id(), headers(SECRET), mr("open", "sha-open"));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
         Review review = store.findReview(project.id(), 42, "sha-open").orElseThrow();
@@ -79,7 +82,7 @@ class WebhookControllerTest {
     void anUpdateWithTheSameShaIsIgnored() {
         store.claimReview(project.id(), 42, "sha-same", "{}", TestStores.mrInfo());
 
-        ResponseEntity<?> response = webhooks.receive(project.id(), SECRET, mr("update", "sha-same"));
+        ResponseEntity<?> response = webhooks.receive("gitlab", project.id(), headers(SECRET), mr("update", "sha-same"));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).extracting("reason").isEqualTo("no_new_commit");
@@ -92,7 +95,7 @@ class WebhookControllerTest {
                 .review().id();
         store.upsertMrStatus(project.id(), 42, MrStatus.Status.REVIEWING, id, "sha-run", 0);
 
-        ResponseEntity<?> response = webhooks.receive(project.id(), SECRET, mr("merge", "sha-run"));
+        ResponseEntity<?> response = webhooks.receive("gitlab", project.id(), headers(SECRET), mr("merge", "sha-run"));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(store.findReview(id).orElseThrow().state()).isEqualTo(Review.State.CANCELLED);
@@ -110,7 +113,7 @@ class WebhookControllerTest {
                 "A.java", 3, Finding.Severity.MAJOR, "title", "body",
                 "disc-1", "note-1", true, Finding.State.OPEN, Instant.now(), null));
 
-        ResponseEntity<?> response = webhooks.receive(project.id(), SECRET, note(false));
+        ResponseEntity<?> response = webhooks.receive("gitlab", project.id(), headers(SECRET), note(false));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
         assertThat(replier.calls).containsExactly(
@@ -125,7 +128,7 @@ class WebhookControllerTest {
                 "A.java", 3, Finding.Severity.MAJOR, "title", "body",
                 "disc-1", "note-1", true, Finding.State.OPEN, Instant.now(), null));
 
-        ResponseEntity<?> response = webhooks.receive(project.id(), SECRET, note(true));
+        ResponseEntity<?> response = webhooks.receive("gitlab", project.id(), headers(SECRET), note(true));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).extracting("reason").isEqualTo("system_note");
@@ -140,7 +143,7 @@ class WebhookControllerTest {
                 "A.java", 3, Finding.Severity.MAJOR, "title", "body",
                 "disc-1", "note-1", true, Finding.State.OPEN, Instant.now(), null));
 
-        ResponseEntity<?> response = webhooks.receive(project.id(), SECRET, note(false, "mrr-bot"));
+        ResponseEntity<?> response = webhooks.receive("gitlab", project.id(), headers(SECRET), note(false, "mrr-bot"));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).extracting("reason").isEqualTo("own_note");
@@ -149,12 +152,72 @@ class WebhookControllerTest {
 
     @Test
     void aPayloadWithoutIidIsRejected() {
-        assertThatThrownBy(() -> webhooks.receive(project.id(), SECRET, """
+        assertThatThrownBy(() -> webhooks.receive("gitlab", project.id(), headers(SECRET), """
                 {"object_kind":"merge_request","object_attributes":{"action":"open","iid":0}}
                 """))
                 .isInstanceOf(ApiException.class)
                 .extracting(e -> ((ApiException) e).status())
                 .isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    // ── forge routing ────────────────────────────────────────────────────────────────
+
+    @Test
+    void theLegacyGitlabPathKeepsWorkingForever() {
+        // Every hook already registered in a GitLab UI points at /webhooks/gitlab/{id}, and mrr
+        // does not create hooks — so this URL can never be retired.
+        ResponseEntity<?> response =
+                webhooks.receive("gitlab", project.id(), headers(SECRET), mr("open", "sha-legacy"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(202);
+    }
+
+    @Test
+    void aPathNamingADifferentForgeIsRefusedWithSomethingToActOn() {
+        // Not a rejected signature: routing a GitLab project's hooks at the GitHub path would
+        // check the wrong header and 401 every delivery with nothing to point at.
+        assertThatThrownBy(() ->
+                webhooks.receive("github", project.id(), headers(SECRET), mr("open", "sha-x")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(e.getMessage())
+                        .contains("registered on GITLAB")
+                        .contains("/webhooks/gitlab/" + project.id()));
+    }
+
+    @Test
+    void aPathNamingNoForgeMrrKnowsIsRejected() {
+        assertThatThrownBy(() ->
+                webhooks.receive("bitbucket", project.id(), headers(SECRET), mr("open", "sha-y")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
+    }
+
+    /**
+     * Regression: an unknown forge slug used to be checked after the project lookup, so a real
+     * project id answered 200 ("ignored") and a made-up one answered 404 — an unauthenticated
+     * caller could use that difference to find out which project ids exist, exactly what the
+     * 404-not-401 choice on a missing project exists to prevent. Both must now fail identically.
+     */
+    @Test
+    void anUnknownForgeSlugFailsTheSameWayWhetherOrNotTheProjectExists() {
+        Throwable realProject = catchThrowable(() ->
+                webhooks.receive("bitbucket", project.id(), headers(SECRET), mr("open", "sha-y")));
+        Throwable madeUpProject = catchThrowable(() ->
+                webhooks.receive("bitbucket", "not-a-real-id", headers(SECRET), mr("open", "sha-y")));
+
+        assertThat(realProject).isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
+        assertThat(madeUpProject).isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
+    }
+
+    /** The one header GitLab authenticates with, as it arrives on a real delivery. */
+    private static HttpHeaders headers(String token) {
+        HttpHeaders headers = new HttpHeaders();
+        if (token != null) {
+            headers.add("X-Gitlab-Token", token);
+        }
+        return headers;
     }
 
     private static String mr(String action, String sha) {

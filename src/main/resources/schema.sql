@@ -65,7 +65,13 @@ CREATE TABLE IF NOT EXISTS projects (
     name              TEXT NOT NULL,
     enabled           INTEGER NOT NULL DEFAULT 1,
 
-    -- GitLab: base_url is what makes self-hosted work. Never hardcode gitlab.com.
+    -- Which host this project's merge requests live on: GITLAB | FORGEJO | GITHUB. One
+    -- project is bound to one remote; mirroring across two hosts means registering it twice.
+    forge             TEXT NOT NULL DEFAULT 'GITLAB',
+    -- The forge base URL, whichever forge that is: this is what makes self-hosted work. The
+    -- gitlab_* names are deliberate debt — they are the API field names and are baked into
+    -- docs/openapi.json, docs/mcp-tools.json and the UI, so renaming them would mean a
+    -- dual-read deprecation window across all four for a cosmetic gain.
     gitlab_url        TEXT NOT NULL,
     gitlab_project_id TEXT NOT NULL,
     -- The secret columns. Sealed by SecretBox when a key is configured, so their contents
@@ -336,23 +342,23 @@ CREATE TABLE IF NOT EXISTS library_seeds (
     PRIMARY KEY (owner_id, name)
 );
 
--- Named GitLab hosts (URL only — PATs stay on the project).
--- Named GitLab endpoints. Scoped the same way as llm_providers, minus the key: these
--- hold only a URL, but a user's own list should not be everyone's.
-CREATE TABLE IF NOT EXISTS gitlab_instances (
+-- Named forge hosts. Was gitlab_instances, whose rows SchemaPatch migrates in as GITLAB;
+-- GET /api/gitlab-instances stays as a permanent alias for the clients that call it.
+CREATE TABLE IF NOT EXISTS forge_instances (
     id         TEXT PRIMARY KEY,
     owner_id   TEXT REFERENCES users(id),            -- NULL = shared, curated by an admin
     name       TEXT NOT NULL,
+    kind       TEXT NOT NULL DEFAULT 'GITLAB',       -- GITLAB | FORGEJO | GITHUB
     url        TEXT NOT NULL,
     created_at TEXT NOT NULL,
     UNIQUE (owner_id, name)
 );
 
-CREATE INDEX IF NOT EXISTS idx_gitlab_instances_owner ON gitlab_instances(owner_id);
+CREATE INDEX IF NOT EXISTS idx_forge_instances_owner ON forge_instances(owner_id);
 
 -- UNIQUE (owner_id, name) does not constrain shared rows: both backends treat NULLs as
 -- distinct in a unique index, so every shared entry has a "different" owner. This is what
 -- actually keeps their names unique.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_gitlab_instances_shared_name
-    ON gitlab_instances(name) WHERE owner_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_forge_instances_shared_name
+    ON forge_instances(name) WHERE owner_id IS NULL;
 

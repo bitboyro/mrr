@@ -6,10 +6,26 @@ const TOKEN_KEY = "mrr.token";
 
 type Me = { userId: string; name: string; role: "ADMIN" | "USER" };
 type Provider = "ANTHROPIC" | "OPENAI_COMPAT";
+// Which host a project's merge requests live on. Not to be confused with `Provider`, which is
+// the LLM vendor — the API keeps that name for the model and calls this one `forge`.
+type ForgeKind = "GITLAB" | "FORGEJO" | "GITHUB";
+const FORGE_NAMES: Record<ForgeKind, string> = {
+  GITLAB: "GitLab",
+  FORGEJO: "Forgejo / Gitea / Codeberg",
+  GITHUB: "GitHub",
+};
+// `gitlabUrl` / `gitlabToken` are the forge base URL and token whichever forge this is. The
+// names are kept because they are baked into the API, the MCP tools and this file.
+const REPO_ID_HINT: Record<ForgeKind, string> = {
+  GITLAB: "numeric id or group/project",
+  FORGEJO: "owner/repo",
+  GITHUB: "owner/repo",
+};
 type Project = {
   id: string;
   name: string;
   enabled: boolean;
+  forge: ForgeKind;
   gitlabUrl: string;
   gitlabProjectId: string;
   gitlabToken?: string | null;
@@ -165,7 +181,15 @@ type LibrarySkill = {
   createdAt: string;
   updatedAt: string;
 };
-type GitlabInstance = { id: string; ownerId: string | null; name: string; url: string; createdAt: string };
+type ForgeInstance = {
+  id: string; ownerId: string | null; name: string; kind: ForgeKind; url: string; createdAt: string;
+};
+type ForgeReport = {
+  forge: ForgeKind;
+  forgeName: string;
+  baseUrl: string;
+  requirements: { name: string; title: string; status: "OK" | "MISSING" | "UNKNOWN"; detail: string }[];
+};
 type LlmProvider = {
   id: string;
   ownerId: string | null;   // null = shared entry, curated by an admin, never carries a key
@@ -804,6 +828,64 @@ function Projects() {
   );
 }
 
+/**
+ * What this project's host can and cannot do, checked when the page loads.
+ *
+ * <p>The point is that a limitation is known before the first review rather than discovered as
+ * a 403 an afternoon later — so this stays quiet when everything is supported and speaks up,
+ * with what mrr does instead, when something is not.
+ */
+function ForgeSupport({ projectId }: { projectId: string }) {
+  const [report, setReport] = useState<ForgeReport | null>(null);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    api<ForgeReport>(`/api/projects/${projectId}/forge`)
+      .then((r) => { if (live) setReport(r); })
+      .catch(() => { /* a probe that will not answer is not worth an error banner */ });
+    return () => { live = false; };
+  }, [projectId]);
+
+  if (!report) return null;
+  const gaps = report.requirements.filter((r) => r.status !== "OK");
+  if (gaps.length === 0) return null;
+
+  // A confirmed gap and an inconclusive probe are different claims — conflating them under
+  // one "does not support" would read as a certainty during a Forgejo outage or with its API
+  // docs disabled, when mrr genuinely could not tell either way.
+  const missing = gaps.filter((r) => r.status === "MISSING").length;
+  const unknown = gaps.length - missing;
+  const headline = missing === 0
+    ? `${report.forgeName} — mrr could not verify ${unknown} thing${unknown === 1 ? "" : "s"} its process uses`
+    : unknown === 0
+    ? `${report.forgeName} does not support ${missing} thing${missing === 1 ? "" : "s"} mrr's process uses`
+    : `${report.forgeName} does not support ${missing} thing${missing === 1 ? "" : "s"} mrr's process uses, `
+      + `and could not verify ${unknown} more`;
+
+  return (
+    <div className="callout">
+      <button className="link" onClick={() => setOpen(!open)}>
+        {open ? "▾" : "▸"} {headline}
+      </button>
+      {open && (
+        <table>
+          <thead><tr><th>Capability</th><th>Status</th><th>What mrr does</th></tr></thead>
+          <tbody>
+            {gaps.map((r) => (
+              <tr key={r.name}>
+                <td>{r.title}</td>
+                <td><span className="pill">{r.status.toLowerCase()}</span></td>
+                <td className="muted">{r.detail}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 function ProjectHome({ id }: { id: string }) {
   const [project, setProject] = useState<Project | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -825,7 +907,7 @@ function ProjectHome({ id }: { id: string }) {
         <button onClick={() => go(`/projects/${id}/edit`)}>Edit</button>
       </div>
       <p className="muted">
-        {project.gitlabUrl}/{project.gitlabProjectId} · {project.llm?.model ?? "no entry"}
+        {FORGE_NAMES[project.forge]} · {project.gitlabUrl}/{project.gitlabProjectId} · {project.llm?.model ?? "no entry"}
         {project.autoApprove ? " · auto-approve on" : ""}
         {project.librarianEnabled ? " · librarian on" : ""}
         {project.memoryStatus && project.memoryStatus !== "NONE" ? ` · memory ${project.memoryStatus}` : ""}
@@ -834,6 +916,7 @@ function ProjectHome({ id }: { id: string }) {
         {project.agentTools.length ? ` · tools ${project.agentTools.join(",")}` : ""}
       </p>
       <FailureBanner kind={project.lastErrorKind} message={project.lastError} />
+      <ForgeSupport projectId={id} />
       <div className="tabs">
         <button className={tab === "mrs" ? "on" : ""} onClick={() => setTab("mrs")}>Merge requests</button>
         <button className={tab === "memory" ? "on" : ""} onClick={() => setTab("memory")}>Memory</button>
@@ -1344,14 +1427,15 @@ function MemoryPanel({ project, onRefresh }: { project: Project; onRefresh: () =
 
 function ProjectForm({ id }: { id?: string }) {
   const [form, setForm] = useState({
-    name: "", gitlabUrl: "https://gitlab.com", gitlabProjectId: "", gitlabToken: "",
+    name: "", forge: "GITLAB" as ForgeKind,
+    gitlabUrl: "https://gitlab.com", gitlabProjectId: "", gitlabToken: "",
     gitlabOperatorToken: "", skill: "",
     skipDrafts: false, agentMaxTurns: 1, agentTools: "", autoApprove: false,
     librarianEnabled: false, enabled: true,
   });
   const [secret, setSecret] = useState<{ webhookUrl: string; webhookSecret: string } | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [gitlabInstances, setGitlabInstances] = useState<GitlabInstance[]>([]);
+  const [gitlabInstances, setGitlabInstances] = useState<ForgeInstance[]>([]);
   const [llmProviders, setLlmProviders] = useState<LlmProvider[]>([]);
   const [instance, setInstance] = useState<InstanceInfo | null>(null);
   const [gitlabPick, setGitlabPick] = useState("custom");
@@ -1359,7 +1443,7 @@ function ProjectForm({ id }: { id?: string }) {
 
   useEffect(() => {
     Promise.all([
-      api<GitlabInstance[]>("/api/gitlab-instances"),
+      api<ForgeInstance[]>("/api/forge-instances"),
       api<LlmProvider[]>("/api/llm-providers"),
       api<InstanceInfo>("/api/instance"),
     ]).then(([hosts, providers, info]) => {
@@ -1369,7 +1453,7 @@ function ProjectForm({ id }: { id?: string }) {
       if (id) return;
       if (hosts.length > 0) {
         setGitlabPick(hosts[0].id);
-        setForm((f) => ({ ...f, gitlabUrl: hosts[0].url }));
+        setForm((f) => ({ ...f, forge: hosts[0].kind, gitlabUrl: hosts[0].url }));
       }
       if (providers.length > 0) {
         const p = providers[0];
@@ -1389,6 +1473,7 @@ function ProjectForm({ id }: { id?: string }) {
     api<Project>(`/api/projects/${id}`).then((p) => setForm((f) => ({
       ...f,
       name: p.name,
+      forge: p.forge,
       gitlabUrl: p.gitlabUrl,
       gitlabProjectId: p.gitlabProjectId,
       skill: p.skill ?? "",
@@ -1413,11 +1498,13 @@ function ProjectForm({ id }: { id?: string }) {
     setForm((f) => ({ ...f, [key]: value }));
   }
 
+  // A catalog host carries both the URL and the kind, so picking one sets both — a project
+  // pointed at a Codeberg entry is a Forgejo project whether or not anyone touched the select.
   function pickGitlab(value: string) {
     setGitlabPick(value);
     if (value === "custom") return;
     const host = gitlabInstances.find((g) => g.id === value);
-    if (host) set("gitlabUrl", host.url);
+    if (host) setForm((f) => ({ ...f, forge: host.kind, gitlabUrl: host.url }));
   }
 
   async function submit(e: FormEvent) {
@@ -1435,8 +1522,11 @@ function ProjectForm({ id }: { id?: string }) {
       librarianEnabled: form.librarianEnabled,
       enabled: form.enabled,
     };
-    if (gitlabPick !== "custom") body.gitlabInstanceId = gitlabPick;
-    else body.gitlabUrl = form.gitlabUrl;
+    if (gitlabPick !== "custom") body.forgeInstanceId = gitlabPick;
+    else {
+      body.gitlabUrl = form.gitlabUrl;
+      body.forge = form.forge;
+    }
     body.llmProviderId = llmPick;
     if (form.gitlabToken) body.gitlabToken = form.gitlabToken;
     if (form.gitlabOperatorToken) body.gitlabOperatorToken = form.gitlabOperatorToken;
@@ -1446,7 +1536,7 @@ function ProjectForm({ id }: { id?: string }) {
         go(`/projects/${id}`);
       } else {
         if (!form.gitlabToken) {
-          setErr("A GitLab token is required.");
+          setErr(`A ${FORGE_NAMES[form.forge]} token is required.`);
           return;
         }
         if (!llmPick) {
@@ -1465,8 +1555,12 @@ function ProjectForm({ id }: { id?: string }) {
   if (secret) {
     return (
       <div>
-        <h2>Paste these into GitLab</h2>
-        <p className="muted">The webhook secret is shown once. Tick Merge request events, and Comments if you want replies.</p>
+        <h2>Paste these into {FORGE_NAMES[form.forge]}</h2>
+        <p className="muted">
+          The webhook secret is shown once. Tick merge/pull request events, and comments if you
+          want replies. GitLab sends the secret back as a token; Forgejo and GitHub sign the
+          body with it.
+        </p>
         <label>Webhook URL</label>
         <input readOnly value={secret.webhookUrl} />
         <label>Secret token</label>
@@ -1477,7 +1571,9 @@ function ProjectForm({ id }: { id?: string }) {
   }
 
   const webhookPreview = instance
-    ? instance.webhookUrlTemplate.replace("{projectId}", "<project-id>")
+    ? instance.webhookUrlTemplate
+        .replace("{forge}", form.forge.toLowerCase())
+        .replace("{projectId}", "<project-id>")
     : null;
   const gitlabLocked = gitlabPick !== "custom";
 
@@ -1495,7 +1591,7 @@ function ProjectForm({ id }: { id?: string }) {
           <input value={form.name} onChange={(e) => set("name", e.target.value)} required />
         </div>
         <div>
-          <label>GitLab</label>
+          <label>Host</label>
           <select value={gitlabPick} onChange={(e) => pickGitlab(e.target.value)}>
             <option value="custom">Custom URL</option>
             {gitlabInstances.map((g) => (
@@ -1504,16 +1600,26 @@ function ProjectForm({ id }: { id?: string }) {
           </select>
         </div>
         <div>
-          <label>GitLab URL</label>
+          <label>Forge {id && <span className="muted">(fixed after registration)</span>}</label>
+          <select value={form.forge} disabled={gitlabLocked || !!id}
+            onChange={(e) => set("forge", e.target.value as ForgeKind)}>
+            {(Object.keys(FORGE_NAMES) as ForgeKind[]).map((k) => (
+              <option key={k} value={k}>{FORGE_NAMES[k]}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label>Base URL</label>
           <input value={form.gitlabUrl} readOnly={gitlabLocked} required={!gitlabLocked}
             onChange={(e) => { setGitlabPick("custom"); set("gitlabUrl", e.target.value); }} />
         </div>
         <div>
-          <label>GitLab project id or path</label>
-          <input value={form.gitlabProjectId} onChange={(e) => set("gitlabProjectId", e.target.value)} required />
+          <label>Repository</label>
+          <input value={form.gitlabProjectId} placeholder={REPO_ID_HINT[form.forge]}
+            onChange={(e) => set("gitlabProjectId", e.target.value)} required />
         </div>
         <div>
-          <label>GitLab PAT {id && <span className="muted">(blank keeps current)</span>}</label>
+          <label>Forge PAT {id && <span className="muted">(blank keeps current)</span>}</label>
           <input value={form.gitlabToken} onChange={(e) => set("gitlabToken", e.target.value)} />
         </div>
         <div>
@@ -2282,10 +2388,12 @@ function Logs() {
 
 function Configure() {
   const [settings, setSettings] = useState<SettingsView | null>(null);
-  const [gitlabInstances, setGitlabInstances] = useState<GitlabInstance[]>([]);
+  const [gitlabInstances, setGitlabInstances] = useState<ForgeInstance[]>([]);
   const [llmProviders, setLlmProviders] = useState<LlmProvider[]>([]);
   const [draft, setDraft] = useState<Record<string, string>>({});
-  const [gitlabDraft, setGitlabDraft] = useState({ name: "", url: "https://gitlab.com" });
+  const [gitlabDraft, setGitlabDraft] = useState({
+    name: "", kind: "GITLAB" as ForgeKind, url: "https://gitlab.com",
+  });
   const [llmDraft, setLlmDraft] = useState({
     name: "", provider: "ANTHROPIC" as Provider, model: "", modelBaseUrl: "",
     modelKey: "", shared: false,
@@ -2296,7 +2404,7 @@ function Configure() {
   function load() {
     Promise.all([
       api<SettingsView>("/api/settings"),
-      api<GitlabInstance[]>("/api/gitlab-instances"),
+      api<ForgeInstance[]>("/api/forge-instances"),
       api<LlmProvider[]>("/api/llm-providers"),
     ]).then(([s, hosts, providers]) => {
       setSettings(s);
@@ -2376,18 +2484,19 @@ function Configure() {
 
   async function addGitlab(e: FormEvent) {
     e.preventDefault();
-    await api("/api/gitlab-instances", { method: "POST", body: JSON.stringify(gitlabDraft) });
-    setGitlabDraft({ name: "", url: "https://gitlab.com" });
+    await api("/api/forge-instances", { method: "POST", body: JSON.stringify(gitlabDraft) });
+    setGitlabDraft({ name: "", kind: "GITLAB", url: "https://gitlab.com" });
     load();
   }
 
-  async function saveGitlab(row: GitlabInstance, patch: { name?: string; url?: string }) {
-    await api(`/api/gitlab-instances/${row.id}`, { method: "PUT", body: JSON.stringify(patch) });
+  async function saveGitlab(row: ForgeInstance,
+                            patch: { name?: string; kind?: ForgeKind; url?: string }) {
+    await api(`/api/forge-instances/${row.id}`, { method: "PUT", body: JSON.stringify(patch) });
     load();
   }
 
   async function removeGitlab(id: string) {
-    await api(`/api/gitlab-instances/${id}`, { method: "DELETE" });
+    await api(`/api/forge-instances/${id}`, { method: "DELETE" });
     load();
   }
 
@@ -2502,25 +2611,34 @@ function Configure() {
         <input value={draft.baseUrl ?? ""}
           onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })} />
         <p className="callout">
-          Webhook URLs: <code className="mono">{`${(draft.baseUrl ?? "").replace(/\/+$/, "")}/webhooks/gitlab/<project-id>`}</code>
+          Webhook URLs: <code className="mono">{`${(draft.baseUrl ?? "").replace(/\/+$/, "")}/webhooks/<forge>/<project-id>`}</code>
         </p>
         <button className="primary" type="submit" disabled={busy}>Save</button>
       </form>
 
-      <h2>GitLab configuration</h2>
+      <h2>Forge hosts</h2>
       <p className="muted">
-        Named hosts, URL only — PATs stay on the project. New Project can pick one of these
-        or type a custom URL. Editing a row does not rewrite existing projects.
+        Named hosts — kind and URL only, no token, because a PAT is scoped to one project&apos;s
+        code and a host is not. New Project can pick one of these or type a custom URL.
+        Editing a row does not rewrite existing projects.
       </p>
       <table>
-        <thead><tr><th>Name</th><th>URL</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Kind</th><th>URL</th><th></th></tr></thead>
         <tbody>
-          {gitlabInstances.length === 0 && <tr><td colSpan={3} className="muted">None yet.</td></tr>}
+          {gitlabInstances.length === 0 && <tr><td colSpan={4} className="muted">None yet.</td></tr>}
           {gitlabInstances.map((g) => (
             <tr key={g.id}>
               <td>
                 <input defaultValue={g.name} key={`${g.id}-name-${g.name}`}
                   onBlur={(e) => { if (e.target.value !== g.name) saveGitlab(g, { name: e.target.value }); }} />
+              </td>
+              <td>
+                <select value={g.kind}
+                  onChange={(e) => saveGitlab(g, { kind: e.target.value as ForgeKind })}>
+                  {(Object.keys(FORGE_NAMES) as ForgeKind[]).map((k) => (
+                    <option key={k} value={k}>{FORGE_NAMES[k]}</option>
+                  ))}
+                </select>
               </td>
               <td>
                 <input defaultValue={g.url} key={`${g.id}-url-${g.url}`}
@@ -2532,10 +2650,16 @@ function Configure() {
         </tbody>
       </table>
       <form onSubmit={addGitlab}>
-        <label>New GitLab instance</label>
+        <label>New forge host</label>
         <div className="grid">
           <input placeholder="name" value={gitlabDraft.name}
             onChange={(e) => setGitlabDraft({ ...gitlabDraft, name: e.target.value })} required />
+          <select value={gitlabDraft.kind}
+            onChange={(e) => setGitlabDraft({ ...gitlabDraft, kind: e.target.value as ForgeKind })}>
+            {(Object.keys(FORGE_NAMES) as ForgeKind[]).map((k) => (
+              <option key={k} value={k}>{FORGE_NAMES[k]}</option>
+            ))}
+          </select>
           <input placeholder="https://gitlab.com" value={gitlabDraft.url}
             onChange={(e) => setGitlabDraft({ ...gitlabDraft, url: e.target.value })} required />
           <button className="primary" type="submit">Add</button>

@@ -1,7 +1,8 @@
 package ro.bitboy.mrr.review;
 
 import org.junit.jupiter.api.Test;
-import ro.bitboy.mrr.gitlab.GitLabClient.FilePatch;
+import ro.bitboy.mrr.forge.FilePatch;
+import ro.bitboy.mrr.forge.FilePatch;
 
 import java.util.List;
 

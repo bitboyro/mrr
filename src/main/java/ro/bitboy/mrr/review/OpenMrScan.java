@@ -10,7 +10,9 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import ro.bitboy.mrr.RuntimeSettings;
-import ro.bitboy.mrr.gitlab.GitLabClient;
+import ro.bitboy.mrr.forge.MergeRequest;
+import ro.bitboy.mrr.forge.Forge;
+import ro.bitboy.mrr.forge.ForgeFactory;
 import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.MergeRequestInfo;
@@ -47,7 +49,7 @@ public class OpenMrScan implements ApplicationRunner {
     private static final Logger log = LoggerFactory.getLogger(OpenMrScan.class);
 
     private final Store store;
-    private final GitLabClient gitlab;
+    private final ForgeFactory forges;
     private final Reviewer reviewer;
     private final MemoryService memory;
     private final RuntimeSettings settings;
@@ -61,10 +63,10 @@ public class OpenMrScan implements ApplicationRunner {
     private Thread loop;
 
     @Autowired
-    public OpenMrScan(Store store, GitLabClient gitlab, Reviewer reviewer, MemoryService memory,
+    public OpenMrScan(Store store, ForgeFactory forges, Reviewer reviewer, MemoryService memory,
                       RuntimeSettings settings) {
         this.store = store;
-        this.gitlab = gitlab;
+        this.forges = forges;
         this.reviewer = reviewer;
         this.memory = memory;
         this.settings = settings;
@@ -72,10 +74,10 @@ public class OpenMrScan implements ApplicationRunner {
     }
 
     /** Tests: frozen interval, no background loop. */
-    public OpenMrScan(Store store, GitLabClient gitlab, Reviewer reviewer, MemoryService memory,
+    public OpenMrScan(Store store, ForgeFactory forges, Reviewer reviewer, MemoryService memory,
                       long scanIntervalMs) {
         this.store = store;
-        this.gitlab = gitlab;
+        this.forges = forges;
         this.reviewer = reviewer;
         this.memory = memory;
         this.settings = null;
@@ -146,18 +148,19 @@ public class OpenMrScan implements ApplicationRunner {
         if (!project.enabled()) {
             return ScanResult.EMPTY;
         }
-        List<GitLabClient.MergeRequest> opened = gitlab.openMergeRequests(project);
+        Forge forge = forges.forProject(project);
+        List<MergeRequest> opened = forge.openMergeRequests(project);
         Set<Long> openIids = new HashSet<>();
         int queued = 0;
-        for (GitLabClient.MergeRequest mr : opened) {
+        for (MergeRequest mr : opened) {
             openIids.add(mr.iid());
             queued += queueIfNew(project, mr);
             try {
                 store.findReview(project.id(), mr.iid(), mr.sha())
                         .filter(r -> r.state().isTerminal())
-                        .ifPresent(r -> reviewer.alignGitlab(project, mr.iid()));
+                        .ifPresent(r -> reviewer.alignForge(project, mr.iid()));
             } catch (Exception e) {
-                log.warn("scan could not align GitLab threads on {}!{}: {}",
+                log.warn("scan could not align forge threads on {}!{}: {}",
                         project.name(), mr.iid(), e.getMessage());
             }
         }
@@ -165,13 +168,13 @@ public class OpenMrScan implements ApplicationRunner {
         return new ScanResult(queued, closed);
     }
 
-    private int queueIfNew(Project project, GitLabClient.MergeRequest mr) {
+    private int queueIfNew(Project project, MergeRequest mr) {
         if (project.skipDrafts() && mr.draft()) {
             log.info("scan skip {}!{} — draft", project.name(), mr.iid());
             return 0;
         }
         if (mr.sha() == null || mr.sha().isBlank()) {
-            log.warn("scan skip {}!{} — GitLab listed no head SHA", project.name(), mr.iid());
+            log.warn("scan skip {}!{} — the host listed no head SHA", project.name(), mr.iid());
             return 0;
         }
         MergeRequestInfo info = new MergeRequestInfo(
@@ -195,7 +198,7 @@ public class OpenMrScan implements ApplicationRunner {
     }
 
     /**
-     * Rate-limits and GitLab blips fail-closed. Retry from the scan only when nothing was
+     * Rate-limits and forge blips fail-closed. Retry from the scan only when nothing was
      * posted — including finding threads whose ids live on {@code findings}, not the
      * review row — so a later success cannot duplicate threads. Old FAILED rows stay
      * failed until a human reruns.
@@ -210,7 +213,10 @@ public class OpenMrScan implements ApplicationRunner {
         if (!store.findingsOf(review.id()).isEmpty()) {
             return false;
         }
+        // GITLAB is the historical spelling of FORGE and still sits on old rows, so a review
+        // that failed before the rename stays retryable.
         if (review.errorKind() != FailureKind.RATE_LIMIT
+                && review.errorKind() != FailureKind.FORGE
                 && review.errorKind() != FailureKind.GITLAB) {
             return false;
         }
@@ -221,7 +227,7 @@ public class OpenMrScan implements ApplicationRunner {
     }
 
     /**
-     * Anything we still treat as live that GitLab no longer lists as opened has merged
+     * Anything we still treat as live that the host no longer lists as opened has merged
      * or closed (or been deleted). Mark the cycle; do not invent an ADDRESSED verdict.
      */
     private int reconcileClosed(Project project, Set<Long> openIids) {
@@ -230,8 +236,8 @@ public class OpenMrScan implements ApplicationRunner {
             if (openIids.contains(row.mrIid())) {
                 continue;
             }
-            String state = gitlab.mergeRequest(project, row.mrIid())
-                    .map(GitLabClient.MergeRequest::state)
+            String state = forges.forProject(project).mergeRequest(project, row.mrIid())
+                    .map(MergeRequest::state)
                     .orElse("closed");
             if (stillOpen(state)) {
                 log.info("scan left {}!{} open — not on the first pages of GitLab's opened list ({})",
