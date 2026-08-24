@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A failed model call now says why.** `ModelException.fromHttp` classified the failure kind
+  from the provider's HTTP response body but then discarded it, so a 400 (or any non-401/429
+  status) logged only `Model endpoint failed with HTTP 400` with nothing about which field the
+  provider rejected. The trimmed response body — the same 240-character cap already used for
+  SDK-thrown errors — is now appended to the message, so the log line names the actual cause
+  instead of just the status code.
+
 ### Changed
 
 - **The model API key moves from the project to the catalog, and the catalog gains owners.**

@@ -35,6 +35,28 @@ class ModelExceptionTest {
     }
 
     @Test
+    void httpMessageIncludesResponseBody() {
+        ModelException error = ModelException.fromHttp(400,
+                "{\"error\":{\"message\":\"max_tokens must be less than 8192\"}}");
+        assertThat(error.getMessage())
+                .contains("HTTP 400")
+                .contains("max_tokens must be less than 8192");
+    }
+
+    @Test
+    void httpMessageOmitsColonWhenBodyIsBlank() {
+        assertThat(ModelException.fromHttp(500, "").getMessage())
+                .isEqualTo("Model endpoint failed with HTTP 500");
+    }
+
+    @Test
+    void httpMessageTruncatesLongBody() {
+        String longBody = "x".repeat(500);
+        ModelException error = ModelException.fromHttp(400, longBody);
+        assertThat(error.getMessage()).hasSize("Model endpoint failed with HTTP 400: ".length() + 240);
+    }
+
+    @Test
     void anthropicClassNamesClassify() {
         assertThat(ModelException.fromSignal(
                 "com.anthropic.errors.RateLimitException", "429", null).kind())

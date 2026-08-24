@@ -48,7 +48,8 @@ public class ModelException extends RuntimeException {
         } else {
             kind = FailureKind.PROVIDER;
         }
-        return new ModelException(kind, "Model endpoint failed with HTTP " + status);
+        String detail = body == null || body.isBlank() ? "" : ": " + trimDetail(body);
+        return new ModelException(kind, "Model endpoint failed with HTTP " + status + detail);
     }
 
     static ModelException fromSignal(String className, String message, Throwable cause) {
