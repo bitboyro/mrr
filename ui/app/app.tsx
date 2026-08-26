@@ -691,6 +691,14 @@ function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
       </p>
       <p>Setup takes about five minutes.</p>
 
+      <p className="callout">
+        <strong>GitLab, Codeberg / Forgejo / Gitea, and GitHub</strong> — including self-hosted
+        instances of all three, because the base URL is per project. The walkthrough below is
+        written in GitLab’s vocabulary; the steps are the same everywhere, with different names
+        for the same screens. Where a host cannot do something mrr’s process needs, the project
+        page says so, and the README’s <em>Which forge</em> table has the full comparison.
+      </p>
+
       <h2>1. Log in</h2>
       <pre className="token-box">{`┌─ mrr  root admin token ────────────────────────────────────┐
 │  mrr_…                                                     │
@@ -707,8 +715,12 @@ function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
       <h2>2. Add your project</h2>
       <p><strong>Projects → New Project.</strong> You’ll need:</p>
       <ul>
-        <li>Your GitLab URL</li>
-        <li>The project ID, or <code>group/project</code></li>
+        <li>Your forge URL — <code>https://gitlab.com</code>, <code>https://codeberg.org</code>,
+          your own Forgejo, <code>https://github.com</code>, or a GHES host</li>
+        <li>
+          The repository: on GitLab the project ID or <code>group/project</code>; on Forgejo and
+          GitHub <code>owner/repo</code>
+        </li>
         <li>
           A GitLab token — a <strong>project access token</strong> is the easy answer:
           bot user, Developer role, <code>api</code> scope
@@ -735,7 +747,11 @@ function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
       </p>
       <ul>
         <li><strong>Merge request events</strong></li>
-        <li><strong>Comments</strong> — only if you want mrr to answer replies on its own threads</li>
+        <li>
+          <strong>Comments</strong> — needed for more than you might think: replies on mrr’s
+          threads, comments on a diff line becoming findings of your own, and the
+          <code>mrr:</code> commands. Leave it unticked and those go quiet with no error.
+        </li>
       </ul>
       <p>
         <code>MRR_BASE_URL</code> has to be reachable from GitLab. If it ever changes, edit the
@@ -751,6 +767,17 @@ function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
           <strong>Resolve a thread in GitLab</strong> and mrr marks the finding approved against
           your username — the two stay in sync either way
         </li>
+        <li>
+          <strong>You can file findings too.</strong> From the merge-request page, or just by
+          commenting on a line of the diff. Yours count the same as mrr’s, and a later review
+          may say one looks fixed but can’t close it — only you can
+        </li>
+        <li>
+          <strong>In a comment:</strong> <code>mrr: finding …</code> raises one,{" "}
+          <code>mrr: wontfix …</code> closes one with your name on the risk,{" "}
+          <code>mrr: dispute …</code> records that you disagree. It has to be the first thing
+          you type
+        </li>
       </ul>
       <p>
         One thing that surprises people: editing a title or label without pushing won’t trigger
@@ -759,6 +786,12 @@ function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
       </p>
 
       <h2>Which GitLab token?</h2>
+      <p className="muted">
+        On Forgejo or GitHub the shape is the same — a bot account with write access to pull
+        requests — but the names differ, and GitHub’s fine-grained PAT needs{" "}
+        <strong>Contents: Read and write</strong> as well as Pull requests, which is
+        counter-intuitive for an operation about pull requests and the usual cause of a 403.
+      </p>
       <table>
         <thead><tr><th>Token</th><th>Notes</th></tr></thead>
         <tbody>
@@ -777,8 +810,23 @@ function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
             <td>Classic PAT</td>
             <td><code>api</code> scope, and the user needs Developer on the project.</td>
           </tr>
+          <tr>
+            <td><strong>Operator token</strong> (optional, second account)</td>
+            <td>
+              A <em>separate</em> account from the review bot. It’s the identity you write
+              under when you act through mrr — filing a finding of your own, commenting,
+              merging. Without one those are unavailable, and the project page says so. Point
+              it at the same account as the review bot and mrr refuses it: your findings would
+              go out under the agent’s name.
+            </td>
+          </tr>
         </tbody>
       </table>
+      <p className="muted">
+        The review bot ignores its own comments — both identities — so replying from either
+        account is invisible to mrr. That’s what stops it answering itself; it also means you
+        need a third, ordinary account to talk to it.
+      </p>
       <p className="muted">
         Deploy tokens and CI job tokens won’t work — mrr sends the token as{" "}
         <code>PRIVATE-TOKEN</code>.
