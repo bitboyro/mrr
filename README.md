@@ -28,8 +28,10 @@ thread lists them, edited in place on later commits rather than reposted.
   the record. Reply instead if you want the model to weigh in; if it agrees, its reply closes
   the thread. Don't post "closing this" notes — mrr ignores its own.
 - **A review can be formal when it needs to be.** By default there is no ceremony at all. Make
-  one formal and you can name reviewers who must sign off before mrr will call the request
-  clean — zero findings is not enough on its own. A new commit clears every sign-off, because
+  one formal and you can require named people to sign off before mrr will call the request
+  clean — zero findings is not enough on its own. Only an mrr user can sign off, and only as
+  themselves: mrr cannot authenticate a forge account, so naming one records who is expected to
+  look without letting anybody record it for them. A new commit clears every sign-off, because
   approving what you read yesterday is not approving what was pushed since.
 - **Findings can wait for a person, if your team needs that.** Turn on *hold findings* and the
   reviewer stores what it finds without posting anything; you release each one onto the request,
