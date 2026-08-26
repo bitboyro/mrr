@@ -39,6 +39,7 @@ type Project = {
   agentMaxTurns: number;
   agentTools: string[];
   autoApprove: boolean;
+  holdFindings: boolean;
   librarianEnabled: boolean;
   memoryHeadSha: string | null;
   memoryStatus: string | null;
@@ -78,6 +79,8 @@ type MemoryRun = {
 };
 const AGENT_TOOLS = ["read_file", "search_memory", "read_memory", "write_memory"] as const;
 type MrStatus = {
+  mode?: string;
+  sessionState?: string;
   projectId: string;
   mrIid: number;
   currentStatus: string;
@@ -99,6 +102,10 @@ type Finding = {
   body: string;
   state: string;
   approvedBy: string | null;
+  origin?: string;
+  agentRole?: string | null;
+  authorUser?: string | null;
+  authorForge?: string | null;
 };
 type Review = {
   id: string;
@@ -162,7 +169,31 @@ type Reply = {
 type LoggerState = { name: string; configuredLevel: string | null; effectiveLevel: string };
 type LogLine = { seq: number; at: string; level: string; logger: string; message: string; thrown: string | null };
 type LogSnapshot = { lines: LogLine[]; buffered: number };
-type Cycle = { status: MrStatus; reviews: Review[]; findings: Finding[]; replies: Reply[] };
+type FindingEvent = {
+  id: string;
+  findingId: string;
+  kind: string;
+  actorKind: string;
+  actorUser: string | null;
+  actorForge: string | null;
+  reviewId: string | null;
+  replyId: string | null;
+  headSha: string | null;
+  detail: string | null;
+  createdAt: string;
+};
+type SessionParticipant = {
+  identity: string;
+  kind: string;
+  role: string | null;
+  required: boolean;
+  signedOffAt: string | null;
+};
+type Cycle = {
+  status: MrStatus; reviews: Review[]; findings: Finding[]; replies: Reply[];
+  events?: FindingEvent[];
+  participants?: SessionParticipant[];
+};
 type AgentSkill = {
   id: string;
   name: string;
@@ -180,6 +211,12 @@ type LibrarySkill = {
   body: string;
   createdAt: string;
   updatedAt: string;
+};
+type OperatorReport = {
+  configured: boolean;
+  username: string | null;
+  reviewUsername: string | null;
+  requirements: { name: string; title: string; status: string; detail: string }[];
 };
 type ForgeInstance = {
   id: string; ownerId: string | null; name: string; kind: ForgeKind; url: string; createdAt: string;
@@ -909,6 +946,7 @@ function ProjectHome({ id }: { id: string }) {
       <p className="muted">
         {FORGE_NAMES[project.forge]} · {project.gitlabUrl}/{project.gitlabProjectId} · {project.llm?.model ?? "no entry"}
         {project.autoApprove ? " · auto-approve on" : ""}
+        {project.holdFindings ? " · findings held" : ""}
         {project.librarianEnabled ? " · librarian on" : ""}
         {project.memoryStatus && project.memoryStatus !== "NONE" ? ` · memory ${project.memoryStatus}` : ""}
         {project.memoryHeadSha ? ` · ${project.memoryHeadSha.slice(0, 8)}` : ""}
@@ -917,6 +955,7 @@ function ProjectHome({ id }: { id: string }) {
       </p>
       <FailureBanner kind={project.lastErrorKind} message={project.lastError} />
       <ForgeSupport projectId={id} />
+      <OperatorSupport projectId={id} />
       <div className="tabs">
         <button className={tab === "mrs" ? "on" : ""} onClick={() => setTab("mrs")}>Merge requests</button>
         <button className={tab === "memory" ? "on" : ""} onClick={() => setTab("memory")}>Memory</button>
@@ -1431,6 +1470,7 @@ function ProjectForm({ id }: { id?: string }) {
     gitlabUrl: "https://gitlab.com", gitlabProjectId: "", gitlabToken: "",
     gitlabOperatorToken: "", skill: "",
     skipDrafts: false, agentMaxTurns: 1, agentTools: "", autoApprove: false,
+    holdFindings: false,
     librarianEnabled: false, enabled: true,
   });
   const [secret, setSecret] = useState<{ webhookUrl: string; webhookSecret: string } | null>(null);
@@ -1481,6 +1521,7 @@ function ProjectForm({ id }: { id?: string }) {
       agentMaxTurns: p.agentMaxTurns,
       agentTools: p.agentTools.join(","),
       autoApprove: p.autoApprove,
+      holdFindings: p.holdFindings,
       librarianEnabled: p.librarianEnabled,
       enabled: p.enabled,
     }))).catch((e) => setErr(String(e.message)));
@@ -1519,6 +1560,7 @@ function ProjectForm({ id }: { id?: string }) {
       agentMaxTurns: Number(form.agentMaxTurns) || 1,
       agentTools: tools,
       autoApprove: form.autoApprove,
+      holdFindings: form.holdFindings,
       librarianEnabled: form.librarianEnabled,
       enabled: form.enabled,
     };
@@ -1654,6 +1696,9 @@ function ProjectForm({ id }: { id?: string }) {
         <div className="toggles">
           <Toggle on={form.skipDrafts} onChange={(v) => set("skipDrafts", v)}>Skip drafts</Toggle>
           <Toggle on={form.autoApprove} onChange={(v) => set("autoApprove", v)}>Auto-approve when clean</Toggle>
+          <Toggle on={form.holdFindings} onChange={(v) => set("holdFindings", v)}>
+            Hold findings for review before posting
+          </Toggle>
           {id && <Toggle on={form.enabled} onChange={(v) => set("enabled", v)}>Enabled</Toggle>}
         </div>
       </div>
@@ -1698,6 +1743,8 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
   const [err, setErr] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
   const [merging, setMerging] = useState(false);
+  /** A line clicked in the diff, waiting for the file-a-finding form to pick it up. */
+  const [picked, setPicked] = useState<{ path: string; line: number } | null>(null);
 
   function load() {
     api<Cycle>(`/api/projects/${projectId}/merge-requests/${iid}`)
@@ -1726,6 +1773,22 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
     if (!cycle?.status.latestReviewId) return;
     await api(`/api/reviews/${cycle.status.latestReviewId}/rerun`, { method: "POST" });
     load();
+  }
+
+  /**
+   * Review the current commit now, rather than waiting for a push or the periodic scan.
+   *
+   * Free when the commit is unchanged — the server returns the review that already covers it
+   * — so this is safe to press twice. "Re-run latest" is the one that spends tokens again.
+   */
+  async function reviewNow() {
+    setActionErr(null);
+    try {
+      await api(`/api/projects/${projectId}/merge-requests/${iid}/review`, { method: "POST" });
+      load();
+    } catch (e) {
+      setActionErr(e instanceof Error ? e.message : String(e));
+    }
   }
 
   async function merge() {
@@ -1759,6 +1822,12 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
         {pill(cycle.status.currentStatus)}
         {cycle.status.mrrApproved && <span className="pill ok">mrr approved</span>}
         {snapshot?.mr?.url && <a href={snapshot.mr.url} target="_blank" rel="noreferrer">GitLab</a>}
+        {!closed && (
+          <button onClick={reviewNow}
+            title="Review the current commit. Free if it has already been reviewed.">
+            Review now
+          </button>
+        )}
         {cycle.status.latestReviewId && <button onClick={rerun}>Re-run latest</button>}
         {canOperate && !closed && (
           <button className="danger" onClick={merge} disabled={merging}>
@@ -1777,7 +1846,10 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
           Set an operator PAT on the project to merge or post an overall thread from here.
         </p>
       )}
-      <CommitDiffs projectId={projectId} iid={iid} />
+      <Session projectId={projectId} iid={iid} status={cycle.status}
+        participants={cycle.participants ?? []} onChanged={load} />
+      <CommitDiffs projectId={projectId} iid={iid} findings={cycle.findings}
+        onPickLine={canOperate && !closed ? (path, line) => setPicked({ path, line }) : undefined} />
       <MrContext projectId={projectId} iid={iid} initial={cycle.status.userContext} onSaved={load} />
       {cycle.reviews.some((r) => r.state === "FAILED") && (
         <FailureBanner
@@ -1796,11 +1868,27 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
                 <strong>{f.title}</strong>
               </div>
               <p className="muted" style={{ margin: "6px 0 0" }}>
+                {f.state === "PENDING" && <span className="pill warn">held</span>}{" "}
+                {f.agentRole && <span className="pill">{f.agentRole}</span>}{" "}
+                {f.origin === "HUMAN" && (
+                  <span className="pill" title={f.authorForge
+                    ? "Tracked from a comment on the forge. mrr counts it but does not "
+                      + "resolve that thread."
+                    : "Filed through mrr. A review can say it looks fixed; only a person closes it."}>
+                    {f.authorForge ? `@${f.authorForge}` : "filed here"}
+                  </span>
+                )}{" "}
                 {f.filePath}{f.line ? `:${f.line}` : ""}
                 {f.approvedBy && ` — approved by @${f.approvedBy}`}
               </p>
+              <FindingActions projectId={projectId} iid={iid} finding={f}
+                canOperate={canOperate} onChanged={load} />
+              <FindingHistory events={(cycle.events ?? []).filter((e) => e.findingId === f.id)} />
             </div>
           ))}
+          <FileFinding projectId={projectId} iid={iid} canOperate={canOperate}
+            reviewed={!!cycle.status.latestReviewId} picked={picked}
+            onFiled={() => { setPicked(null); load(); }} />
         </div>
         <div>
           <div className="row">
@@ -1863,6 +1951,428 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
   );
 }
 
+/**
+ * How this finding reached the state it is in, and who moved it.
+ *
+ * A finding with no events predates the log rather than having no history, so the strip is
+ * omitted entirely instead of claiming nothing happened.
+ */
+function FindingHistory({ events }: { events: FindingEvent[] }) {
+  if (events.length === 0) return null;
+  return (
+    <details className="fold history">
+      <summary>History ({events.length})</summary>
+      <ul className="history-list">
+        {events.map((e) => (
+          <li key={e.id}>
+            {pill(e.kind)}
+            <span className="muted">{actorOf(e)}</span>
+            {e.headSha && <code>{e.headSha.slice(0, 8)}</code>}
+            {e.detail && <span className="history-detail">{e.detail}</span>}
+            <span className="muted history-when">{e.createdAt}</span>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+/** The identity of the surface that acted — an mrr user, a forge username, or the agent. */
+function actorOf(e: FindingEvent): string {
+  if (e.actorForge) return `@${e.actorForge}`;
+  if (e.actorUser) return e.actorUser;
+  return e.actorKind.toLowerCase();
+}
+
+/**
+ * Triage controls on one finding.
+ *
+ * Deliberately not offering ADDRESSED: that means a commit fixed the problem, which is a
+ * verdict the reviewer reaches from the diff rather than a label anybody can apply. What a
+ * person can say is that they accept it, that it will not be fixed, that it duplicates
+ * another, or that they disagree — and disagreeing leaves it open and still counting.
+ */
+function FindingActions({ projectId, iid, finding, canOperate, onChanged }: {
+  projectId: string; iid: string; finding: Finding; canOperate: boolean; onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const base = `/api/projects/${projectId}/merge-requests/${iid}/findings/${finding.id}`;
+
+  async function run(call: () => Promise<unknown>) {
+    setBusy(true);
+    setErr(null);
+    try {
+      await call();
+      onChanged();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Cancel means cancel. Reading the prompt inside `run` and coalescing null to "" turned
+  // pressing Cancel into a state change with an empty note — closing or reopening somebody's
+  // finding because they changed their mind about explaining why.
+  function setState(state: string, prompt: string) {
+    const note = window.prompt(prompt);
+    if (note === null) return;
+    run(() => api(`${base}/state`, { method: "PUT", body: JSON.stringify({ state, note }) }));
+  }
+
+  const open = finding.state === "OPEN";
+  const held = finding.state === "PENDING";
+  if (held) {
+    // A held finding has not reached the forge. The only two things to do with one are let it
+    // through or drop it — triaging a draft nobody has seen would be triaging nothing.
+    return (
+      <div className="finding-actions">
+        <button className="link" disabled={!canOperate || busy} onClick={() => {
+          const edit = window.prompt("Release it. Edit the title, or leave as-is:",
+            finding.title);
+          if (edit === null) return;
+          run(() => api(`${base}/release`, {
+            method: "POST",
+            body: JSON.stringify(edit === finding.title ? {} : { title: edit }),
+          }));
+        }}>
+          release
+        </button>
+        <button className="link" disabled={!canOperate || busy} onClick={() => {
+          const note = window.prompt("Discard it. Why?");
+          if (note === null) return;
+          run(() => api(`${base}/discard`, { method: "POST", body: JSON.stringify({ note }) }));
+        }}>
+          discard
+        </button>
+        <span className="muted">held — not posted to the forge yet</span>
+        {err && <span className="bad">{err}</span>}
+      </div>
+    );
+  }
+  return (
+    <div className="finding-actions">
+      {open && (
+        <>
+          <button className="link" disabled={!canOperate || busy}
+            onClick={() => setState("APPROVED", "Accepting this as it stands. Why?")}>
+            accept
+          </button>
+          <button className="link" disabled={!canOperate || busy}
+            onClick={() => setState("WONT_FIX", "Won't fix. What is the risk you are accepting?")}>
+            won&apos;t fix
+          </button>
+          <button className="link" disabled={!canOperate || busy}
+            onClick={() => setState("DUPLICATE", "Duplicate of which finding?")}>
+            duplicate
+          </button>
+          <button className="link" disabled={!canOperate || busy} onClick={() => {
+            const note = window.prompt("Why do you disagree? It stays open either way.");
+            if (note === null) return;
+            run(() => api(`${base}/dispute`,
+              { method: "POST", body: JSON.stringify({ note }) }));
+          }}>
+            disagree
+          </button>
+        </>
+      )}
+      {!open && (
+        <button className="link" disabled={!canOperate || busy}
+          onClick={() => setState("OPEN", "Reopening. Why?")}>
+          reopen
+        </button>
+      )}
+      {!canOperate && <span className="muted">read-only without an operator PAT</span>}
+      {err && <span className="bad">{err}</span>}
+    </div>
+  );
+}
+
+/**
+ * File a finding of your own.
+ *
+ * It becomes the same kind of object the reviewer produces — one thread, counted the same
+ * against the merge gate — with one difference: a later review may say it looks fixed, but
+ * only you close it.
+ */
+function FileFinding({ projectId, iid, canOperate, reviewed, picked, onFiled }: {
+  projectId: string; iid: string; canOperate: boolean; reviewed: boolean;
+  picked?: { path: string; line: number } | null; onFiled: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [filePath, setFilePath] = useState("");
+  const [line, setLine] = useState("");
+  const [severity, setSeverity] = useState("MAJOR");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Clicking a line in the diff opens this form with the anchor already filled in. That is the
+  // whole of "file a finding from the diff" — the API and the form were already here.
+  useEffect(() => {
+    if (!picked) return;
+    setFilePath(picked.path);
+    setLine(String(picked.line));
+    setOpen(true);
+  }, [picked]);
+
+  if (!canOperate) {
+    return (
+      <p className="muted">
+        Set an operator PAT on the project to file a finding of your own. Without one it would
+        be posted under the review bot&apos;s identity rather than yours.
+      </p>
+    );
+  }
+  if (!reviewed) {
+    return <p className="muted">mrr has to review this merge request once before you can file
+      a finding against it.</p>;
+  }
+  if (!open) {
+    return <button className="link" onClick={() => setOpen(true)}>File a finding</button>;
+  }
+
+  async function file(e: FormEvent) {
+    e.preventDefault();
+    if (!title.trim()) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await api(`/api/projects/${projectId}/merge-requests/${iid}/findings`, {
+        method: "POST",
+        body: JSON.stringify({
+          title: title.trim(),
+          body: body.trim() || null,
+          filePath: filePath.trim() || null,
+          line: line.trim() ? Number(line) : null,
+          severity,
+        }),
+      });
+      setTitle(""); setBody(""); setFilePath(""); setLine("");
+      setOpen(false);
+      onFiled();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="card" onSubmit={file}>
+      <div className="row">
+        <select value={severity} onChange={(e) => setSeverity(e.target.value)}>
+          <option value="BLOCKER">Blocker</option>
+          <option value="MAJOR">Major</option>
+          <option value="MINOR">Minor</option>
+        </select>
+        <input style={{ flex: 1 }} placeholder="What is wrong, in one line" value={title}
+          onChange={(e) => setTitle(e.target.value)} />
+      </div>
+      <textarea rows={3} placeholder="Detail (Markdown)" value={body}
+        onChange={(e) => setBody(e.target.value)} />
+      <div className="row">
+        <input style={{ flex: 1 }} placeholder="path/in/the/diff.java" value={filePath}
+          onChange={(e) => setFilePath(e.target.value)} />
+        <input style={{ width: "6rem" }} placeholder="line" value={line}
+          onChange={(e) => setLine(e.target.value)} />
+        <button disabled={busy || !title.trim()}>File it</button>
+        <button type="button" className="link" onClick={() => setOpen(false)}>cancel</button>
+      </div>
+      <p className="muted">
+        Anchored to that line where the forge accepts the position, and posted as a thread on
+        the request where it does not. A later review can say it looks fixed; only you close it.
+      </p>
+      {err && <p className="bad">{err}</p>}
+    </form>
+  );
+}
+
+/**
+ * The operator token: what it is, and what it unlocks.
+ *
+ * Quiet when everything it gates works. It speaks up when the token is missing, when the
+ * forge rejected it, and — the one worth catching — when it resolves to the same account as
+ * the review bot, which would put a person's findings under the agent's name.
+ */
+function OperatorSupport({ projectId }: { projectId: string }) {
+  const [report, setReport] = useState<OperatorReport | null>(null);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    api<OperatorReport>(`/api/projects/${projectId}/operator`)
+      .then((r) => { if (live) setReport(r); })
+      .catch(() => { /* a probe that will not answer is not worth an error banner */ });
+    return () => { live = false; };
+  }, [projectId]);
+
+  if (!report) return null;
+  const gaps = report.requirements.filter((r) => r.status === "MISSING");
+  const token = report.requirements.find((r) => r.name === "token");
+  if (gaps.length === 0 && token?.status === "OK") return null;
+
+  const headline = !report.configured
+    ? "No operator PAT — you cannot file findings, comment, or merge from mrr"
+    : token?.status !== "OK"
+    ? "The operator PAT is set but cannot be used as a separate identity"
+    : `The operator PAT works, but ${gaps.length} thing${gaps.length === 1 ? "" : "s"} it `
+      + "gates are unavailable on this host";
+
+  return (
+    <div className="callout">
+      <button className="link" onClick={() => setOpen(!open)}>
+        {open ? "▾" : "▸"} {headline}
+      </button>
+      {open && (
+        <table>
+          <thead><tr><th>What</th><th>Status</th><th>Detail</th></tr></thead>
+          <tbody>
+            {report.requirements.map((r) => (
+              <tr key={r.name}>
+                <td>{r.title}</td>
+                <td>{pill(r.status)}</td>
+                <td className="muted">{r.detail}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Who is in the room, and whether the review is waiting on any of them.
+ *
+ * Ad-hoc is the default and stays out of the way — the panel is one line until somebody makes
+ * the session formal. What formal buys is the rule underneath: mrr will not call the request
+ * clean while a required participant has not signed off, however few findings are left.
+ */
+function Session({ projectId, iid, status, participants, onChanged }: {
+  projectId: string; iid: string; status: MrStatus;
+  participants: SessionParticipant[]; onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const base = `/api/projects/${projectId}/merge-requests/${iid}`;
+  const formal = status.mode === "FORMAL";
+  const waiting = participants.filter((p) => p.required && !p.signedOffAt);
+
+  async function run(call: () => Promise<unknown>) {
+    setBusy(true);
+    setErr(null);
+    try {
+      await call();
+      onChanged();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const setMode = (mode: string) => run(() =>
+    api(`${base}/session`, { method: "PUT", body: JSON.stringify({ mode }) }));
+
+  if (!formal && participants.length === 0) {
+    return (
+      <p className="muted">
+        Ad-hoc review.{" "}
+        <button className="link" disabled={busy} onClick={() => setMode("FORMAL")}>
+          make it formal
+        </button>{" "}
+        to name reviewers who have to sign off before this can go clean.
+        {err && <span className="bad"> {err}</span>}
+      </p>
+    );
+  }
+
+  return (
+    <details className="fold" open={waiting.length > 0}>
+      <summary>
+        {formal ? "Formal review" : "Participants"}
+        {waiting.length > 0 && ` — waiting on ${waiting.length}`}
+      </summary>
+      <div className="row">
+        {pill(status.sessionState ?? "UNDER_REVIEW")}
+        <button className="link" disabled={busy}
+          onClick={() => setMode(formal ? "AD_HOC" : "FORMAL")}>
+          {formal ? "make it ad-hoc" : "make it formal"}
+        </button>
+        {formal && status.sessionState !== "CLOSED" && (
+          <button className="link" disabled={busy} onClick={() => run(() =>
+            api(`${base}/session`, {
+              method: "PUT",
+              body: JSON.stringify({ sessionState: status.sessionState === "SUMMARIZED"
+                ? "CLOSED" : "SUMMARIZED" }),
+            }))}>
+            {status.sessionState === "SUMMARIZED" ? "close the session" : "mark summarized"}
+          </button>
+        )}
+        <button className="link" disabled={busy} onClick={() => run(async () => {
+          // Yourself, as an mrr user — the only identity mrr can authenticate, and so the only
+          // kind whose sign-off can gate a merge.
+          const me = await api<Me>("/api/me");
+          await api(`${base}/participants`, {
+            method: "POST",
+            body: JSON.stringify({
+              identity: me.userId, kind: "USER", role: "reviewer", required: true,
+            }),
+          });
+        })}>
+          add me as a required reviewer
+        </button>
+        <button className="link" disabled={busy} onClick={() => run(async () => {
+          const identity = window.prompt("Forge username to name (they cannot sign off here):")
+            ?? "";
+          if (!identity.trim()) return;
+          await api(`${base}/participants`, {
+            method: "POST",
+            body: JSON.stringify({ identity: identity.trim(), kind: "FORGE", required: false }),
+          });
+        })}>
+          name someone on the forge
+        </button>
+      </div>
+      {participants.length === 0 && <p className="muted">Nobody named yet.</p>}
+      <ul className="history-list">
+        {participants.map((p) => (
+          <li key={p.identity}>
+            <strong>{p.kind === "FORGE" ? `@${p.identity}` : p.identity}</strong>
+            {p.role && <span className="muted">{p.role}</span>}
+            {p.required && <span className="pill">required</span>}
+            {p.signedOffAt
+              ? <span className="pill ok">signed off</span>
+              : p.required && <span className="pill warn">waiting</span>}
+            {!p.signedOffAt && p.kind === "USER" && (
+              <button className="link" disabled={busy} onClick={() => run(() =>
+                api(`${base}/participants/${encodeURIComponent(p.identity)}/sign-off`,
+                  { method: "POST" }))}>
+                sign off
+              </button>
+            )}
+            <button className="link" disabled={busy} onClick={() => run(() =>
+              api(`${base}/participants/${encodeURIComponent(p.identity)}`,
+                { method: "DELETE" }))}>
+              remove
+            </button>
+          </li>
+        ))}
+      </ul>
+      <p className="muted">
+        Only an mrr user can sign off, and only as themselves — mrr has no way to authenticate a
+        forge account, so naming one here records who is expected to look without letting anybody
+        record it for them. A new commit clears every sign-off: approving what you read yesterday
+        is not approving what was pushed since.
+      </p>
+      {err && <p className="bad">{err}</p>}
+    </details>
+  );
+}
+
 function MrThread({ projectId, iid, onPosted }: {
   projectId: string; iid: string; onPosted: () => void;
 }) {
@@ -1918,7 +2428,10 @@ type MrCommit = {
 };
 type FilePatch = { path: string; diff: string };
 
-function CommitDiffs({ projectId, iid }: { projectId: string; iid: string }) {
+function CommitDiffs({ projectId, iid, findings, onPickLine }: {
+  projectId: string; iid: string;
+  findings?: Finding[]; onPickLine?: (path: string, line: number) => void;
+}) {
   const [commits, setCommits] = useState<MrCommit[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [openSha, setOpenSha] = useState<string | null>(null);
@@ -1938,8 +2451,8 @@ function CommitDiffs({ projectId, iid }: { projectId: string; iid: string }) {
     }}>
       <summary>Commit diffs</summary>
       <p className="muted">
-        View only. A patch is fetched when you unveil that one file — never before. No
-        comments from here.
+        A patch is fetched when you unveil that one file — never before. Findings already on a
+        line show under it{onPickLine ? ", and clicking a line files one there" : ""}.
       </p>
       {err && <p className="err">{err}</p>}
       {commits === null && !err && <p className="muted">Open to load commits from GitLab…</p>}
@@ -1955,7 +2468,8 @@ function CommitDiffs({ projectId, iid }: { projectId: string; iid: string }) {
             </button>
           </div>
           {openSha === c.sha && (
-            <CommitFiles projectId={projectId} iid={iid} sha={c.sha} />
+            <CommitFiles projectId={projectId} iid={iid} sha={c.sha}
+              findings={findings} onPickLine={onPickLine} />
           )}
         </div>
       ))}
@@ -1963,7 +2477,10 @@ function CommitDiffs({ projectId, iid }: { projectId: string; iid: string }) {
   );
 }
 
-function CommitFiles({ projectId, iid, sha }: { projectId: string; iid: string; sha: string }) {
+function CommitFiles({ projectId, iid, sha, findings, onPickLine }: {
+  projectId: string; iid: string; sha: string;
+  findings?: Finding[]; onPickLine?: (path: string, line: number) => void;
+}) {
   const [files, setFiles] = useState<string[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [open, setOpen] = useState<Set<string>>(new Set());
@@ -1998,7 +2515,8 @@ function CommitFiles({ projectId, iid, sha }: { projectId: string; iid: string; 
             {open.has(path) ? "Hide" : "Show"} {path}
           </button>
           {open.has(path) && (
-            <FilePatchView projectId={projectId} iid={iid} sha={sha} path={path} />
+            <FilePatchView projectId={projectId} iid={iid} sha={sha} path={path}
+              findings={findings} onPickLine={onPickLine} />
           )}
         </div>
       ))}
@@ -2007,8 +2525,9 @@ function CommitFiles({ projectId, iid, sha }: { projectId: string; iid: string; 
 }
 
 /** One file's patch, requested by this file's unveil and by nothing else. */
-function FilePatchView({ projectId, iid, sha, path }: {
+function FilePatchView({ projectId, iid, sha, path, findings, onPickLine }: {
   projectId: string; iid: string; sha: string; path: string;
+  findings?: Finding[]; onPickLine?: (path: string, line: number) => void;
 }) {
   const [patch, setPatch] = useState<FilePatch | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -2027,21 +2546,83 @@ function FilePatchView({ projectId, iid, sha, path }: {
 
   if (err) return <p className="err">{err}</p>;
   if (!patch) return <p className="muted">Loading patch…</p>;
-  return <DiffView text={patch.diff} />;
+  return (
+    <DiffView
+      text={patch.diff}
+      findings={(findings ?? []).filter((f) => f.filePath === path)}
+      onPickLine={onPickLine ? (line) => onPickLine(path, line) : undefined}
+    />
+  );
 }
 
-function DiffView({ text }: { text: string }) {
+/**
+ * A unified diff, with the new-file line number worked out per row.
+ *
+ * The number comes from the `@@` headers: a hunk declares where it starts in the new file, and
+ * every kept or added row after it advances that counter while a removed row does not. That is
+ * the same number the forge wants when anchoring a comment, which is what makes a row here
+ * clickable — see `onPickLine`.
+ */
+function DiffView({ text, findings, onPickLine }: {
+  text: string;
+  findings?: Finding[];
+  onPickLine?: (line: number) => void;
+}) {
   const lines = (text || "").split("\n");
+  const byLine = new Map<number, Finding[]>();
+  for (const f of findings ?? []) {
+    if (f.line == null) continue;
+    byLine.set(f.line, [...(byLine.get(f.line) ?? []), f]);
+  }
+
+  let newLine = 0;
+  const rows = lines.map((line, i) => {
+    let cls = "";
+    let at: number | null = null;
+    if (line.startsWith("@@")) {
+      cls = "hunk";
+      // @@ -old,count +new,count @@ — the second number is where the new file resumes.
+      const m = /\+(\d+)/.exec(line.split("@@")[1] ?? "");
+      newLine = m ? Number(m[1]) : newLine;
+    } else if (line.startsWith("+") && !line.startsWith("+++")) {
+      cls = "add";
+      at = newLine++;
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      cls = "del";
+    } else if (!line.startsWith("---") && !line.startsWith("+++") && !line.startsWith("diff ")) {
+      at = newLine++;
+    }
+    return { line, cls, at, key: i };
+  });
+
   return (
-    <pre className="diff-view">
-      {lines.map((line, i) => {
-        let cls = "";
-        if (line.startsWith("+") && !line.startsWith("+++")) cls = "add";
-        else if (line.startsWith("-") && !line.startsWith("---")) cls = "del";
-        else if (line.startsWith("@@")) cls = "hunk";
-        return <span key={i} className={cls}>{line}{"\n"}</span>;
+    <div className="diff-view">
+      {rows.map((r) => {
+        const here = r.at == null ? [] : byLine.get(r.at) ?? [];
+        const clickable = onPickLine && r.at != null;
+        return (
+          <div key={r.key}>
+            <div
+              className={`diff-row ${r.cls}${clickable ? " pickable" : ""}`}
+              onClick={clickable ? () => onPickLine!(r.at!) : undefined}
+              title={clickable ? `File a finding on line ${r.at}` : undefined}
+            >
+              <span className="diff-lineno">{r.at ?? ""}</span>
+              <span className="diff-text">{r.line || " "}</span>
+            </div>
+            {here.map((f) => (
+              <div key={f.id} className={`diff-finding ${f.severity.toLowerCase()}`}>
+                {pill(f.severity)} {pill(f.state)}
+                {f.origin === "HUMAN" && (
+                  <span className="pill">{f.authorForge ? `@${f.authorForge}` : "filed here"}</span>
+                )}{" "}
+                {f.title}
+              </div>
+            ))}
+          </div>
+        );
       })}
-    </pre>
+    </div>
   );
 }
 

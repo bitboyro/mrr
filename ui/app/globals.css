@@ -168,15 +168,19 @@ details.fold[open] > summary { margin-bottom: 8px; }
 
 .commit-files { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .diff-file button { text-align: left; font-family: var(--font-mono); font-size: 12px; width: 100%; }
-pre.diff-view {
+/* A div rather than a pre now: each row is its own element so a line number can sit beside
+   it and the row can be clicked. The monospace and the preserved whitespace move onto the row. */
+.diff-view {
   max-height: 480px;
   margin: 8px 0 0;
-  white-space: pre;
-  overflow-wrap: normal;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
 }
-pre.diff-view .add { color: var(--ok); }
-pre.diff-view .del { color: var(--danger); }
-pre.diff-view .hunk { color: var(--minor); }
+.diff-view .add { color: var(--ok); }
+.diff-view .del { color: var(--danger); }
+.diff-view .hunk { color: var(--minor); }
 
 .tabs { display: flex; gap: 4px; margin: 8px 0 20px; border-bottom: 1px solid var(--line); }
 .tabs button {
@@ -233,6 +237,38 @@ pre.diff-view .hunk { color: var(--minor); }
 .card.finding.minor { border-left-color: var(--minor); }
 .card.finding.addressed { border-left-color: var(--ok); opacity: 0.78; }
 .card.finding.approved { border-left-color: var(--ok); opacity: 0.78; }
+/* Why a finding holds the state it holds. Folded away by default — the state pill is the
+   answer most of the time, and the log is for when it is not. */
+/* One row per diff line, so a line number can sit beside it and be clicked. */
+.diff-row { display: flex; gap: 10px; align-items: baseline; }
+.diff-row.pickable { cursor: pointer; }
+.diff-row.pickable:hover { outline: 1px solid var(--major); outline-offset: -1px; }
+.diff-lineno {
+  flex: 0 0 3.5rem; text-align: right; opacity: 0.45; user-select: none;
+  font-size: 11px;
+}
+.diff-text { white-space: pre; overflow-wrap: normal; min-width: 0; }
+.diff-finding {
+  margin: 2px 0 2px 3.5rem; padding: 4px 8px; font-size: 12px;
+  border-left: 3px solid var(--major); white-space: normal;
+}
+.diff-finding.blocker { border-left-color: var(--danger); }
+.diff-finding.minor { border-left-color: var(--minor); }
+.finding-actions {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  margin-top: 8px; font-size: 12px;
+}
+.finding-actions .bad { overflow-wrap: anywhere; }
+details.fold.history { margin: 8px 0 0; }
+details.fold.history > summary { font-size: 12px; }
+.history-list { list-style: none; margin: 0; padding: 0; font-size: 12px; }
+.history-list li {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  padding: 3px 0; min-width: 0;
+}
+.history-list code { font-size: 11px; }
+.history-detail { min-width: 0; overflow-wrap: anywhere; }
+.history-when { margin-left: auto; font-family: var(--font-mono); font-size: 11px; }
 @media (max-width: 720px) {
   .mr-row { grid-template-columns: 48px minmax(0, 1fr) auto; }
   .mr-row .hid { display: none; }

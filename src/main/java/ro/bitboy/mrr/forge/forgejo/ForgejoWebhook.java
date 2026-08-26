@@ -72,6 +72,21 @@ final class ForgejoWebhook {
      * {@link ForgejoForge} stamped on when it opened the thread, or a reply would not be
      * recognised as belonging to a thread mrr owns.
      */
+    /**
+     * Which line a review comment is on. Forgejo has called this {@code line} and
+     * {@code position} across versions and both still appear in the wild, so read either — an
+     * anchor mrr cannot find only costs the finding its line, not its existence.
+     */
+    private static Integer commentLine(JsonNode comment) {
+        for (String field : new String[] {"line", "position"}) {
+            JsonNode value = comment.path(field);
+            if (!value.isMissingNode() && !value.isNull() && value.asInt(0) != 0) {
+                return value.asInt();
+            }
+        }
+        return null;
+    }
+
     private static ForgeEvent comment(String event, JsonNode body, String issuePrefix,
                                       String reviewPrefix) {
         JsonNode comment = body.path("comment");
@@ -95,7 +110,9 @@ final class ForgejoWebhook {
                 text(comment.path("body")),
                 text(comment.path("user").path("login")),
                 false,
-                onPull), event);
+                onPull,
+                text(comment.path("path")),
+                commentLine(comment)), event);
     }
 
     private static MergeRequestInfo info(JsonNode body, JsonNode pr, String action) {

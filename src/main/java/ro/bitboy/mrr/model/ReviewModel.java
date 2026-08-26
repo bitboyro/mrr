@@ -188,8 +188,19 @@ public interface ReviewModel {
     }
 
     /** A problem in this diff. {@code line} is best-effort — the model may omit or miss it. */
+    /**
+     * {@code role} is the concern the finding came from — security, tests, performance — as the
+     * model names it, and null when it does not. Self-reported and unvalidated on purpose: it
+     * makes "which concern raised this" answerable without pretending mrr ran separate agents,
+     * which is a different and much more expensive feature.
+     */
     record NewFinding(String file, Integer line, Finding.Severity severity,
-                      String title, String body) {
+                      String title, String body, String role) {
+
+        public NewFinding(String file, Integer line, Finding.Severity severity, String title,
+                          String body) {
+            this(file, line, severity, title, body, null);
+        }
     }
 
     /** The model's judgement on one finding that was already open. */

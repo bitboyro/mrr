@@ -19,6 +19,7 @@ import ro.bitboy.mrr.model.AgentSkill;
 import ro.bitboy.mrr.model.AgentTrace;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.Finding;
+import ro.bitboy.mrr.model.FindingEvent;
 import ro.bitboy.mrr.model.ForgeInstance;
 import ro.bitboy.mrr.model.InstanceStats;
 import ro.bitboy.mrr.model.LibrarySkill;
@@ -344,7 +345,7 @@ class StoreTest {
         // be able to resolve a thread the first review opened.
         assertThat(store.openFindings(project.id(), 9)).hasSize(2);
 
-        store.markAddressed(a.id());
+        store.markAddressed(FindingEvent.addressedByReview(a, second, "sha-2", "fixed"));
         assertThat(store.openFindings(project.id(), 9)).singleElement()
                 .satisfies(f -> assertThat(f.discussionId()).isEqualTo("disc-b"));
         assertThat(store.findingsOf(first)).singleElement()
@@ -781,12 +782,12 @@ class StoreTest {
         String reviewId = store.claimReview(project.id(), 9, "sha-1", "{}", mrInfo()).review().id();
         Finding open = store.createFinding(finding(reviewId, project.id(), 9, "disc-a"));
         Finding fixed = store.createFinding(finding(reviewId, project.id(), 9, "disc-b"));
-        store.markAddressed(fixed.id());
+        store.markAddressed(FindingEvent.addressedByReview(fixed, reviewId, "sha-1", "fixed"));
         Instant fixedAt = store.findingsOf(reviewId).stream()
                 .filter(f -> f.id().equals(fixed.id())).findFirst().orElseThrow().resolvedAt();
 
-        store.markApproved(open.id(), "romanbotnari");
-        store.markApproved(fixed.id(), "romanbotnari");
+        store.markApproved(FindingEvent.approvedByHuman(open, "romanbotnari"));
+        store.markApproved(FindingEvent.approvedByHuman(fixed, "romanbotnari"));
 
         assertThat(store.openFindings(project.id(), 9)).isEmpty();
         assertThat(store.findByDiscussion(project.id(), 9, "disc-a")).get()
@@ -801,6 +802,117 @@ class StoreTest {
                     assertThat(f.approvedBy()).isNull();
                     assertThat(f.resolvedAt()).isEqualTo(fixedAt);
                 });
+    }
+
+    /**
+     * The genesis event is written by the store rather than by the reviewer, so that no path
+     * can file a finding that has no history at all.
+     */
+    @Test
+    void filingAFindingLogsHowItGotThere() {
+        Project project = TestStores.persist(store, project(alice.id(), "alice-events"));
+        String reviewId = store.claimReview(project.id(), 9, "sha-1", "{}", mrInfo()).review().id();
+
+        Finding f = store.createFinding(finding(reviewId, project.id(), 9, "disc-a"));
+
+        assertThat(store.eventsOf(f.id())).singleElement().satisfies(e -> {
+            assertThat(e.kind()).isEqualTo(FindingEvent.Kind.CREATED);
+            assertThat(e.actorKind()).isEqualTo(FindingEvent.ActorKind.AGENT);
+            assertThat(e.reviewId()).isEqualTo(reviewId);
+            assertThat(e.headSha()).isEqualTo("sha-1");
+            assertThat(e.actorUser()).isNull();
+            assertThat(e.actorForge()).isNull();
+        });
+    }
+
+    /**
+     * The distinction the whole table exists for: a commit fixing something and a person
+     * accepting it are different acts by different kinds of actor, and both are on the record.
+     */
+    @Test
+    void theEventLogSaysWhoClosedEachFinding() {
+        Project project = TestStores.persist(store, project(alice.id(), "alice-who"));
+        String reviewId = store.claimReview(project.id(), 9, "sha-1", "{}", mrInfo()).review().id();
+        Finding byCommit = store.createFinding(finding(reviewId, project.id(), 9, "disc-a"));
+        Finding byHuman = store.createFinding(finding(reviewId, project.id(), 9, "disc-b"));
+
+        store.markAddressed(FindingEvent.addressedByReview(
+                byCommit, reviewId, "sha-2", "the guard is there now"));
+        store.markApproved(FindingEvent.approvedByHuman(byHuman, "romanbotnari"));
+
+        assertThat(store.eventsOf(byCommit.id())).last().satisfies(e -> {
+            assertThat(e.kind()).isEqualTo(FindingEvent.Kind.ADDRESSED);
+            assertThat(e.actorKind()).isEqualTo(FindingEvent.ActorKind.AGENT);
+            assertThat(e.headSha()).isEqualTo("sha-2");
+            assertThat(e.detail()).isEqualTo("the guard is there now");
+        });
+        assertThat(store.eventsOf(byHuman.id())).last().satisfies(e -> {
+            assertThat(e.kind()).isEqualTo(FindingEvent.Kind.APPROVED);
+            assertThat(e.actorKind()).isEqualTo(FindingEvent.ActorKind.HUMAN);
+            assertThat(e.actorForge()).isEqualTo("romanbotnari");
+            assertThat(e.actorUser()).isNull();
+        });
+        assertThat(store.eventsOfMr(project.id(), 9)).hasSize(4);
+    }
+
+    /**
+     * A transition the UPDATE refused is not a transition. Approving an already-ADDRESSED
+     * finding is a no-op by design, and the log must not claim a sign-off that never happened.
+     */
+    @Test
+    void anEventIsNotLoggedForAStateChangeThatDidNotHappen() {
+        Project project = TestStores.persist(store, project(alice.id(), "alice-noop"));
+        String reviewId = store.claimReview(project.id(), 9, "sha-1", "{}", mrInfo()).review().id();
+        Finding f = store.createFinding(finding(reviewId, project.id(), 9, "disc-a"));
+        store.markAddressed(FindingEvent.addressedByReview(f, reviewId, "sha-2", "fixed"));
+
+        store.markApproved(FindingEvent.approvedByHuman(f, "romanbotnari"));
+
+        assertThat(store.eventsOf(f.id())).extracting(FindingEvent::kind)
+                .containsExactly(FindingEvent.Kind.CREATED, FindingEvent.Kind.ADDRESSED);
+    }
+
+    /**
+     * The race a tracked forge comment can actually lose.
+     *
+     * <p>Goes straight at the insert, because that is the half that matters: the caller's
+     * existence check is what a concurrent delivery slips past, so a test that stops there
+     * proves nothing about what happens next.
+     *
+     * <p>Also pins the translation. SQLite leaves the SQLState unset and Spring hands back an
+     * {@code UncategorizedSQLException} rather than a {@code DataIntegrityViolationException} —
+     * so a catch written against the obvious exception type never fires, and the failure is
+     * silent until a webhook returns 500 in production.
+     */
+    @Test
+    void asecondFindingOnTheSameThreadIsRefusedRatherThanStored() {
+        Project project = TestStores.persist(store, project(alice.id(), "alice-dupe"));
+        String reviewId = store.claimReview(project.id(), 9, "sha-1", "{}", mrInfo()).review().id();
+
+        assertThat(store.createFindingIfThreadFree(finding(reviewId, project.id(), 9, "disc-a")))
+                .isTrue();
+        assertThat(store.createFindingIfThreadFree(finding(reviewId, project.id(), 9, "disc-a")))
+                .isFalse();
+
+        assertThat(store.findingsOfMr(project.id(), 9)).hasSize(1);
+    }
+
+    /** A held finding has no thread, and several of those must not collide on a shared NULL. */
+    @Test
+    void findingsWithNoThreadDoNotCollide() {
+        Project project = TestStores.persist(store, project(alice.id(), "alice-held"));
+        String reviewId = store.claimReview(project.id(), 9, "sha-1", "{}", mrInfo()).review().id();
+
+        assertThat(store.createFindingIfThreadFree(held(reviewId, project.id()))).isTrue();
+        assertThat(store.createFindingIfThreadFree(held(reviewId, project.id()))).isTrue();
+
+        assertThat(store.findingsOfMr(project.id(), 9)).hasSize(2);
+    }
+
+    private Finding held(String reviewId, String projectId) {
+        return new Finding(Ids.newId(), reviewId, projectId, 9, "A.java", 42,
+                Finding.Severity.MAJOR, "title", "body", null, null, false,
+                Finding.State.PENDING, Instant.now(), null);
     }
 
     private Finding finding(String reviewId, String projectId, long mrIid, String discussionId) {

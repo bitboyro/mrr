@@ -8,6 +8,7 @@ import ro.bitboy.mrr.FakeForge;
 import ro.bitboy.mrr.TestStores;
 import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.model.Finding;
+import ro.bitboy.mrr.model.FindingEvent;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Reply;
 import ro.bitboy.mrr.model.ReviewModel.Result;
@@ -79,6 +80,15 @@ class ReplierTest {
         assertThat(gitlab.replies).containsExactly("disc-1:The reader is closed now.");
         assertThat(gitlab.resolved).contains("disc-1:true");
         assertThat(store.openFindings(project.id(), 7)).isEmpty();
+        // A reply closing a finding is the agent's judgement, not the human's — the developer
+        // argued, the model agreed. The event says so, and points at the reply that did it.
+        String findingId = store.findingsOfMr(project.id(), 7).getFirst().id();
+        assertThat(store.eventsOf(findingId)).last().satisfies(e -> {
+            assertThat(e.kind()).isEqualTo(FindingEvent.Kind.ADDRESSED);
+            assertThat(e.actorKind()).isEqualTo(FindingEvent.ActorKind.AGENT);
+            assertThat(e.replyId()).isEqualTo(store.listReplies(project.id(), 7).getFirst().id());
+            assertThat(e.reviewId()).isNull();
+        });
     }
 
     @Test

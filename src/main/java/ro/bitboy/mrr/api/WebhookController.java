@@ -25,8 +25,11 @@ import ro.bitboy.mrr.forge.ForgeFactory;
 import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.model.ForgeKind;
 import ro.bitboy.mrr.model.MrStatus;
+import ro.bitboy.mrr.model.Finding;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Review;
+import ro.bitboy.mrr.review.Findings;
+import ro.bitboy.mrr.review.NoteCommand;
 import ro.bitboy.mrr.review.Replier;
 import ro.bitboy.mrr.review.Reviewer;
 import ro.bitboy.mrr.store.Store;
@@ -61,15 +64,18 @@ public class WebhookController {
     private final MemoryService memory;
     private final ForgeFactory forges;
     private final ObjectMapper mapper;
+    private final Findings findings;
 
     public WebhookController(Store store, Reviewer reviewer, Replier replier,
-                             MemoryService memory, ForgeFactory forges, ObjectMapper mapper) {
+                             MemoryService memory, ForgeFactory forges, ObjectMapper mapper,
+                             Findings findings) {
         this.store = store;
         this.reviewer = reviewer;
         this.replier = replier;
         this.memory = memory;
         this.forges = forges;
         this.mapper = mapper;
+        this.findings = findings;
     }
 
     @SecurityRequirements  // authenticates with the forge's own header, not an mrr token
@@ -255,14 +261,83 @@ public class WebhookController {
             return ignore(project, mrIid, "own_note");
         }
 
-        return store.findByDiscussion(project.id(), mrIid, discussionId)
-                .map(owned -> {
-                    log.info("reply queued on thread {} of {}!{}", discussionId, project.name(), mrIid);
-                    replier.submit(project.id(), mrIid, discussionId, note.noteId(),
-                            note.body(), author);
-                    return ResponseEntity.accepted().body(new Ignored("reply_queued"));
-                })
-                .orElseGet(() -> ignore(project, mrIid, "note_on_a_thread_mrr_does_not_own"));
+        NoteCommand command = NoteCommand.parse(note.body());
+        Finding owned = store.findByDiscussion(project.id(), mrIid, discussionId).orElse(null);
+        if (owned != null) {
+            // A command on a thread mrr already knows about acts on that finding. Everything
+            // else on such a thread is somebody talking to the reviewer, which is a reply.
+            if (command != null && command.kind() != NoteCommand.Kind.FINDING) {
+                return act(project, owned, command, author);
+            }
+            log.info("reply queued on thread {} of {}!{}", discussionId, project.name(), mrIid);
+            replier.submit(project.id(), mrIid, discussionId, note.noteId(), note.body(), author);
+            return ResponseEntity.accepted().body(new Ignored("reply_queued"));
+        }
+
+        // Not a thread mrr opened. Two things make it a finding anyway: somebody said so, or
+        // they left it on a line of the diff — which is what filing a defect looks like on
+        // every forge. Anything else is general conversation and stays theirs.
+        boolean wanted = command != null && command.kind() == NoteCommand.Kind.FINDING;
+        if (!wanted && !note.inline()) {
+            return ignore(project, mrIid, "note_on_a_thread_mrr_does_not_own");
+        }
+        String text = wanted ? command.text() : note.body();
+        if (findings.track(Findings.Actor.onForge(author), project, mrIid, note, text, text)
+                .isPresent()) {
+            return ResponseEntity.accepted().body(new Ignored("finding_tracked"));
+        }
+        return ignore(project, mrIid,
+                wanted ? "nothing_to_track" : "note_on_a_thread_mrr_does_not_own");
+    }
+
+    /**
+     * A command on a finding's thread. The forge is the only identity mrr has here, so the act
+     * is recorded against that username — not against an mrr account, which mrr has no way to
+     * map it to.
+     */
+    private ResponseEntity<?> act(Project project, Finding finding, NoteCommand command,
+                                  String author) {
+        Findings.Actor actor = Findings.Actor.onForge(author);
+        try {
+            if (command.kind() == NoteCommand.Kind.DISPUTE) {
+                findings.dispute(actor, finding, command.text());
+                return ResponseEntity.accepted().body(new Ignored("finding_disputed"));
+            }
+            findings.triage(actor, project, finding, Finding.State.WONT_FIX, command.text());
+            return ResponseEntity.accepted().body(new Ignored("finding_wont_fix"));
+        } catch (ApiException e) {
+            // A command that cannot be carried out — the finding moved first, or it is already
+            // closed — is not a delivery failure. The forge gets its 202. But somebody typed
+            // that command and is waiting for it to do something, so the reason goes back on
+            // the thread rather than only into a log they cannot read.
+            log.info("command on finding {} did nothing — {}", finding.id(), e.getMessage());
+            sayWhyNot(project, finding, e.getMessage());
+            // 200, like every other "understood, nothing to do" answer here. 202 would say mrr
+            // had taken the command on, which is exactly what it declined to do.
+            return ResponseEntity.ok(new Ignored("command_not_applicable"));
+        }
+    }
+
+    /**
+     * Answers a command mrr would not carry out, on the thread it was typed in.
+     *
+     * <p>Best effort by design: failing to explain must not turn a delivery mrr already decided
+     * to ignore into an error, and this is a finding's own thread, so mrr is entitled to speak
+     * there.
+     */
+    private void sayWhyNot(Project project, Finding finding, String reason) {
+        if (finding.discussionId() == null) {
+            return;
+        }
+        try {
+            Forge forge = forges.forProject(project);
+            if (forge.capabilities(project).threadedReplies()) {
+                forge.replyToDiscussion(project, finding.mrIid(), finding.discussionId(), reason);
+            }
+        } catch (Exception e) {
+            log.warn("could not say why the command on finding {} did nothing: {}",
+                    finding.id(), e.getMessage());
+        }
     }
 
     /**
@@ -282,6 +357,15 @@ public class WebhookController {
         if (author == null || author.isBlank()) {
             return false;
         }
+        // Both of mrr's identities count. The review token is the obvious one; the operator
+        // token matters just as much now that mrr posts findings under it — without this, a
+        // finding somebody filed through mrr would come straight back as an inbound comment
+        // and be tracked a second time as a finding of its own.
+        return isMrr(project, author) || (project.hasOperatorToken()
+                && isMrr(project.asOperator(), author));
+    }
+
+    private boolean isMrr(Project project, String author) {
         try {
             String bot = forges.forProject(project).tokenUsername(project);
             return bot != null && bot.equalsIgnoreCase(author);

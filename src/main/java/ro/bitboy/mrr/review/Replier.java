@@ -15,6 +15,7 @@ import ro.bitboy.mrr.forge.ForgeCapabilities;
 import ro.bitboy.mrr.forge.ForgeFactory;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.Finding;
+import ro.bitboy.mrr.model.FindingEvent;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Reply;
 import ro.bitboy.mrr.model.ReviewModel;
@@ -204,7 +205,7 @@ public class Replier {
             forges.forProject(project).replyToDiscussion(project, mrIid, discussionId, posted);
             store.createReply(draft);
             store.saveReplyUsage(draft.id(), answer.usage());
-            closeIfAddressed(project, mrIid, discussionId, finding, verdict);
+            closeIfAddressed(project, mrIid, discussionId, draft.id(), finding, verdict);
             store.clearProjectError(project.id());
             log.info("replied on thread {} of {}!{}", discussionId, project.name(), mrIid);
             return;
@@ -233,7 +234,7 @@ public class Replier {
         if (usage != null) {
             store.saveReplyUsage(replyId, usage);
         }
-        closeIfAddressed(project, mrIid, discussionId, finding, verdict);
+        closeIfAddressed(project, mrIid, discussionId, replyId, finding, verdict);
         store.clearProjectError(project.id());
         log.info("replied on thread {} of {}!{}", discussionId, project.name(), mrIid);
     }
@@ -248,12 +249,13 @@ public class Replier {
      * does not, so the thread still reads correctly to a human.
      */
     private void closeIfAddressed(Project project, long mrIid, String discussionId,
-                                  Finding finding, VerdictParser.ReplyVerdict verdict) {
+                                  String replyId, Finding finding,
+                                  VerdictParser.ReplyVerdict verdict) {
         if (verdict == null || !verdict.addressed() || finding == null) {
             return;
         }
         if (finding.state() == Finding.State.OPEN) {
-            store.markAddressed(finding.id());
+            store.markAddressed(FindingEvent.addressedByReply(finding, replyId));
         }
         if (finding.discussionId() == null) {
             return;

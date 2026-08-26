@@ -91,6 +91,10 @@ CREATE TABLE IF NOT EXISTS projects (
     agent_max_turns   INTEGER NOT NULL DEFAULT 1,    -- 1 = today's single shot
     agent_tools       TEXT,                          -- comma-separated; empty = no tools
     auto_approve      INTEGER NOT NULL DEFAULT 0,    -- approve the MR when zero findings remain
+    -- Hold agent findings back until a person releases them. Off by default: the product must
+    -- not get slower for everyone in order to serve the teams that need a human between the
+    -- model and the merge request.
+    hold_findings     INTEGER NOT NULL DEFAULT 0,
     last_error_kind   TEXT,                          -- FailureKind of the last fail-closed event
     last_error        TEXT,
     last_error_at     TEXT,
@@ -216,14 +220,71 @@ CREATE TABLE IF NOT EXISTS findings (
     note_id       TEXT,
     inline        INTEGER NOT NULL DEFAULT 0,          -- attached to a diff line, or fell back
 
-    state         TEXT NOT NULL,                       -- OPEN | ADDRESSED | APPROVED
+    state         TEXT NOT NULL,                       -- OPEN | PENDING | ADDRESSED | APPROVED
+                                                       -- | WONT_FIX | DUPLICATE | DISCARDED
     created_at    TEXT NOT NULL,
     resolved_at   TEXT,
-    approved_by   TEXT                                 -- GitLab user who resolved it by hand
+    approved_by   TEXT,                                -- forge user who resolved it by hand
+
+    -- Who filed it. NULL predates the column and was the reviewer, which is why nothing reads
+    -- this without defaulting to AGENT. The two author columns are the same two identity
+    -- spaces as finding_events: an mrr user id when it was filed through mrr, a forge username
+    -- when it came from the forge, and neither is inferred from the other.
+    origin        TEXT,                                -- AGENT | HUMAN
+    author_user   TEXT,
+    author_forge  TEXT,
+    -- Which concern raised it — security, tests, performance — as the reviewer named it. Self-
+    -- reported in a single pass rather than produced by separate agents, so it answers "which
+    -- concern found this" without claiming a multi-agent review that did not happen.
+    agent_role    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_findings_open ON findings(project_id, mr_iid, state);
 CREATE INDEX IF NOT EXISTS idx_findings_review ON findings(review_id);
+
+-- One finding per thread, enforced rather than assumed.
+--
+-- Tracking a comment from the forge checks for an existing thread and then inserts, and two
+-- redeliveries of the same comment can pass that check together. A read that tolerates the
+-- duplicate only hides it; this makes the second insert fail, which is what the tracking path
+-- catches and treats as "already tracked".
+--
+-- Partial, because a held finding has no thread yet and several of those share a NULL.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_discussion
+    ON findings(project_id, mr_iid, discussion_id) WHERE discussion_id IS NOT NULL;
+
+-- Why a finding holds the state it holds.
+--
+-- `findings.state` is the fast column the merge gate reads; this is the history behind it.
+-- Three different mechanisms already move a finding — a review's prior verdict, a reply the
+-- model agreed with, and a human resolving the thread on the forge — and until this table
+-- existed the only trace of which one acted was a log line. `actor_kind` is what makes
+-- "the agent proposed, the human committed" expressible, which every later phase needs.
+--
+-- Append-only. Nothing updates or deletes a row here, and an old finding with no events is
+-- honest rather than backfilled: it predates the log.
+CREATE TABLE IF NOT EXISTS finding_events (
+    id           TEXT PRIMARY KEY,
+    finding_id   TEXT NOT NULL REFERENCES findings(id),
+    project_id   TEXT NOT NULL,
+    mr_iid       INTEGER NOT NULL,
+    kind         TEXT NOT NULL,   -- CREATED | ADDRESSED | APPROVED | PROPOSED_ADDRESSED
+                                  -- | REOPENED | WONT_FIX | DISPUTED | DUPLICATE | COMMENTED
+    actor_kind   TEXT NOT NULL,   -- AGENT | HUMAN | SYSTEM
+    -- The two identity spaces, neither inferred from the other: actor_user is an mrr user id
+    -- when the act came through mrr, actor_forge a forge username when it came through the
+    -- forge. A finding records the identity of the surface that authored the act.
+    actor_user   TEXT,
+    actor_forge  TEXT,
+    review_id    TEXT,            -- the review that produced it, when there was one
+    reply_id     TEXT,            -- the reply that produced it, when there was one
+    head_sha     TEXT,
+    detail       TEXT,            -- the model's reason, or the human's note
+    created_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_finding_events_finding ON finding_events(finding_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_finding_events_mr ON finding_events(project_id, mr_iid, created_at);
 
 -- One model answer on a finding thread. A review is a commit; a reply is a human talking
 -- back to a finding mrr already posted. prompt + trace are the transcript.
@@ -264,11 +325,43 @@ CREATE TABLE IF NOT EXISTS mr_status (
     user_context      TEXT,                          -- owner-written notes for the next review
     overview_discussion_id TEXT,                     -- the one ### mrr review thread on this MR
     overview_note_id  TEXT,
+
+    -- The review session, distinct from the cycle above. `current_status` is where the code
+    -- stands; these two are where the *review* stands. AD_HOC is what every merge request has
+    -- always had — no ceremony, the agent reviews, the status follows the findings. FORMAL adds
+    -- named participants who have to sign off before mrr will call it clean.
+    mode              TEXT,                          -- AD_HOC | FORMAL; NULL = AD_HOC
+    session_state     TEXT,                          -- UNDER_REVIEW | SUMMARIZED | CLOSED
+
     updated_at        TEXT NOT NULL,
     PRIMARY KEY (project_id, mr_iid)
 );
 
 CREATE INDEX IF NOT EXISTS idx_mr_status_project ON mr_status(project_id, updated_at DESC);
+
+-- Who is in the room for one merge request's review.
+--
+-- The identity is the same two spaces as everywhere else — an mrr user id, or a forge username
+-- — and one row sets exactly one of them, because mrr has no mapping between the two. The
+-- `identity` column is whichever of the two was given, and is what the primary key is on, so
+-- the same person cannot be added twice through the same door.
+--
+-- `required` is the whole point of a formal session: mrr will not call the request clean until
+-- every required participant has signed off, however few findings are left.
+CREATE TABLE IF NOT EXISTS session_participants (
+    project_id   TEXT NOT NULL,
+    mr_iid       INTEGER NOT NULL,
+    identity     TEXT NOT NULL,                      -- the user id or forge username, as given
+    kind         TEXT NOT NULL,                      -- USER | FORGE | AGENT
+    role         TEXT,                               -- free text: author, reviewer, security…
+    required     INTEGER NOT NULL DEFAULT 0,
+    signed_off_at TEXT,
+    added_at     TEXT NOT NULL,
+    PRIMARY KEY (project_id, mr_iid, identity)
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_participants_mr
+    ON session_participants(project_id, mr_iid);
 
 -- Agent-authored OKF memory. Canonical body is a markdown file under /data/memory/{projectId}/;
 -- this table is the filesystem-free index for list/search.

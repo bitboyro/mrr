@@ -1,6 +1,7 @@
 package ro.bitboy.mrr.store;
 
 import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import ro.bitboy.mrr.auth.Ids;
@@ -10,6 +11,7 @@ import ro.bitboy.mrr.model.AgentSkill;
 import ro.bitboy.mrr.model.AgentTrace;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.Finding;
+import ro.bitboy.mrr.model.FindingEvent;
 import ro.bitboy.mrr.model.ForgeInstance;
 import ro.bitboy.mrr.model.ForgeKind;
 import ro.bitboy.mrr.model.InstanceStats;
@@ -23,6 +25,7 @@ import ro.bitboy.mrr.model.Reply;
 import ro.bitboy.mrr.model.Review;
 import ro.bitboy.mrr.model.ReviewModel;
 import ro.bitboy.mrr.model.Role;
+import ro.bitboy.mrr.model.SessionParticipant;
 import ro.bitboy.mrr.model.User;
 import ro.bitboy.mrr.secret.SecretBox;
 import ro.bitboy.mrr.web.ApiException;
@@ -217,9 +220,9 @@ public class Store {
                                       gitlab_project_id,
                                       gitlab_token, gitlab_operator_token, webhook_secret,
                                       llm_provider_id, skill, skip_drafts,
-                                      agent_max_turns, agent_tools, auto_approve, librarian_enabled,
-                                      created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      agent_max_turns, agent_tools, auto_approve, hold_findings,
+                                      librarian_enabled, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)
                 .params(p.id(), p.ownerId(), p.name(), p.enabled() ? 1 : 0, p.forge().name(),
                         p.gitlabUrl(),
@@ -228,6 +231,7 @@ public class Store {
                         secrets.seal(p.webhookSecret()), p.llmProviderId(), p.skill(),
                         p.skipDrafts() ? 1 : 0,
                         p.agentMaxTurns(), toolsCsv(p.agentTools()), p.autoApprove() ? 1 : 0,
+                        p.holdFindings() ? 1 : 0,
                         p.librarianEnabled() ? 1 : 0, p.createdAt().toString())
                 .update();
         return p;
@@ -239,7 +243,8 @@ public class Store {
                        gitlab_project_id = ?,
                        gitlab_token = ?, gitlab_operator_token = ?, webhook_secret = ?,
                        llm_provider_id = ?, skill = ?, skip_drafts = ?, agent_max_turns = ?,
-                       agent_tools = ?, auto_approve = ?, librarian_enabled = ?
+                       agent_tools = ?, auto_approve = ?, hold_findings = ?,
+                       librarian_enabled = ?
                 WHERE id = ?
                 """)
                 .params(p.name(), p.enabled() ? 1 : 0, p.forge().name(), p.gitlabUrl(),
@@ -248,6 +253,7 @@ public class Store {
                         secrets.seal(p.webhookSecret()),
                         p.llmProviderId(), p.skill(), p.skipDrafts() ? 1 : 0,
                         p.agentMaxTurns(), toolsCsv(p.agentTools()), p.autoApprove() ? 1 : 0,
+                        p.holdFindings() ? 1 : 0,
                         p.librarianEnabled() ? 1 : 0, p.id())
                 .update();
     }
@@ -291,6 +297,10 @@ public class Store {
     public boolean deleteProject(String id) {
         db.sql("DELETE FROM memory_runs WHERE project_id = ?").param(id).update();
         db.sql("DELETE FROM memory_documents WHERE project_id = ?").param(id).update();
+        // Events reference findings, so they go first or the delete violates the foreign key —
+        // on Postgres always, and on SQLite whenever foreign keys are switched on.
+        db.sql("DELETE FROM finding_events WHERE project_id = ?").param(id).update();
+        db.sql("DELETE FROM session_participants WHERE project_id = ?").param(id).update();
         db.sql("DELETE FROM findings WHERE project_id = ?").param(id).update();
         db.sql("DELETE FROM replies WHERE project_id = ?").param(id).update();
         db.sql("DELETE FROM reviews WHERE project_id = ?").param(id).update();
@@ -619,13 +629,16 @@ public class Store {
     public Finding createFinding(Finding f) {
         db.sql("""
                 INSERT INTO findings (id, review_id, project_id, mr_iid, file_path, line, severity,
-                                      title, body, discussion_id, note_id, inline, state, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      title, body, discussion_id, note_id, inline, state, created_at,
+                                      origin, author_user, author_forge, agent_role)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)
                 .params(f.id(), f.reviewId(), f.projectId(), f.mrIid(), f.filePath(), f.line(),
                         f.severity().name(), f.title(), f.body(), f.discussionId(), f.noteId(),
-                        f.inline() ? 1 : 0, f.state().name(), f.createdAt().toString())
+                        f.inline() ? 1 : 0, f.state().name(), f.createdAt().toString(),
+                        f.origin().name(), f.authorUser(), f.authorForge(), f.agentRole())
                 .update();
+        recordEvent(FindingEvent.created(f, headShaOf(f.reviewId())));
         return f;
     }
 
@@ -634,8 +647,12 @@ public class Store {
      * set handed to the model on the next commit so it can say which ones were fixed.
      */
     public List<Finding> openFindings(String projectId, long mrIid) {
-        return db.sql("SELECT * FROM findings WHERE project_id = ? AND mr_iid = ? AND state = ? ORDER BY created_at")
-                .params(projectId, mrIid, Finding.State.OPEN.name())
+        return db.sql("""
+                SELECT * FROM findings WHERE project_id = ? AND mr_iid = ? AND state IN (?, ?)
+                ORDER BY created_at
+                """)
+                .params(projectId, mrIid, Finding.State.OPEN.name(),
+                        Finding.State.PENDING.name())
                 .query(Store::toFinding).list();
     }
 
@@ -649,35 +666,234 @@ public class Store {
      * events: no match means the comment is on somebody else's conversation.
      */
     public Optional<Finding> findByDiscussion(String projectId, long mrIid, String discussionId) {
-        return db.sql("SELECT * FROM findings WHERE project_id = ? AND mr_iid = ? AND discussion_id = ?")
+        // LIMIT 1 rather than an assertion of uniqueness. Nothing should ever put two findings
+        // on one thread, but this is on the webhook path: two redeliveries of the same comment
+        // arriving together could race the existence check that tracking does before it
+        // inserts. A duplicate row is a bookkeeping wart; a query that throws would turn it
+        // into a 500 on every later comment in that thread, which is far worse.
+        return db.sql("""
+                SELECT * FROM findings WHERE project_id = ? AND mr_iid = ? AND discussion_id = ?
+                ORDER BY created_at LIMIT 1
+                """)
                 .params(projectId, mrIid, discussionId)
                 .query(Store::toFinding).optional();
     }
 
-    public void markAddressed(String findingId) {
-        db.sql("UPDATE findings SET state = ?, resolved_at = ? WHERE id = ?")
-                .params(Finding.State.ADDRESSED.name(), Instant.now().toString(), findingId)
-                .update();
+    /**
+     * Closes a finding a commit fixed, and says who decided so.
+     *
+     * <p>The event is the argument rather than a second call because a state change with no
+     * record of what caused it is exactly what this table exists to make impossible: three
+     * mechanisms move a finding, and a fourth added later must not be able to move one
+     * silently. The compiler is what enforces that.
+     */
+    public void markAddressed(FindingEvent event) {
+        // Only from OPEN, and atomically. A review takes minutes: the caller read this finding
+        // before the model ran, and somebody can mark it WONT_FIX in the meantime. Without the
+        // guard the agent would overwrite that with ADDRESSED — silently replacing a person's
+        // decision with its own, which is the one thing this whole ledger exists to prevent.
+        boolean moved = db.sql(
+                "UPDATE findings SET state = ?, resolved_at = ? WHERE id = ? AND state = ?")
+                .params(Finding.State.ADDRESSED.name(), Instant.now().toString(),
+                        event.findingId(), Finding.State.OPEN.name())
+                .update() > 0;
+        if (moved) {
+            recordEvent(event);
+        }
     }
 
     /**
-     * A human resolved the thread on GitLab. That is an acceptance, not a fix, so it gets its
-     * own state and carries the username: "who signed this off" is the whole point of it.
+     * A human resolved the thread on the forge. That is an acceptance, not a fix, so it gets
+     * its own state and carries the username: "who signed this off" is the whole point of it.
      *
      * <p>Only an OPEN finding can be approved. An ADDRESSED one is already closed and its
      * resolved_at is when the commit fixed it — overwriting that would lose the time-to-fix.
+     * The event follows the same guard: a row the UPDATE did not touch is a transition that
+     * did not happen, and the log must not claim otherwise.
      */
-    public void markApproved(String findingId, String username) {
-        db.sql("UPDATE findings SET state = ?, resolved_at = ?, approved_by = ? WHERE id = ? AND state = ?")
-                .params(Finding.State.APPROVED.name(), Instant.now().toString(), username,
-                        findingId, Finding.State.OPEN.name())
-                .update();
+    public void markApproved(FindingEvent event) {
+        boolean moved = db.sql("UPDATE findings SET state = ?, resolved_at = ?, approved_by = ? WHERE id = ? AND state = ?")
+                .params(Finding.State.APPROVED.name(), Instant.now().toString(),
+                        event.actorForge(), event.findingId(), Finding.State.OPEN.name())
+                .update() > 0;
+        if (moved) {
+            recordEvent(event);
+        }
     }
 
     public List<Finding> findingsOfMr(String projectId, long mrIid) {
         return db.sql("SELECT * FROM findings WHERE project_id = ? AND mr_iid = ? ORDER BY created_at")
                 .params(projectId, mrIid)
                 .query(Store::toFinding).list();
+    }
+
+    /**
+     * Files a finding unless its thread already carries one.
+     *
+     * <p>The caller checks first, but a check and an insert are two statements and two
+     * redeliveries of the same forge comment can pass the check together. The unique index on
+     * {@code (project_id, mr_iid, discussion_id)} is what actually decides, and this is where
+     * losing that race is turned into an answer rather than an error.
+     *
+     * @return false when the index refused it — somebody tracked that thread first
+     */
+    public boolean createFindingIfThreadFree(Finding f) {
+        try {
+            createFinding(f);
+            return true;
+        } catch (DataAccessException e) {
+            if (isUniqueViolation(e)) {
+                return false;
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Whether a failure is the unique index refusing a duplicate, on either backend.
+     *
+     * <p>Postgres reports SQLState {@code 23505} and Spring maps it to a
+     * {@link org.springframework.dao.DuplicateKeyException}. SQLite's driver leaves the
+     * SQLState unset, so Spring cannot classify it at all and hands back an
+     * {@code UncategorizedSQLException} — which is why this reads the driver's own message
+     * rather than trusting the translation. Getting that wrong is silent: the exception simply
+     * escapes and a webhook returns 500 where it should have said "already tracked".
+     */
+    private static boolean isUniqueViolation(DataAccessException e) {
+        if (e instanceof DuplicateKeyException) {
+            return true;
+        }
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof SQLException sql) {
+                String state = sql.getSQLState();
+                if (state != null && state.startsWith("23")) {
+                    return true;
+                }
+            }
+            String message = t.getMessage();
+            if (message != null
+                    && (message.contains("UNIQUE constraint failed")
+                            || message.contains("duplicate key value"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public Optional<Finding> findFinding(String id) {
+        return db.sql("SELECT * FROM findings WHERE id = ?").param(id)
+                .query(Store::toFinding).optional();
+    }
+
+    /**
+     * Moves a finding by hand — a person deciding it will not be fixed, is a duplicate, or is
+     * open again after all.
+     *
+     * <p>Reopening clears both {@code resolved_at} and {@code approved_by}: the finding is
+     * standing again, and leaving a sign-off on a live finding would claim somebody accepted
+     * something they did not. {@code expected} is the state the caller believed it was in, so
+     * two people triaging the same finding at once cannot silently overwrite each other.
+     *
+     * @return false when the finding had already moved, and nothing was written
+     */
+    public boolean setFindingState(FindingEvent event, Finding.State next, Finding.State expected) {
+        boolean closing = next.isClosed();
+        boolean moved = db.sql("""
+                UPDATE findings SET state = ?, resolved_at = ?, approved_by = ?
+                WHERE id = ? AND state = ?
+                """)
+                .params(next.name(), closing ? Instant.now().toString() : null,
+                        closing ? event.actorForge() : null, event.findingId(), expected.name())
+                .update() > 0;
+        if (moved) {
+            recordEvent(event);
+        }
+        return moved;
+    }
+
+    /**
+     * A held finding, now posted: OPEN, carrying the thread it landed on, and whatever the
+     * releaser edited it to say.
+     *
+     * <p>Guarded on PENDING like every other transition here, so two people releasing the same
+     * finding at once cannot post it twice and then disagree about which thread it lives on.
+     */
+    public boolean claimForRelease(String findingId) {
+        return db.sql("UPDATE findings SET state = ? WHERE id = ? AND state = ?")
+                .params(Finding.State.OPEN.name(), findingId, Finding.State.PENDING.name())
+                .update() > 0;
+    }
+
+    /** The thread the release landed on, plus whatever the releaser edited it to say. */
+    public void attachThread(FindingEvent event, String title, String body, String discussionId,
+                             String noteId, boolean inline) {
+        db.sql("""
+                UPDATE findings SET title = ?, body = ?, discussion_id = ?, note_id = ?,
+                       inline = ? WHERE id = ?
+                """)
+                .params(title, body, discussionId, noteId, inline ? 1 : 0, event.findingId())
+                .update();
+        recordEvent(event);
+    }
+
+    /** Undoes a claim whose post never landed, so the finding is offered again rather than lost. */
+    public void returnToPending(String findingId) {
+        db.sql("UPDATE findings SET state = ? WHERE id = ? AND state = ?")
+                .params(Finding.State.PENDING.name(), findingId, Finding.State.OPEN.name())
+                .update();
+    }
+
+    /** NULL predates the column, and everything before it was the reviewer's. */
+    private static Finding.Origin origin(String raw) {
+        return raw == null || raw.isBlank() ? Finding.Origin.AGENT : Finding.Origin.valueOf(raw);
+    }
+
+    // ── finding events ───────────────────────────────────────────────────────────────
+
+    /**
+     * Appends one event. Never updates, never deletes.
+     *
+     * <p>Called after the state change it describes has succeeded, and outside any
+     * transaction — there are none anywhere in this class. A failed insert therefore loses the
+     * event and keeps the state change, which is the right way round: mrr's record of where a
+     * finding stands is what the merge gate reads, and weakening it to protect an audit row
+     * would invert the priority.
+     */
+    public void recordEvent(FindingEvent event) {
+        db.sql("""
+                INSERT INTO finding_events (id, finding_id, project_id, mr_iid, kind, actor_kind,
+                                            actor_user, actor_forge, review_id, reply_id,
+                                            head_sha, detail, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)
+                .params(event.id(), event.findingId(), event.projectId(), event.mrIid(),
+                        event.kind().name(), event.actorKind().name(), event.actorUser(),
+                        event.actorForge(), event.reviewId(), event.replyId(), event.headSha(),
+                        event.detail(), event.createdAt().toString())
+                .update();
+    }
+
+    public List<FindingEvent> eventsOf(String findingId) {
+        return db.sql("SELECT * FROM finding_events WHERE finding_id = ? ORDER BY created_at, id")
+                .param(findingId).query(Store::toFindingEvent).list();
+    }
+
+    /** Every event on every finding of one merge request — what the cycle page renders. */
+    public List<FindingEvent> eventsOfMr(String projectId, long mrIid) {
+        return db.sql("""
+                SELECT * FROM finding_events WHERE project_id = ? AND mr_iid = ?
+                ORDER BY created_at, id
+                """)
+                .params(projectId, mrIid).query(Store::toFindingEvent).list();
+    }
+
+    /** The commit a review ran against, for the genesis event. Null when there is no review. */
+    private String headShaOf(String reviewId) {
+        if (reviewId == null) {
+            return null;
+        }
+        return db.sql("SELECT head_sha FROM reviews WHERE id = ?").param(reviewId)
+                .query(String.class).optional().orElse(null);
     }
 
     // ── replies ──────────────────────────────────────────────────────────────────────
@@ -814,6 +1030,7 @@ public class Store {
     private static final String MR_STATUS_SELECT = """
             SELECT s.project_id, s.mr_iid, s.current_status, s.latest_review_id, s.latest_head_sha,
                    s.open_findings, s.mrr_approved, s.mrr_approved_sha, s.user_context, s.updated_at,
+                   s.mode, s.session_state,
                    r.mr_title AS title
             FROM mr_status s
             LEFT JOIN reviews r ON r.id = s.latest_review_id
@@ -1551,6 +1768,7 @@ public class Store {
                 rs.getInt("agent_max_turns") == 0 ? 1 : rs.getInt("agent_max_turns"),
                 toolsList(rs.getString("agent_tools")),
                 rs.getInt("auto_approve") == 1,
+                columnInt(rs, "hold_findings") == 1,
                 columnInt(rs, "librarian_enabled") == 1,
                 rs.getString("memory_head_sha"),
                 memoryStatus(rs.getString("memory_status")),
@@ -1596,7 +1814,19 @@ public class Store {
                 rs.getString("body"), rs.getString("discussion_id"), rs.getString("note_id"),
                 rs.getInt("inline") == 1, Finding.State.valueOf(rs.getString("state")),
                 instant(rs.getString("created_at")), instant(rs.getString("resolved_at")),
-                rs.getString("approved_by"));
+                rs.getString("approved_by"), origin(rs.getString("origin")),
+                rs.getString("author_user"), rs.getString("author_forge"),
+                columnText(rs, "agent_role"));
+    }
+
+    private static FindingEvent toFindingEvent(ResultSet rs, int n) throws SQLException {
+        return new FindingEvent(
+                rs.getString("id"), rs.getString("finding_id"), rs.getString("project_id"),
+                rs.getLong("mr_iid"), FindingEvent.Kind.valueOf(rs.getString("kind")),
+                FindingEvent.ActorKind.valueOf(rs.getString("actor_kind")),
+                rs.getString("actor_user"), rs.getString("actor_forge"),
+                rs.getString("review_id"), rs.getString("reply_id"), rs.getString("head_sha"),
+                rs.getString("detail"), instant(rs.getString("created_at")));
     }
 
     private static Reply toReply(ResultSet rs, int n) throws SQLException {
@@ -1616,7 +1846,105 @@ public class Store {
                 rs.getString("latest_review_id"), rs.getString("latest_head_sha"),
                 rs.getInt("open_findings"), rs.getInt("mrr_approved") == 1,
                 rs.getString("mrr_approved_sha"), rs.getString("user_context"),
-                instant(rs.getString("updated_at")), rs.getString("title"));
+                instant(rs.getString("updated_at")), rs.getString("title"),
+                mode(columnText(rs, "mode")), sessionState(columnText(rs, "session_state")));
+    }
+
+    /** NULL predates sessions, and everything before them was ad-hoc. */
+    private static MrStatus.Mode mode(String raw) {
+        return raw == null || raw.isBlank() ? MrStatus.Mode.AD_HOC : MrStatus.Mode.valueOf(raw);
+    }
+
+    private static MrStatus.SessionState sessionState(String raw) {
+        return raw == null || raw.isBlank()
+                ? MrStatus.SessionState.UNDER_REVIEW
+                : MrStatus.SessionState.valueOf(raw);
+    }
+
+    // ── session participants ─────────────────────────────────────────────────────────
+
+    public List<SessionParticipant> participants(String projectId, long mrIid) {
+        return db.sql("""
+                SELECT * FROM session_participants WHERE project_id = ? AND mr_iid = ?
+                ORDER BY added_at
+                """)
+                .params(projectId, mrIid).query(Store::toParticipant).list();
+    }
+
+    /** Adding somebody who is already in the room updates their role rather than failing. */
+    public SessionParticipant addParticipant(SessionParticipant p) {
+        db.sql("""
+                INSERT INTO session_participants (project_id, mr_iid, identity, kind, role,
+                                                  required, added_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (project_id, mr_iid, identity)
+                DO UPDATE SET kind = excluded.kind, role = excluded.role,
+                              required = excluded.required
+                """)
+                .params(p.projectId(), p.mrIid(), p.identity(), p.kind().name(), p.role(),
+                        p.required() ? 1 : 0, p.addedAt().toString())
+                .update();
+        return p;
+    }
+
+    public boolean removeParticipant(String projectId, long mrIid, String identity) {
+        return db.sql("""
+                DELETE FROM session_participants
+                WHERE project_id = ? AND mr_iid = ? AND identity = ?
+                """)
+                .params(projectId, mrIid, identity).update() > 0;
+    }
+
+    public boolean signOff(String projectId, long mrIid, String identity) {
+        return db.sql("""
+                UPDATE session_participants SET signed_off_at = ?
+                WHERE project_id = ? AND mr_iid = ? AND identity = ? AND signed_off_at IS NULL
+                """)
+                .params(Instant.now().toString(), projectId, mrIid, identity).update() > 0;
+    }
+
+    /**
+     * How many required participants have not signed off yet.
+     *
+     * <p>The one query the merge gate asks in a formal session, and the reason the session is
+     * more than a list of names.
+     */
+    public int outstandingSignOffs(String projectId, long mrIid) {
+        Integer n = db.sql("""
+                SELECT COUNT(*) FROM session_participants
+                WHERE project_id = ? AND mr_iid = ? AND required = 1 AND signed_off_at IS NULL
+                """)
+                .params(projectId, mrIid).query(Integer.class).optional().orElse(0);
+        return n == null ? 0 : n;
+    }
+
+    /**
+     * A new commit invalidates every sign-off. Somebody approving what they read yesterday has
+     * not approved what was pushed since, and letting that stand would be the ledger claiming a
+     * review that never happened.
+     */
+    public int clearSignOffs(String projectId, long mrIid) {
+        return db.sql("""
+                UPDATE session_participants SET signed_off_at = NULL
+                WHERE project_id = ? AND mr_iid = ? AND signed_off_at IS NOT NULL
+                """)
+                .params(projectId, mrIid).update();
+    }
+
+    public void setSession(String projectId, long mrIid, MrStatus.Mode mode,
+                           MrStatus.SessionState state) {
+        db.sql("UPDATE mr_status SET mode = ?, session_state = ?, updated_at = ? "
+                        + "WHERE project_id = ? AND mr_iid = ?")
+                .params(mode.name(), state.name(), Instant.now().toString(), projectId, mrIid)
+                .update();
+    }
+
+    private static SessionParticipant toParticipant(ResultSet rs, int n) throws SQLException {
+        return new SessionParticipant(
+                rs.getString("project_id"), rs.getLong("mr_iid"), rs.getString("identity"),
+                SessionParticipant.Kind.valueOf(rs.getString("kind")), rs.getString("role"),
+                rs.getInt("required") == 1, instant(rs.getString("signed_off_at")),
+                instant(rs.getString("added_at")));
     }
 
     private static AgentSkill toSkill(ResultSet rs, int n) throws SQLException {

@@ -242,6 +242,37 @@ class GitHubForgeTest {
         assertThat(event.note().onMergeRequest()).isTrue();
     }
 
+    /**
+     * A review comment is inherently on a line, and an issue comment never is. That is what
+     * lets mrr tell "somebody filed a defect" from "somebody said something".
+     */
+    @Test
+    void aReviewCommentCarriesWhereOnTheDiffItWasLeft() {
+        ForgeEvent inline = parse("pull_request_review_comment", """
+                {"action":"created","pull_request":{"number":7},
+                 "comment":{"id":1,"path":"A.java","line":12,"body":"overruns",
+                            "user":{"login":"ada"}}}""");
+        ForgeEvent general = parse("issue_comment", """
+                {"action":"created","issue":{"number":7,"pull_request":{}},
+                 "comment":{"id":2,"body":"ship it","user":{"login":"ada"}}}""");
+
+        assertThat(inline.note().inline()).isTrue();
+        assertThat(inline.note().filePath()).isEqualTo("A.java");
+        assertThat(inline.note().line()).isEqualTo(12);
+        assertThat(general.note().inline()).isFalse();
+    }
+
+    /** After a force-push GitHub drops `line` and keeps `original_line`. */
+    @Test
+    void anOutdatedReviewCommentFallsBackToWhereItWasWritten() {
+        ForgeEvent event = parse("pull_request_review_comment", """
+                {"action":"created","pull_request":{"number":7},
+                 "comment":{"id":1,"path":"A.java","original_line":9,"body":"overruns",
+                            "user":{"login":"ada"}}}""");
+
+        assertThat(event.note().line()).isEqualTo(9);
+    }
+
     @Test
     void anIssueCommentOnAnIssueRatherThanAPullRequestIsNotOurs() {
         ForgeEvent event = parse("issue_comment", """

@@ -98,9 +98,22 @@ public final class VerdictParser {
                     item.path("line").isIntegralNumber() ? item.path("line").asInt() : null,
                     Finding.Severity.parse(text(item.path("severity"))),
                     title == null ? firstLine(body) : title,
-                    body == null ? title : body));
+                    body == null ? title : body,
+                    role(text(item.path("role")))));
         }
         return findings;
+    }
+
+    /**
+     * A concern name, trimmed and bounded. Free text from the model, so it is kept short enough
+     * to sit in a UI pill and never long enough to be a paragraph smuggled into a column.
+     */
+    private static String role(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String value = raw.trim().toLowerCase(java.util.Locale.ROOT);
+        return value.length() <= 32 ? value : value.substring(0, 32);
     }
 
     private List<ReviewModel.PriorVerdict> priorVerdicts(JsonNode node) {

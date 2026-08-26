@@ -24,6 +24,7 @@ import ro.bitboy.mrr.model.AgentSkill;
 import ro.bitboy.mrr.model.AgentTrace;
 import ro.bitboy.mrr.model.FailureKind;
 import ro.bitboy.mrr.model.Finding;
+import ro.bitboy.mrr.model.FindingEvent;
 import ro.bitboy.mrr.model.MrStatus;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Review;
@@ -208,9 +209,22 @@ public class Reviewer {
 
         // Everything still standing on this MR from earlier commits. The model judges these
         // alongside the new diff, which is what lets a fix resolve the thread that reported it.
-        List<Finding> priorOpen = store.openFindings(project.id(), review.mrIid());
+        List<Finding> standing = store.openFindings(project.id(), review.mrIid());
+        // A held finding was never posted, so nobody has seen it and the model has no thread to
+        // judge it against. It still counts against the merge gate — it is in `standing` — but
+        // handing it over as a prior would ask the model whether a commit fixed something it
+        // was never told about.
+        List<Finding> priorOpen = standing.stream().filter(f -> !f.state().isPending()).toList();
         store.upsertMrStatus(project.id(), review.mrIid(), MrStatus.Status.REVIEWING,
-                review.id(), review.headSha(), priorOpen.size());
+                review.id(), review.headSha(), standing.size());
+        // A new commit invalidates every sign-off. Somebody who approved what they read
+        // yesterday has not approved what was pushed since, and carrying that forward would be
+        // the ledger claiming a review that never happened.
+        int cleared = store.clearSignOffs(project.id(), review.mrIid());
+        if (cleared > 0) {
+            log.info("cleared {} sign-off(s) on {}!{} — new commit {}", cleared, project.name(),
+                    review.mrIid(), shortSha(review.headSha()));
+        }
 
         var tools = ReviewTools.forProject(project);
         List<AgentSkill> skills = store.listSkills(project.id());
@@ -298,12 +312,24 @@ public class Reviewer {
         List<DiscussionView> threads = listThreads(project, review.mrIid());
         adoptHumanResolves(project, review.mrIid(), threads);
         int open = store.openFindings(project.id(), review.mrIid()).size();
-        MrStatus.Status status = open == 0 ? MrStatus.Status.CLEAN : MrStatus.Status.NEEDS_WORK;
+
+        // In a formal session, "no findings left" is only half the answer. The other half is
+        // that the people who were named as required have said they looked — which is the
+        // whole difference between a session and a list of names, and the reason CLEAN cannot
+        // be computed from findings alone here.
+        int outstanding = existing != null && existing.mode() == MrStatus.Mode.FORMAL
+                ? store.outstandingSignOffs(project.id(), review.mrIid())
+                : 0;
+        if (outstanding > 0) {
+            log.info("{}!{} has no open findings but {} required sign-off(s) outstanding",
+                    project.name(), review.mrIid(), outstanding);
+        }
+        MrStatus.Status status = MrStatus.gate(open, outstanding);
         store.upsertMrStatus(project.id(), review.mrIid(), status,
                 review.id(), review.headSha(), open);
         // The in-memory review still has null discussion ids until markReady; re-read.
         Review posted = store.findReview(review.id()).orElse(review);
-        syncForgeThreads(project, posted, open == 0, threads);
+        syncForgeThreads(project, posted, status == MrStatus.Status.CLEAN, threads);
         if (!project.autoApprove()) {
             return;
         }
@@ -314,7 +340,9 @@ public class Reviewer {
             return;
         }
         try {
-            if (open == 0) {
+            // Auto-approve follows the same rule the cycle status just followed, so mrr cannot
+            // approve a formal session that its own status page calls NEEDS_WORK.
+            if (status == MrStatus.Status.CLEAN) {
                 forge(project).approve(project, review.mrIid());
                 store.markMrrApproved(project.id(), review.mrIid(), review.headSha());
                 log.info("approved {}!{} at {}", project.name(), review.mrIid(),
@@ -370,6 +398,10 @@ public class Reviewer {
                 // is worse than leaving one open.
                 continue;
             }
+            if (!finding.agentMayClose()) {
+                proposeAddressed(project, review, finding, prior, caps);
+                continue;
+            }
             try {
                 if (finding.discussionId() != null) {
                     if (caps.resolvableThreads()) {
@@ -379,7 +411,8 @@ public class Reviewer {
                         markAddressedInPlace(project, review.mrIid(), finding, caps);
                     }
                 }
-                store.markAddressed(finding.id());
+                store.markAddressed(FindingEvent.addressedByReview(
+                        finding, review.id(), review.headSha(), prior.note()));
                 log.info("finding {} addressed by {} — {}", finding.id(),
                         shortSha(review.headSha()),
                         caps.resolvableThreads() ? "thread resolved"
@@ -388,6 +421,44 @@ public class Reviewer {
                 // A thread that will not resolve is not worth failing the review over.
                 log.warn("could not resolve thread for finding {}: {}", finding.id(), e.getMessage());
             }
+        }
+    }
+
+    /**
+     * The model thinks a human's finding is fixed. It does not get to close it.
+     *
+     * <p>A person reported this, so a person decides it is settled — the agent says what it
+     * sees on the thread and the finding stays OPEN, counting against the merge gate until
+     * somebody resolves it. That resolve is already an {@code APPROVED} sign-off through
+     * {@link #adoptHumanResolves}, so no new closing path is needed for this at all.
+     *
+     * <p>Said once, not once per push. If the newest event on the finding is already a
+     * proposal, nothing has happened since mrr last said this and repeating it would be noise
+     * on somebody's thread. Anything else in between — a reply, a reopen — makes it worth
+     * saying again.
+     */
+    private void proposeAddressed(Project project, Review review, Finding finding,
+                                  ReviewModel.PriorVerdict prior, ForgeCapabilities caps) {
+        List<FindingEvent> history = store.eventsOf(finding.id());
+        boolean saidAlready = !history.isEmpty()
+                && history.getLast().kind() == FindingEvent.Kind.PROPOSED_ADDRESSED;
+        if (saidAlready) {
+            log.info("finding {} still looks addressed at {} — already said so, staying quiet",
+                    finding.id(), shortSha(review.headSha()));
+            return;
+        }
+        store.recordEvent(FindingEvent.proposedAddressed(
+                finding, review.id(), review.headSha(), prior.note()));
+        log.info("finding {} looks addressed at {} but a human filed it — proposing, not closing",
+                finding.id(), shortSha(review.headSha()));
+        if (finding.discussionId() == null || !caps.threadedReplies()) {
+            return;
+        }
+        try {
+            forge(project).replyToDiscussion(project, review.mrIid(), finding.discussionId(),
+                    Prompts.proposedAddressedComment(prior.note(), shortSha(review.headSha())));
+        } catch (Exception e) {
+            log.warn("could not post the proposal for finding {}: {}", finding.id(), e.getMessage());
         }
     }
 
@@ -411,10 +482,20 @@ public class Reviewer {
         }
     }
 
-    /** One thread per finding, anchored to the diff line where the host will accept it. */
+    /**
+     * One thread per finding, anchored to the diff line where the host will accept it.
+     *
+     * <p>Unless the project holds findings, in which case none of them reach the forge: they
+     * are stored {@code PENDING} with no thread, counting against the merge gate until
+     * somebody releases or discards each one. That is the whole of the human-in-the-loop
+     * option — the review runs exactly as it always did, and only the posting waits.
+     */
     private List<Finding> openThreads(Project project, Review review, ReviewModel.Verdict verdict) {
         if (verdict.findings().isEmpty()) {
             return List.of();
+        }
+        if (project.holdFindings()) {
+            return holdFindings(project, review, verdict);
         }
         Forge forge = forge(project);
         // The anchor is whatever this host needs — three SHAs on GitLab, a head commit on
@@ -443,9 +524,33 @@ public class Reviewer {
                     Ids.newId(), review.id(), project.id(), review.mrIid(),
                     found.file(), found.line(), found.severity(), found.title(), body,
                     discussion.discussionId(), discussion.noteId(), inline.isPresent(),
-                    Finding.State.OPEN, Instant.now(), null)));
+                    Finding.State.OPEN, Instant.now(), null, null,
+                    Finding.Origin.AGENT, null, null, found.role())));
         }
         return opened;
+    }
+
+    /**
+     * The findings, stored but not posted.
+     *
+     * <p>No thread, no anchor, no call to the forge — a held finding is a draft, and drafting
+     * one must not put anything on somebody's merge request. The line and file are kept so
+     * that releasing it later can anchor it exactly where the reviewer meant.
+     */
+    private List<Finding> holdFindings(Project project, Review review,
+                                       ReviewModel.Verdict verdict) {
+        List<Finding> held = new ArrayList<>();
+        for (ReviewModel.NewFinding found : verdict.findings()) {
+            held.add(store.createFinding(new Finding(
+                    Ids.newId(), review.id(), project.id(), review.mrIid(),
+                    found.file(), found.line(), found.severity(), found.title(),
+                    Prompts.findingComment(found), null, null, false,
+                    Finding.State.PENDING, Instant.now(), null, null,
+                    Finding.Origin.AGENT, null, null, found.role())));
+        }
+        log.info("held {} finding(s) on {}!{} — {} releases findings by hand",
+                held.size(), project.name(), review.mrIid(), project.name());
+        return held;
     }
 
     /**
@@ -568,7 +673,7 @@ public class Reviewer {
             if (bot != null && bot.equalsIgnoreCase(resolver)) {
                 continue;
             }
-            store.markApproved(finding.id(), resolver);
+            store.markApproved(FindingEvent.approvedByHuman(finding, resolver));
             changed = true;
             log.info("finding {} approved by {} on {}!{} — thread stays closed",
                     finding.id(), resolver, project.name(), mrIid);
@@ -677,11 +782,15 @@ public class Reviewer {
      * ADDRESSED by a commit or APPROVED by a human — are resolved again if a later comment
      * reopened them. A hand-resolve is adopted before this runs, so it is honoured here
      * rather than undone.
+     *
+     * <p>Threads mrr did not open are left alone. A finding tracked from somebody's own comment
+     * still counts against the merge gate, but their conversation is not mrr's to close and
+     * reopen — see {@link Finding#mrrOpenedThread()}.
      */
     private void syncFindingThreads(Project project, Review review,
                                     Map<String, Boolean> current) {
         for (Finding finding : store.findingsOfMr(project.id(), review.mrIid())) {
-            if (finding.discussionId() == null) {
+            if (finding.discussionId() == null || !finding.mrrOpenedThread()) {
                 continue;
             }
             boolean resolve = finding.state().isClosed();

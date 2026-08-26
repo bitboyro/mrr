@@ -144,6 +144,18 @@ public class SchemaPatch {
         addColumn("mr_status", "overview_discussion_id", "TEXT");
         addColumn("mr_status", "overview_note_id", "TEXT");
         addColumn("replies", "source_note_id", "TEXT");
+        addColumn("projects", "hold_findings", "INTEGER NOT NULL DEFAULT 0");
+        // The review session. NULL on every existing row, which reads as AD_HOC — the shape
+        // every merge request had before sessions existed.
+        addColumn("mr_status", "mode", "TEXT");
+        addColumn("mr_status", "session_state", "TEXT");
+        // Human-authored findings. review_id stays NOT NULL: a finding filed by hand is still
+        // filed against the commit the merge request was at, so it points at the review that
+        // was current when somebody raised it.
+        addColumn("findings", "origin", "TEXT");
+        addColumn("findings", "author_user", "TEXT");
+        addColumn("findings", "author_forge", "TEXT");
+        addColumn("findings", "agent_role", "TEXT");
         db.sql("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_replies_source_note
                     ON replies(project_id, discussion_id, source_note_id)

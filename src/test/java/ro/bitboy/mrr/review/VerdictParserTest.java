@@ -16,6 +16,38 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class VerdictParserTest {
 
+    /**
+     * Which concern raised a finding, self-reported in one pass. Not separate agents — saying
+     * so in the ledger without running them would be claiming a review that did not happen.
+     */
+    @Test
+    void aFindingCarriesTheConcernItCameFrom() {
+        var verdict = new VerdictParser(new com.fasterxml.jackson.databind.ObjectMapper())
+                .parse("""
+                        {"summary":"s","findings":[
+                          {"file":"A.java","line":1,"severity":"major","title":"npe",
+                           "body":"b","role":"Security"},
+                          {"file":"B.java","line":2,"severity":"minor","title":"style",
+                           "body":"b"}],
+                         "prior":[]}""");
+
+        assertThat(verdict.findings().get(0).role()).isEqualTo("security");
+        assertThat(verdict.findings().get(1).role()).isNull();
+    }
+
+    /** Free text from a model, kept short enough to be a label rather than a paragraph. */
+    @Test
+    void anAbsurdlyLongRoleIsCutRatherThanStored() {
+        var verdict = new VerdictParser(new com.fasterxml.jackson.databind.ObjectMapper())
+                .parse("""
+                        {"summary":"s","findings":[
+                          {"file":"A.java","severity":"major","title":"t","body":"b",
+                           "role":"%s"}],
+                         "prior":[]}""".formatted("x".repeat(200)));
+
+        assertThat(verdict.findings().getFirst().role()).hasSize(32);
+    }
+
     private final VerdictParser parser = new VerdictParser(new ObjectMapper());
 
     @Test
