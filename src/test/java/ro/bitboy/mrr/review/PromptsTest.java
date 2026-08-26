@@ -168,6 +168,49 @@ class PromptsTest {
         assertThat(Prompts.isOverview(null)).isFalse();
     }
 
+    /**
+     * The model has to see a human's finding — the code is contested and that is context —
+     * but an `addressed` verdict on one is advice mrr will decline to act on, so the prompt
+     * says which ones those are rather than letting the model write confident closes.
+     */
+    @Test
+    void aHumanPriorIsMarkedProposeOnlyAndAnAgentPriorIsNot() {
+        Finding mine = finding("f-human", "leak");
+        Finding theirs = new Finding("f-agent", "r", "p", 1, "A.java", 2,
+                Finding.Severity.MAJOR, "npe", "body", "d", "n", true,
+                Finding.State.OPEN, Instant.now(), null, null,
+                Finding.Origin.HUMAN, "user-alice", null);
+
+        String prompt = Prompts.user(diff(), List.of(mine, theirs));
+
+        assertThat(prompt).contains("id: f-agent");
+        assertThat(prompt).contains("id: f-human");
+        assertThat(prompt.substring(prompt.indexOf("id: f-agent")))
+                .contains("reported_by: a person")
+                .contains("propose only");
+        assertThat(prompt.substring(prompt.indexOf("id: f-human"), prompt.indexOf("id: f-agent")))
+                .doesNotContain("reported_by");
+    }
+
+    /** The slice path packs its own prompt, and must carry the same mark. */
+    @Test
+    void aSlicedReviewKeepsTheProposeOnlyMark() {
+        Finding human = new Finding("f-h", "r", "p", 1, "A.java", 2, Finding.Severity.MAJOR,
+                "leak", "body", "d", "n", true, Finding.State.OPEN, Instant.now(), null, null,
+                Finding.Origin.HUMAN, "user-alice", null);
+        DiffWindows.Slice slice = new DiffWindows.Slice(1, 1, List.of("A.java"),
+                "--- A.java\n+int x;\n", false);
+
+        String prompt = Prompts.userSlice(diff(), slice, List.of(), 20_000, null, List.of(human));
+
+        assertThat(prompt).contains("reported_by: a person");
+    }
+
+    private static Diff diff() {
+        return new Diff("title", "desc", "fix/x", "main", "https://gitlab/mr/1",
+                "Ada", "ada", List.of("A.java"), "--- A.java\n+int x;\n", false);
+    }
+
     private static Finding finding(String id, String title) {
         return new Finding(id, "r", "p", 1, "A.java", 2, Finding.Severity.MAJOR,
                 title, "body", "d", "n", true, Finding.State.OPEN, Instant.now(), null);

@@ -85,6 +85,18 @@ public final class TestStores {
                 Instant.now());
     }
 
+    /** The same project with an operator PAT, which is what gates acting as a person. */
+    public static Project withOperator(Project project, String operatorToken) {
+        return new Project(project.id(), project.ownerId(), project.name(), project.enabled(),
+                project.forge(), project.gitlabUrl(), project.gitlabProjectId(),
+                project.gitlabToken(), operatorToken, project.webhookSecret(),
+                project.llmProviderId(), project.llm(), project.skill(), project.skipDrafts(),
+                project.agentMaxTurns(), project.agentTools(), project.autoApprove(),
+                project.librarianEnabled(), project.memoryHeadSha(), project.memoryStatus(),
+                project.memoryRefreshedAt(), project.lastErrorKind(), project.lastError(),
+                project.lastErrorAt(), project.createdAt());
+    }
+
     /**
      * Persists the catalog entry a project references, then the project. Every project read
      * inner-joins {@code llm_providers}, so a project whose entry was never stored is invisible.

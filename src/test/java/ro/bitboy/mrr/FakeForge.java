@@ -46,6 +46,8 @@ public final class FakeForge implements Forge {
     public List<MergeRequest> openMrs = List.of();
     public Optional<MergeRequest> oneMr = Optional.empty();
     public Discussion nextDiscussion = new Discussion("ov-1", "note-1");
+    /** Null means the host rejects every position, which is the default and the common case. */
+    public Discussion inlineDiscussion;
     public String tokenUser = "mrr-bot";
     /** Set to make the token-user lookup blow up the way a 401 or a dead host would. */
     public RuntimeException tokenUserFailure;
@@ -121,6 +123,11 @@ public final class FakeForge implements Forge {
     public Optional<Discussion> postInlineDiscussion(Project project, long mrIid, AnchorRef anchor,
                                                      String filePath, int line, String markdown) {
         inlineAttempts.add(filePath + ":" + line);
+        lastToken = project.gitlabToken();
+        if (inlineDiscussion != null) {
+            posted.add(markdown);
+            return Optional.of(inlineDiscussion);
+        }
         return Optional.empty();
     }
 

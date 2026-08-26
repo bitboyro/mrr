@@ -27,6 +27,38 @@ thread lists them, edited in place on later commits rather than reposted.
   deliberately not `ADDRESSED` — nobody is claiming a commit fixed it, so the approver is on
   the record. Reply instead if you want the model to weigh in; if it agrees, its reply closes
   the thread. Don't post "closing this" notes — mrr ignores its own.
+- **A review can be formal when it needs to be.** By default there is no ceremony at all. Make
+  one formal and you can name reviewers who must sign off before mrr will call the request
+  clean — zero findings is not enough on its own. A new commit clears every sign-off, because
+  approving what you read yesterday is not approving what was pushed since.
+- **Findings can wait for a person, if your team needs that.** Turn on *hold findings* and the
+  reviewer stores what it finds without posting anything; you release each one onto the request,
+  editing it first if you like, or discard it. They still count against the merge gate while
+  they wait.
+- **You can ask for a review instead of waiting for one.** "Review now" on the merge-request
+  page reviews the current commit, and works on a request mrr has never seen — so a repository
+  whose webhook was never registered still gets reviewed on demand. It is free when the commit
+  has already been reviewed; re-running the same commit on purpose is a separate button.
+- **Comment on a diff line and it becomes your finding.** You never have to open mrr: a comment
+  on a line of the diff is taken into the ledger, attributed to you, counted like any other, and
+  judged by every later review. mrr writes nothing back on that thread and never resolves it —
+  it is yours. Resolving it yourself is what closes the finding. For anything a line cannot
+  express, three commands work in a comment: `mrr: finding <title>` raises one, `mrr: wontfix
+  <why>` closes one with your name on the risk, and `mrr: dispute <why>` records that you
+  disagree without letting the finding stop counting. The command has to be the first thing in
+  the comment, so writing *about* it does nothing.
+- **You can file findings too, and the agent cannot close them.** A finding you raise from the
+  UI, the API, or MCP is the same object the reviewer produces — its own thread, anchored to
+  the line, counted the same way. The difference is who may close it: a later review can say
+  your finding looks fixed, and it says so on the thread, but it stays open until you resolve
+  it. `WONT_FIX` is yours to set, with your name on the risk you accepted. Disagreeing with a
+  finding records the disagreement and leaves it open — a contested blocker that stops counting
+  is how a ledger starts lying. Filing needs the project's operator PAT, so the finding carries
+  your identity rather than the bot's.
+- **Every finding says how it got there.** A commit fixing something and a person accepting it
+  are different acts, so each one is recorded with who performed it — the agent, or a named
+  human. The cycle page shows the log per finding; `GET /api/projects/{id}/merge-requests/{iid}`
+  returns it. A finding from before this existed simply has no history rather than a made-up one.
 - **Duplicate deliveries are free.** Reviews are keyed on `(project, mr_iid, head_sha)`, so a
   redelivered hook — or a title or label edit, which also fires `update` — returns the existing
   review instead of spending tokens. A new push is a new head SHA and so a new review.

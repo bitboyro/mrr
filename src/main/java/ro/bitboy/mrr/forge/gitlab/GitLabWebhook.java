@@ -38,7 +38,8 @@ public final class GitLabWebhook {
         if ("note".equals(kind)) {
             return ForgeEvent.note(noteMrIid(body), new ForgeEvent.Note(
                     noteDiscussionId(body), noteId(body), noteBody(body),
-                    noteAuthorUsername(body), isSystemNote(body), isMergeRequestNote(body)), kind);
+                    noteAuthorUsername(body), isSystemNote(body), isMergeRequestNote(body),
+                    notePath(body), noteLine(body)), kind);
         }
         if (!"merge_request".equals(kind)) {
             return ForgeEvent.other(kind);
@@ -116,6 +117,22 @@ public final class GitLabWebhook {
 
     public static String noteBody(JsonNode body) {
         return text(body.path("object_attributes").path("note"));
+    }
+
+    /**
+     * The file a diff note was left on, or null for a comment on the request as a whole.
+     * GitLab puts the anchor on {@code position}, which is present only on a {@code DiffNote}.
+     */
+    public static String notePath(JsonNode body) {
+        JsonNode position = body.path("object_attributes").path("position");
+        String path = text(position.path("new_path"));
+        return path != null ? path : text(position.path("old_path"));
+    }
+
+    /** The line in the new file, when the note is on one. Null on a deleted line. */
+    public static Integer noteLine(JsonNode body) {
+        JsonNode line = body.path("object_attributes").path("position").path("new_line");
+        return line.isMissingNode() || line.isNull() ? null : line.asInt();
     }
 
     public static String noteAuthorUsername(JsonNode body) {

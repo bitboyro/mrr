@@ -8,6 +8,251 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A closed finding cannot be disputed.** `mrr: dispute` recorded the disagreement whatever
+  state the finding was in, so an `ADDRESSED` or `WONT_FIX` one ended up carrying an objection
+  while the merge gate went on saying the request was fine — the contract is that a dispute
+  leaves a finding **open and counting**, and on a closed one it did neither. Reopening silently
+  would have been worse: a comment on the forge would undo a decision somebody put their name
+  to. So it is refused, reopening stays an explicit act with an author, and **the reason is
+  posted back on the thread the command was typed in** rather than only into a log the person
+  cannot read.
+
+- **A review can no longer overwrite a decision made while it was thinking.** The reviewer reads
+  the open findings before calling the model and acts on the verdict minutes later, but
+  `markAddressed` updated the row unconditionally — so a finding somebody set to `WONT_FIX`,
+  `DUPLICATE` or `APPROVED` in that window was silently replaced with `ADDRESSED` and an agent
+  event. That is precisely the thing this release exists to prevent, at the one place it was
+  still possible. The transition is now conditional on `OPEN`, and the event is recorded only
+  when the update actually moved the row.
+
+- **A posted finding can no longer be discarded.** `DISCARDED` means nobody ever saw it, and the
+  generic state endpoint accepted it for any finding — closing a real problem on the request
+  without anybody accepting the risk that `WONT_FIX` puts on the record. It is now reachable
+  only through the discard path, which requires a held finding.
+
+- **Cancelling a triage prompt no longer changes anything.** Every triage button read
+  `window.prompt(…) ?? ""`, which turned pressing Cancel into the same request with an empty
+  note — so changing your mind about explaining why still closed or reopened the finding. The
+  release and discard prompts had it too.
+
+- **Triage controls are disabled without an operator PAT** rather than merely labelled
+  read-only, so they no longer produce failing requests.
+
+- **An indented paste can no longer act on a finding.** `mrr:` commands are matched at the start
+  of a comment, but the check stripped *any* leading whitespace first — so four spaces, which is
+  a Markdown code block, still counted as somebody deliberately typing a command. Pasting a code
+  sample or a chunk of documentation that happened to begin with `mrr: wontfix` onto a finding's
+  thread would have closed it. Indentation is now measured the way Markdown measures it: at most
+  three spaces, and a leading tab or a blank first line matches nothing. The class javadoc had
+  claimed code blocks were already ruled out; they were not.
+
+- **A sign-off can only be recorded by the person it belongs to.** The endpoint authenticated
+  that you own the project and then took the participant identity from the URL, so a project
+  owner could sign off on behalf of a required reviewer and make a formal request clean without
+  that person ever looking — which would have made the whole session decorative. Sign-off is now
+  refused unless the identity is your own mrr user id, and refused entirely for `FORGE` and
+  `AGENT` participants, because mrr has no way to authenticate a forge account and pretending it
+  can is the lie a formal session exists to prevent. Naming a forge user still records who is
+  expected to look; it just cannot gate the merge.
+
+- **Deleting a project no longer trips over its own findings.** `finding_events` references
+  `findings`, and project deletion removed findings first — a foreign-key violation on Postgres,
+  and on SQLite whenever foreign keys are enforced. Events and session participants are now
+  unwound before the findings they point at.
+
+- **Tracking a comment from the forge cannot file it twice.** The existence check and the insert
+  were separate statements, so two redeliveries of the same comment could pass the check together
+  and both create a finding; the tolerant read added earlier hid the duplicate rather than
+  preventing it. A unique partial index on `(project, mr_iid, discussion_id)` now stops the
+  second insert, and the tracking path treats that as "already tracked".
+
+  Recognising that rejection is backend-specific and easy to get silently wrong. Postgres reports
+  SQLState `23505` and Spring maps it to `DuplicateKeyException`; **SQLite leaves the SQLState
+  unset**, so Spring cannot classify it and returns an `UncategorizedSQLException` — a catch
+  written against `DataIntegrityViolationException` never fires, and the failure stays invisible
+  until a webhook returns 500. `Store.createFindingIfThreadFree` owns that detection for both
+  backends, and `StoreTest` pins it against the insert itself rather than against the check a
+  race is defined by slipping past.
+
+### Added
+
+- **Formal review sessions, opt-in per merge request.** Every merge request is `AD_HOC` by
+  default — the agent reviews, the status follows the findings, no ceremony, exactly as before.
+  `PUT …/merge-requests/{iid}/session` switches one to `FORMAL`, which adds the rule Crucible
+  had and mrr did not: **mrr will not call the request `CLEAN` until every required participant
+  has signed off**, however few findings are left. Auto-approve follows the same rule, so mrr
+  cannot approve a session its own status page calls `NEEDS_WORK`.
+
+  Participants live at `…/participants` and carry the same two identity spaces as everything
+  else — an mrr user id or a forge username, never inferred from each other. `required` is what
+  makes a session more than a list of names.
+
+  **A new commit clears every sign-off.** Approving what you read yesterday is not approving
+  what was pushed since, and carrying it forward would be the ledger claiming a review that
+  never happened.
+
+  `sessionState` (`UNDER_REVIEW` / `SUMMARIZED` / `CLOSED`) is where the *review* stands, which
+  is not where the merge request stands: merged and closed remain the forge's call.
+
+- **Findings can be held for a human to release, per project.** With `holdFindings` on, the
+  reviewer stores its findings `PENDING` and posts nothing to the forge. Each one is then
+  released (`…/findings/{id}/release`, optionally editing the title or body on the way out) or
+  discarded (`…/findings/{id}/discard`). Off by default — the product must not get slower for
+  everyone in order to serve the teams that need a person between the model and the merge
+  request.
+
+  A held finding **counts against the merge gate** while it waits: nobody has decided it is
+  wrong, only that nobody has looked. It is never handed to the model as a prior, because it was
+  never posted and there is no thread to judge it against. Discarding is deliberately its own
+  state rather than `WONT_FIX`: nothing was posted and nobody accepted a risk.
+
+  Releasing claims the finding atomically before it posts, so two people who both loaded the
+  page cannot put the same comment on a request twice; a post that fails hands the claim back
+  rather than leaving a finding open with no thread.
+
+- **File a finding by clicking the line in the diff.** The commit diff viewer now works out each
+  row's new-file line number from the `@@` headers, shows the findings already on a line
+  underneath it, and — where the project has an operator PAT — turns a click into a pre-filled
+  finding form anchored to that line.
+
+- **Findings say which concern raised them.** The reviewer tags each finding with a `role` —
+  `security`, `tests`, `performance` — and it shows beside the severity. Self-reported in the
+  single review pass rather than produced by separate agents: it makes "which concern found
+  this" answerable without claiming a multi-agent review that did not happen.
+
+- **Review a merge request now, without waiting for a webhook.** `POST
+  /api/projects/{id}/merge-requests/{iid}/review` and the `review_merge_request` MCP tool read
+  the request live from the forge and queue a review of its current commit. It works on a
+  request mrr has never seen, so it is also how you get a cycle for one whose webhook was never
+  registered — previously the only manual trigger was `POST /api/reviews/{id}/rerun`, which
+  needs a review to already exist.
+
+  Not a re-review: reviews are keyed on `(project, mrIid, head sha)`, so asking twice on an
+  unchanged commit returns `200` with the review that already exists and spends nothing.
+  Forcing a fresh pass over the same commit is still `rerun`, which is a different request with
+  a different cost and should look like one.
+
+  Drafts are reviewed. `skipDrafts` exists so that every push to an unfinished branch does not
+  cost a model call; asking for one explicitly already answers that question. A **disabled**
+  project is not, because disabling it is deliberate and a manual trigger should not quietly
+  override it, and a request the forge has already merged or closed is refused with `409`.
+
+  This also closes the gap phases above ran into: filing a finding needs a commit to file it
+  against, so a merge request mrr had never reviewed could not take one. Now there is a way to
+  get that first review on demand, and the error message points at it.
+
+- **A comment you leave on a diff line is now a finding, without you going near mrr.** Until
+  now an inbound comment mattered only if it was a reply on a thread mrr itself opened;
+  anything else was logged as `note_on_a_thread_mrr_does_not_own` and dropped. Now a comment on
+  a line of the diff, on a thread mrr does not own, is taken into the ledger as *your* finding
+  — attributed to your forge username, counting against the merge gate, and judged by every
+  later review like any other. Filing a defect by commenting on the line is what code review
+  already looks like on all three hosts; this just stops mrr ignoring it.
+
+  **Tracking is not ownership.** mrr writes nothing back — no thread, no acknowledgement — and
+  it never resolves or reopens that conversation, because it is yours and you started it.
+  Resolving it yourself still closes the finding as `APPROVED`, through the path that already
+  worked. The reviewer's thread-sync pass now skips these threads entirely.
+
+  All three forges say whether a comment was on a line, so this needed no capability flag and
+  no per-host degradation: GitLab marks the note with a `position`, and Forgejo and GitHub
+  deliver review comments as a payload distinct from issue comments. Forgejo has spelled the
+  line number both `line` and `position` across versions and mrr reads either.
+
+- **Three commands you can type in a comment**, for the cases a diff line cannot express — and
+  for a comment that is not on one:
+
+  - `mrr: finding <one-line title>` raises the comment as a finding, with anything on the lines
+    below as its detail.
+  - `mrr: wontfix <why>` closes a finding from the forge, with your username on the risk you
+    accepted — no need to open mrr, and no need to resolve the thread.
+  - `mrr: dispute <why>` records that you disagree. The finding stays open and keeps counting.
+
+  The syntax is deliberately awkward to trigger by accident: the command has to be the very
+  first thing in the comment. Prose *about* it (`you can write mrr: finding to raise one`) and
+  a quoted reply (`> mrr: wontfix …`) both do nothing, because the marker is no longer at the
+  start. An unrecognised word after `mrr:` is not a command either — guessing at what somebody
+  meant is how a ledger gets entries nobody asked for. It is not a slash command because GitLab
+  parses `/…` as one of its own quick actions and answers unknown ones with an error, so that
+  prefix would mean fighting the host on one forge out of three.
+
+### Fixed
+
+- **mrr no longer treats its own operator-token comments as somebody else's.** Own-note
+  suppression only knew the review token. Now that findings filed through mrr go out over the
+  operator token, mrr's own comment would have come straight back as an inbound one and been
+  tracked a second time as a finding of its own.
+
+- **You can file findings of your own, and an agent may not close them.** Until now every
+  finding was the reviewer's; a person could close one (resolve the thread and mrr records
+  `APPROVED` against your username) but could not raise one. Now `POST
+  /api/projects/{id}/merge-requests/{iid}/findings`, the `create_finding` MCP tool, and a form
+  on the merge-request page all file the same object the reviewer produces: one thread,
+  anchored to the line where the forge accepts it, counted the same against the merge gate.
+
+  **A later review may not close a finding you filed.** It can say the code looks fixed — it
+  posts that on your thread and records a `PROPOSED_ADDRESSED` event — and the finding stays
+  `OPEN` and keeps counting until you resolve the thread yourself. That resolve is the
+  `APPROVED` path that already worked, so nothing new closes anything. The proposal is made
+  once per verdict rather than once per push: if nothing has happened on the finding since mrr
+  last said it, it stays quiet instead of repeating itself on every commit.
+
+  The model still sees your findings when it reviews — the code is contested and that is worth
+  knowing — but they are marked propose-only in the prompt so it knows an `addressed` verdict
+  there is advice. Sliced reviews of large merge requests carry the same mark.
+
+  Two new states only a person can reach: **`WONT_FIX`** (real, nobody is fixing it, and the
+  record says who accepted the risk) and **`DUPLICATE`**. Both close the finding and its
+  thread. `ADDRESSED` is deliberately not settable by hand — it claims a commit fixed the
+  problem, which is a verdict the reviewer reaches from the diff. Reopening clears the earlier
+  sign-off, because leaving one on a live finding would claim somebody accepted something they
+  did not.
+
+  **There is no `DISPUTED` state, on purpose.** Disagreeing records a `DISPUTED` event and
+  leaves the finding `OPEN` and counting. A sixth state would be either a veto anybody could
+  hold indefinitely, or a green merge request with a live disagreement underneath it.
+
+- **Filing findings needs the project's operator PAT, and mrr now says what that token can
+  do.** A finding you file goes out over `gitlabOperatorToken` and is attributed to you, so it
+  never appears under the review bot's identity; a project without one cannot file findings
+  from mrr at all, and the project page says so rather than letting you find out from a 400.
+
+  `GET /api/projects/{id}/operator` checks two things live: that the forge accepts the token,
+  and who it belongs to. The second is the one that matters — an operator token resolving to
+  the *same* account as the review bot would put your findings under the agent's name, and
+  that now shows up as a named gap. Whether the token may **write** is not checked and says
+  so: the only way to test it would be to comment on one of your merge requests, and a
+  per-forge scope-introspection guess would be a check in name only.
+
+- **Every finding now records how it reached the state it is in, and who moved it.** Three
+  different mechanisms already close a finding — a review judging a prior addressed, a reply the
+  model agreed with, and a human resolving the thread on the forge — and until now the only
+  trace of which one acted was a log line. `findings.state` is still the column the merge gate
+  reads; the new `finding_events` table is the history behind it.
+
+  Each event carries a `kind` (`CREATED`, `ADDRESSED`, `APPROVED`, …), an `actorKind` of
+  `AGENT` / `HUMAN` / `SYSTEM`, and the review or reply that produced it. That `actorKind` is
+  the point: "the agent closed this" and "a person signed off on it" are different claims, and
+  the database could not previously tell them apart. `GET /api/projects/{id}/merge-requests/
+  {iid}` and the `get_merge_request` MCP tool return the log alongside the findings, and the
+  cycle page shows it per finding, folded away.
+
+  **Two identity spaces, neither inferred from the other.** `actorUser` is an mrr user id, set
+  when an act came through mrr; `actorForge` is a forge username, set when it came from the
+  forge. The same person is usually both and mrr has no mapping between them — an event records
+  the identity of the surface that authored it and nothing more.
+
+  The table is append-only and is never backfilled: a finding created before this release has
+  no events, which is honest, rather than a synthesised history. `Store.markAddressed` and
+  `markApproved` now take the event as their argument instead of an id, so a state change
+  without a record of what caused it does not compile. An event is written only when the
+  UPDATE actually moved a row — approving an already-addressed finding is a no-op by design,
+  and the log must not claim a sign-off that never happened.
+
+  No behaviour changes: no verdict, thread, or approval decision is computed differently.
+
+### Fixed
+
 - **The merge turn on a sliced review no longer 400s against reasoning models.** A multi-slice
   review's merge step calls the model with no tools, so it never takes the
   `/v1/responses` path that `gpt-5.4` / `gpt-5.6-*` need for tool calls — it stays on

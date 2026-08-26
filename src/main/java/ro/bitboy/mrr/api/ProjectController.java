@@ -19,6 +19,7 @@ import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.auth.Principal;
 import ro.bitboy.mrr.forge.ForgeFactory;
 import ro.bitboy.mrr.forge.ForgeReport;
+import ro.bitboy.mrr.forge.OperatorReport;
 import ro.bitboy.mrr.model.ForgeInstance;
 import ro.bitboy.mrr.model.ForgeKind;
 import ro.bitboy.mrr.model.LlmProvider;
@@ -48,6 +49,9 @@ import java.util.List;
              Owned. A USER sees only its own; an ADMIN sees all. Asking for someone else's \
              returns 404, not 403.""")
 public class ProjectController {
+
+    private static final org.slf4j.Logger log =
+            org.slf4j.LoggerFactory.getLogger(ProjectController.class);
 
     private final Store store;
     private final RuntimeSettings settings;
@@ -99,6 +103,7 @@ public class ProjectController {
                 request.agentMaxTurns() == null ? 1 : Math.max(1, request.agentMaxTurns()),
                 request.agentTools() == null ? List.of() : request.agentTools(),
                 Boolean.TRUE.equals(request.autoApprove()),
+                Boolean.TRUE.equals(request.holdFindings()),
                 Boolean.TRUE.equals(request.librarianEnabled()),
                 null, ro.bitboy.mrr.model.MemoryStatus.NONE, null,
                 null, null, null, Instant.now());
@@ -158,6 +163,7 @@ public class ProjectController {
                         : Math.max(1, request.agentMaxTurns()),
                 request.agentTools() == null ? existing.agentTools() : request.agentTools(),
                 request.autoApprove() == null ? existing.autoApprove() : request.autoApprove(),
+                request.holdFindings() == null ? existing.holdFindings() : request.holdFindings(),
                 request.librarianEnabled() == null ? existing.librarianEnabled()
                         : request.librarianEnabled(),
                 existing.memoryHeadSha(), existing.memoryStatus(), existing.memoryRefreshedAt(),
@@ -308,6 +314,10 @@ public class ProjectController {
             @Schema(description = "When true, mrr Approves the GitLab MR after a review that leaves "
                     + "zero open findings, and Unapproves if a later commit reintroduces one. Default false.")
             Boolean autoApprove,
+            @Schema(description = "Hold the reviewer's findings as PENDING instead of posting "
+                    + "them, until somebody releases or discards each one. They count against "
+                    + "the merge gate while they wait. Default false.")
+            Boolean holdFindings,
             @Schema(description = "Enable the optional librarian addon. Disable never deletes memory.")
             Boolean librarianEnabled) {
     }
@@ -336,5 +346,42 @@ public class ProjectController {
         Project project = store.requireVisible(caller, id);
         return ForgeReport.of(project.forge(), project.gitlabUrl(),
                 forges.capabilitiesOf(project));
+    }
+
+    @Operation(summary = "What this project's operator token is, and what it unlocks",
+            description = """
+                    The operator token is the identity a person writes under when they act \
+                    through mrr — merging, commenting, and filing a finding of their own. \
+                    Without one those are unavailable.
+
+                    Two things are checked live: that the forge accepts the token, and who it \
+                    belongs to. The second is the one that matters — an operator token \
+                    resolving to the same account as the review bot would put your findings \
+                    under the agent's name. Whether the token may *write* is not checked, \
+                    because the only way to test that is to comment on one of your merge \
+                    requests; that row says so rather than guessing.""")
+    @ApiResponse(responseCode = "404", description = "No such project, or not yours")
+    @GetMapping("/api/projects/{id}/operator")
+    public OperatorReport operator(Principal caller, @PathVariable String id) {
+        Project project = store.requireVisible(caller, id);
+        if (!project.hasOperatorToken()) {
+            return OperatorReport.absent();
+        }
+        return OperatorReport.of(usernameOf(project.asOperator()), usernameOf(project),
+                forges.capabilitiesOf(project));
+    }
+
+    /**
+     * Who a token belongs to, or null when the forge will not say. A failed lookup is a fact
+     * to report — expired, revoked, or too narrowly scoped to identify itself — not an error
+     * to propagate: the project page must still load.
+     */
+    private String usernameOf(Project project) {
+        try {
+            return forges.forProject(project).tokenUsername(project);
+        } catch (Exception e) {
+            log.warn("could not read the token user for {}: {}", project.name(), e.getMessage());
+            return null;
+        }
     }
 }

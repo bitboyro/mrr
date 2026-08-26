@@ -87,8 +87,24 @@ final class GitHubWebhook {
         return ForgeEvent.note(body.path("pull_request").path("number").asLong(),
                 new ForgeEvent.Note(
                         thread == null ? null : prefix + thread, id, text(comment.path("body")),
-                        text(comment.path("user").path("login")), false, true),
+                        text(comment.path("user").path("login")), false, true,
+                        text(comment.path("path")), commentLine(comment)),
                 "pull_request_review_comment");
+    }
+
+    /**
+     * The line a review comment sits on. {@code line} is where it is now; {@code original_line}
+     * is where it was when it was written, and is what survives a force-push, so it is the
+     * fallback rather than the first choice.
+     */
+    private static Integer commentLine(JsonNode comment) {
+        for (String field : new String[] {"line", "original_line"}) {
+            JsonNode value = comment.path(field);
+            if (!value.isMissingNode() && !value.isNull()) {
+                return value.asInt();
+            }
+        }
+        return null;
     }
 
     private static MergeRequestInfo info(JsonNode body, JsonNode pr, String action) {

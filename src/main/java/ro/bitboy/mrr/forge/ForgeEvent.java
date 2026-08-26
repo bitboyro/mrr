@@ -48,9 +48,25 @@ public record ForgeEvent(Kind kind, Action action, long mrIid, String headSha, b
     /**
      * A comment. {@code discussionId} is the thread it belongs to as mrr stored it when it
      * opened that thread, so a reply is recognised by the same id on every forge.
+     *
+     * <p>{@code filePath} and {@code line} are set when the host says the comment was made on
+     * a diff line rather than on the request as a whole. All three hosts do say — GitLab marks
+     * the note {@code DiffNote} and carries a position, and Forgejo and GitHub deliver review
+     * comments as a distinct payload from issue comments — so this needed no capability flag
+     * and no per-host degradation. Null on a general comment.
      */
     public record Note(String discussionId, String noteId, String body, String authorUsername,
-                       boolean system, boolean onMergeRequest) {
+                       boolean system, boolean onMergeRequest, String filePath, Integer line) {
+
+        public Note(String discussionId, String noteId, String body, String authorUsername,
+                    boolean system, boolean onMergeRequest) {
+            this(discussionId, noteId, body, authorUsername, system, onMergeRequest, null, null);
+        }
+
+        /** Whether the host anchored this comment to a line of the diff. */
+        public boolean inline() {
+            return filePath != null && !filePath.isBlank();
+        }
     }
 
     public static ForgeEvent other(String rawKind) {

@@ -77,6 +77,11 @@ public record Project(
                 + "zero open findings, and Unapproves if a later commit reintroduces one. The "
                 + "PAT must be allowed to approve. Default false.")
         boolean autoApprove,
+        @Schema(description = "Hold the reviewer's findings back as PENDING instead of posting "
+                + "them, until somebody releases or discards each one. They count against the "
+                + "merge gate while they wait. Default false: the review posts as soon as it "
+                + "finishes, which is what most teams want.")
+        boolean holdFindings,
         @Schema(description = "Optional librarian addon. When true, Initialize/Refresh is available. "
                 + "Disable never deletes memory files.")
         boolean librarianEnabled,
@@ -107,6 +112,27 @@ public record Project(
         if (agentMaxTurns <= 0) agentMaxTurns = 1;
         agentTools = agentTools == null ? List.of() : List.copyOf(agentTools);
         if (memoryStatus == null) memoryStatus = MemoryStatus.NONE;
+    }
+
+    /**
+     * A project that posts its findings as soon as the review finishes, which is the default
+     * and what every project did before holding them was an option.
+     *
+     * <p>Kept so that adding the flag did not mean rewriting every call site that builds a
+     * project positionally — there are sixteen, and none of them cares about this.
+     */
+    public Project(String id, String ownerId, String name, boolean enabled, ForgeKind forge,
+                   String gitlabUrl, String gitlabProjectId, String gitlabToken,
+                   String gitlabOperatorToken, String webhookSecret, String llmProviderId,
+                   LlmProvider llm, String skill, boolean skipDrafts, int agentMaxTurns,
+                   List<String> agentTools, boolean autoApprove, boolean librarianEnabled,
+                   String memoryHeadSha, MemoryStatus memoryStatus, Instant memoryRefreshedAt,
+                   FailureKind lastErrorKind, String lastError, Instant lastErrorAt,
+                   Instant createdAt) {
+        this(id, ownerId, name, enabled, forge, gitlabUrl, gitlabProjectId, gitlabToken,
+                gitlabOperatorToken, webhookSecret, llmProviderId, llm, skill, skipDrafts,
+                agentMaxTurns, agentTools, autoApprove, false, librarianEnabled, memoryHeadSha,
+                memoryStatus, memoryRefreshedAt, lastErrorKind, lastError, lastErrorAt, createdAt);
     }
 
     /**
@@ -153,7 +179,7 @@ public record Project(
     public Project withGitlabToken(String token) {
         return new Project(id, ownerId, name, enabled, forge, gitlabUrl, gitlabProjectId,
                 token, gitlabOperatorToken, webhookSecret, llmProviderId, llm,
-                skill, skipDrafts, agentMaxTurns, agentTools, autoApprove,
+                skill, skipDrafts, agentMaxTurns, agentTools, autoApprove, holdFindings,
                 librarianEnabled, memoryHeadSha, memoryStatus, memoryRefreshedAt,
                 lastErrorKind, lastError, lastErrorAt, createdAt);
     }
@@ -171,8 +197,9 @@ public record Project(
                 mask(gitlabToken), mask(gitlabOperatorToken), mask(webhookSecret),
                 llmProviderId, llm == null ? null : llm.redacted(),
                 skill, skipDrafts, agentMaxTurns,
-                agentTools, autoApprove, librarianEnabled, memoryHeadSha, memoryStatus,
-                memoryRefreshedAt, lastErrorKind, lastError, lastErrorAt, createdAt);
+                agentTools, autoApprove, holdFindings, librarianEnabled, memoryHeadSha,
+                memoryStatus, memoryRefreshedAt, lastErrorKind, lastError, lastErrorAt,
+                createdAt);
     }
 
     private static String mask(String secret) {

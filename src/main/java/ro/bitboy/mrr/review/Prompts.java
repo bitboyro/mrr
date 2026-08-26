@@ -118,7 +118,8 @@ final class Prompts {
                   "line": 43,
                   "severity": "blocker | major | minor",
                   "title": "one line, the problem itself",
-                  "body": "What goes wrong, the input or state that triggers it, and the fix. Markdown."
+                  "body": "What goes wrong, the input or state that triggers it, and the fix. Markdown.",
+                  "role": "the concern this came from: security | tests | performance | correctness | style | …"
                 }
               ],
               "prior": [
@@ -139,6 +140,8 @@ final class Prompts {
               When `findings` is empty this is the whole review — say what you looked at and
               why nothing is wrong. Concise and to the point; omit nothing that would change
               a merge decision. Not a file-by-file restatement.
+            - `role` names which concern raised the finding, in one lowercase word. It is for
+              the reader, not for you to pad — omit it rather than guess.
             - `findings` is only for problems in *this* diff. An empty array is a valid and
               useful answer; it does not excuse an empty or generic `summary`. Each finding
               is the problem, the trigger, and the fix — no padding.
@@ -152,6 +155,47 @@ final class Prompts {
               copy the summary verbatim — `change` is what landed, `impact` is how the rest of
               the code is affected. Skip it only if you genuinely cannot tell.
             """;
+
+    /**
+     * What mrr says on a human's thread when a commit looks like it fixed their finding.
+     *
+     * <p>Deliberately a suggestion. The finding is still open and still counts, and the person
+     * who raised it is the one who closes it — by resolving the thread, which mrr already
+     * reads as their sign-off.
+     */
+    static String proposedAddressedComment(String note, String shortSha) {
+        String why = note == null || note.isBlank()
+                ? "the reported problem no longer appears in the code."
+                : note.trim();
+        return "This looks addressed as of `" + shortSha + "`: " + why
+                + "\n\nLeaving it open — you reported it, so it is yours to close. "
+                + "Resolve this thread if you agree.";
+    }
+
+    /**
+     * The prior list the model judges, one entry per finding still open.
+     *
+     * <p>Human-authored ones are marked. The model still needs to see them — the code is
+     * contested and that is context for reviewing it — but an `addressed` verdict on one is a
+     * recommendation, not a close, and saying so here is what keeps the model from writing
+     * confident "fixed" verdicts that mrr then has to decline to act on.
+     */
+    private static void priorEntries(StringBuilder sb, List<Finding> priors) {
+        for (Finding f : priors) {
+            sb.append("- id: ").append(f.id()).append('\n')
+                    .append("  severity: ").append(f.severity()).append('\n');
+            if (f.filePath() != null) {
+                sb.append("  location: ").append(f.filePath());
+                if (f.line() != null) sb.append(':').append(f.line());
+                sb.append('\n');
+            }
+            sb.append("  finding: ").append(f.title()).append('\n');
+            if (f.origin() == Finding.Origin.HUMAN) {
+                sb.append("  reported_by: a person (propose only \u2014 your `addressed` "
+                        + "verdict on this one is advice; only they can close it)\n");
+            }
+        }
+    }
 
     static String user(Diff diff, List<Finding> priorOpen) {
         return user(diff, priorOpen, List.of(), 20_000, null);
@@ -202,16 +246,7 @@ final class Prompts {
                     `prior`. Mark `addressed` only where the new code genuinely fixes it.
 
                     """);
-            for (Finding f : priorOpen) {
-                sb.append("- id: ").append(f.id()).append('\n')
-                        .append("  severity: ").append(f.severity()).append('\n');
-                if (f.filePath() != null) {
-                    sb.append("  location: ").append(f.filePath());
-                    if (f.line() != null) sb.append(':').append(f.line());
-                    sb.append('\n');
-                }
-                sb.append("  finding: ").append(f.title()).append('\n');
-            }
+            priorEntries(sb, priorOpen);
         }
 
         sb.append("\nFiles changed (").append(diff.files().size()).append("):\n");
@@ -298,16 +333,7 @@ final class Prompts {
                     related bug is a new finding, not `still_present` on the old id.
 
                     """);
-            for (Finding f : priorOpen) {
-                sb.append("- id: ").append(f.id()).append('\n')
-                        .append("  severity: ").append(f.severity()).append('\n');
-                if (f.filePath() != null) {
-                    sb.append("  location: ").append(f.filePath());
-                    if (f.line() != null) sb.append(':').append(f.line());
-                    sb.append('\n');
-                }
-                sb.append("  finding: ").append(f.title()).append('\n');
-            }
+            priorEntries(sb, priorOpen);
             sb.append('\n');
             sb.append(priorEvidence(diff, priorOpen, maxDocumentChars));
         }
@@ -332,6 +358,28 @@ final class Prompts {
             sb.append(finding.title());
         }
         sb.append("\n\n").append(finding.body());
+        return sb.toString();
+    }
+
+    /**
+     * A finding a person filed from mrr, as it reads on the request.
+     *
+     * <p>Attributed. It goes out over the project's operator token, so without a name on it
+     * the thread would read as the review bot's — and putting somebody else's finding under
+     * the agent's name is exactly the confusion the origin column exists to prevent.
+     */
+    static String humanFindingComment(Finding.Severity severity, String title, String body,
+                                             String author) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("**").append(badge(severity)).append("** ");
+        if (title != null) {
+            sb.append(title);
+        }
+        if (body != null && !body.isBlank()) {
+            sb.append("\n\n").append(body.trim());
+        }
+        sb.append("\n\n<sub>Filed by ").append(author == null ? "a reviewer" : author)
+                .append(" via mrr.</sub>");
         return sb.toString();
     }
 

@@ -13,10 +13,13 @@ import ro.bitboy.mrr.forge.MergeRequest;
 import ro.bitboy.mrr.forge.ForgeFactory;
 import ro.bitboy.mrr.memory.MemoryDocument;
 import ro.bitboy.mrr.memory.MemoryService;
+import ro.bitboy.mrr.model.Finding;
 import ro.bitboy.mrr.model.MrStatus;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Review;
+import ro.bitboy.mrr.review.Findings;
 import ro.bitboy.mrr.review.Reviewer;
+import ro.bitboy.mrr.review.Trigger;
 import ro.bitboy.mrr.store.Store;
 import ro.bitboy.mrr.web.ApiException;
 
@@ -42,12 +45,17 @@ public class McpTools {
     private final ForgeFactory forges;
     private final Reviewer reviewer;
     private final MemoryService memory;
+    private final Findings findings;
+    private final Trigger trigger;
 
-    public McpTools(Store store, ForgeFactory forges, Reviewer reviewer, MemoryService memory) {
+    public McpTools(Store store, ForgeFactory forges, Reviewer reviewer, MemoryService memory,
+                    Findings findings, Trigger trigger) {
         this.store = store;
         this.forges = forges;
         this.reviewer = reviewer;
         this.memory = memory;
+        this.findings = findings;
+        this.trigger = trigger;
     }
 
     @Tool(name = "list_projects",
@@ -99,7 +107,9 @@ public class McpTools {
     }
 
     @Tool(name = "get_merge_request",
-            description = "Fetch one merge-request cycle: live status, every review, every finding, every reply summary.")
+            description = "Fetch one merge-request cycle: live status, every review, every "
+                    + "finding, every reply summary, and the event log saying how each "
+                    + "finding reached the state it is in and who moved it.")
     public MrStatus.Cycle getMergeRequest(
             @ToolParam(description = "The mrr project id") String projectId,
             @ToolParam(description = "The merge-request iid") long mrIid,
@@ -111,7 +121,9 @@ public class McpTools {
         return new MrStatus.Cycle(status,
                 store.listReviews(caller, projectId, mrIid, 200).stream().map(Review::summary).toList(),
                 store.findingsOfMr(projectId, mrIid),
-                store.listReplies(projectId, mrIid).stream().map(ro.bitboy.mrr.model.Reply::summary).toList());
+                store.listReplies(projectId, mrIid).stream().map(ro.bitboy.mrr.model.Reply::summary).toList(),
+                store.eventsOfMr(projectId, mrIid),
+                store.participants(projectId, mrIid));
     }
 
     @Tool(name = "get_review",
@@ -141,6 +153,78 @@ public class McpTools {
                 store.openFindings(review.projectId(), review.mrIid()).size());
         reviewer.submit(reviewId);
         return store.findReview(reviewId).orElseThrow().summary();
+    }
+
+    @Tool(name = "review_merge_request",
+            description = "Review a merge request now, as the forge has it, without waiting "
+                    + "for a webhook or the periodic scan. Works on a request mrr has never "
+                    + "seen. Not a re-review: asking twice on an unchanged commit returns the "
+                    + "review that already exists and spends nothing — use rerun_review to "
+                    + "force a fresh pass over the same commit. Drafts are reviewed.")
+    public Review reviewMergeRequest(
+            @ToolParam(description = "The mrr project id, from list_projects") String projectId,
+            @ToolParam(description = "The merge-request iid") long mrIid,
+            ToolContext toolContext) {
+        Project project = store.requireVisible(caller(toolContext), projectId);
+        return trigger.now(project, mrIid).review().summary();
+    }
+
+    @Tool(name = "create_finding",
+            description = "Raise a finding on a merge request as a peer, not as the review "
+                    + "bot. It opens its own thread, counts against the merge gate like any "
+                    + "other, and a later review may not close it — the review can say the "
+                    + "code looks fixed, but only a person closes it. Needs the project's "
+                    + "operator token. Use for a problem you found that the reviewer did not.")
+    public Finding createFinding(
+            @ToolParam(description = "The mrr project id") String projectId,
+            @ToolParam(description = "The merge-request iid") long mrIid,
+            @ToolParam(description = "One-line statement of the problem") String title,
+            @ToolParam(description = "The detail, in Markdown", required = false) String body,
+            @ToolParam(description = "Path as it appears in the diff; omit for a finding about "
+                    + "the whole change", required = false) String filePath,
+            @ToolParam(description = "Line in the new file; omit to leave it unanchored",
+                    required = false) Integer line,
+            @ToolParam(description = "BLOCKER, MAJOR or MINOR. Defaults to MAJOR.",
+                    required = false) String severity,
+            ToolContext toolContext) {
+        Principal caller = caller(toolContext);
+        Project project = store.requireVisible(caller, projectId);
+        return findings.file(Findings.Actor.of(caller), project, mrIid, new Findings.Draft(
+                filePath, line, severity == null ? null : Finding.Severity.parse(severity),
+                title, body));
+    }
+
+    @Tool(name = "set_finding_state",
+            description = "Move a finding by hand. WONT_FIX: real, and nobody is fixing it — "
+                    + "you go on the record as having accepted the risk. DUPLICATE: another "
+                    + "finding covers it. APPROVED: accepted as it stands. OPEN: reopen it. "
+                    + "DISPUTED is not a state — it records a disagreement and leaves the "
+                    + "finding open and counting. ADDRESSED cannot be set: it means a commit "
+                    + "fixed the problem, which is a review's verdict to reach.")
+    public Finding setFindingState(
+            @ToolParam(description = "The finding id, from get_merge_request") String findingId,
+            @ToolParam(description = "OPEN, APPROVED, WONT_FIX, DUPLICATE, or DISPUTED")
+            String state,
+            @ToolParam(description = "Why — kept on the finding's history", required = false)
+            String note,
+            ToolContext toolContext) {
+        Principal caller = caller(toolContext);
+        Finding finding = store.findFinding(findingId)
+                .orElseThrow(() -> ApiException.notFound("finding"));
+        Project project = store.requireVisible(caller, finding.projectId());
+        String wanted = state == null ? "" : state.trim().toUpperCase();
+        if (wanted.equals("DISPUTED")) {
+            return findings.dispute(Findings.Actor.of(caller), finding, note);
+        }
+        Finding.State next;
+        try {
+            next = Finding.State.valueOf(wanted);
+        } catch (IllegalArgumentException e) {
+            throw ApiException.badRequest(
+                    "Unknown state '" + state + "'. Use OPEN, APPROVED, WONT_FIX, DUPLICATE "
+                            + "or DISPUTED.");
+        }
+        return findings.triage(Findings.Actor.of(caller), project, finding, next, note);
     }
 
     @Tool(name = "update_comment",

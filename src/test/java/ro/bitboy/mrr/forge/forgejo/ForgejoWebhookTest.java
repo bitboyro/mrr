@@ -57,6 +57,35 @@ class ForgejoWebhookTest {
         assertThat(plain.note().discussionId()).isEqualTo("c9");
     }
 
+    /** `path` is what says a comment was left on the diff rather than on the request. */
+    @Test
+    void aReviewCommentCarriesWhereOnTheDiffItWasLeft() {
+        ForgeEvent inline = parse("issue_comment", """
+                {"action":"created","pull_request":{"number":7},
+                 "comment":{"id":9,"path":"A.java","line":12,"body":"overruns",
+                            "user":{"login":"ada"}}}""");
+        ForgeEvent general = parse("issue_comment", """
+                {"action":"created","pull_request":{"number":7},
+                 "comment":{"id":9,"body":"ship it","user":{"login":"ada"}}}""");
+
+        assertThat(inline.note().inline()).isTrue();
+        assertThat(inline.note().filePath()).isEqualTo("A.java");
+        assertThat(inline.note().line()).isEqualTo(12);
+        assertThat(general.note().inline()).isFalse();
+        assertThat(general.note().line()).isNull();
+    }
+
+    /** Forgejo has spelled the line `line` and `position` across versions; both still arrive. */
+    @Test
+    void theOlderPositionSpellingIsReadToo() {
+        ForgeEvent event = parse("issue_comment", """
+                {"action":"created","pull_request":{"number":7},
+                 "comment":{"id":9,"path":"A.java","position":5,"body":"x",
+                            "user":{"login":"ada"}}}""");
+
+        assertThat(event.note().line()).isEqualTo(5);
+    }
+
     @Test
     void aReplyIsFiledUnderTheThreadItAnswers() {
         ForgeEvent event = parse("issue_comment", """

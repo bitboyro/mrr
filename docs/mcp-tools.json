@@ -1,7 +1,94 @@
 {
   "tools": [
     {
-      "description": "Fetch one review in full, including the prompt sent to the model and the review it produced. Use to inspect why a review said what it said.",
+      "description": "Raise a finding on a merge request as a peer, not as the review bot. It opens its own thread, counts against the merge gate like any other, and a later review may not close it \u2014 the review can say the code looks fixed, but only a person closes it. Needs the project's operator token. Use for a problem you found that the reviewer did not.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "description": "The detail, in Markdown",
+            "type": "string"
+          },
+          "filePath": {
+            "description": "Path as it appears in the diff; omit for a finding about the whole change",
+            "type": "string"
+          },
+          "line": {
+            "description": "Line in the new file; omit to leave it unanchored",
+            "type": "integer"
+          },
+          "mrIid": {
+            "description": "The merge-request iid",
+            "type": "integer"
+          },
+          "projectId": {
+            "description": "The mrr project id",
+            "type": "string"
+          },
+          "severity": {
+            "description": "BLOCKER, MAJOR or MINOR. Defaults to MAJOR.",
+            "type": "string"
+          },
+          "title": {
+            "description": "One-line statement of the problem",
+            "type": "string"
+          }
+        },
+        "required": [
+          "projectId",
+          "mrIid",
+          "title"
+        ],
+        "type": "object"
+      },
+      "name": "create_finding"
+    },
+    {
+      "description": "Read one memory document by id, including its markdown body.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "The document id from search_memory or list_memories",
+            "type": "string"
+          },
+          "projectId": {
+            "description": "The mrr project id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "projectId",
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "get_memory"
+    },
+    {
+      "description": "Fetch one merge-request cycle: live status, every review, every finding, every reply summary, and the event log saying how each finding reached the state it is in and who moved it.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "mrIid": {
+            "description": "The merge-request iid",
+            "type": "integer"
+          },
+          "projectId": {
+            "description": "The mrr project id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "projectId",
+          "mrIid"
+        ],
+        "type": "object"
+      },
+      "name": "get_merge_request"
+    },
+    {
+      "description": "Fetch one review in full, including the prompt sent to the model, the agent trace (turns and tool calls), and the review it produced. Use to inspect why a review said what it said.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -18,7 +105,45 @@
       "name": "get_review"
     },
     {
-      "description": "List the currently open merge requests for a registered project, as reported by GitLab. Use when you need to know what is in flight.",
+      "description": "List memory documents in a project, optionally restricted to a space (project, mrs, notes). Summaries without bodies.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "projectId": {
+            "description": "The mrr project id",
+            "type": "string"
+          },
+          "space": {
+            "description": "Space: project, mrs, or notes",
+            "type": "string"
+          }
+        },
+        "required": [
+          "projectId"
+        ],
+        "type": "object"
+      },
+      "name": "list_memories"
+    },
+    {
+      "description": "List the live status of merge requests mrr has reviewed in a project. Use get_merge_request for the timeline and findings.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "projectId": {
+            "description": "The mrr project id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "projectId"
+        ],
+        "type": "object"
+      },
+      "name": "list_merge_request_cycles"
+    },
+    {
+      "description": "List the currently open merge requests for a registered project, as reported by its forge. Use when you need to know what is in flight.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -35,7 +160,7 @@
       "name": "list_merge_requests"
     },
     {
-      "description": "List the GitLab projects registered with mrr that you have access to. Call this first to find the project id needed by the other tools.",
+      "description": "List the projects registered with mrr that you have access to. Call this first to find the project id needed by the other tools.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {},
@@ -45,12 +170,16 @@
       "name": "list_projects"
     },
     {
-      "description": "List recent AI reviews, newest first. Returns summaries without the prompt or response bodies \u2014 call get_review for those.",
+      "description": "List recent AI reviews, newest first. Returns summaries without the prompt, response, or trace bodies \u2014 call get_review for those.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "limit": {
             "description": "Maximum reviews to return (default 20)",
+            "type": "integer"
+          },
+          "mrIid": {
+            "description": "Restrict to one merge-request iid",
             "type": "integer"
           },
           "projectId": {
@@ -81,29 +210,29 @@
       "name": "rerun_review"
     },
     {
-      "description": "Replace the body of the review comment mrr posted on the merge request. Use to correct or amend a review in place rather than adding a second comment.",
+      "description": "Review a merge request now, as the forge has it, without waiting for a webhook or the periodic scan. Works on a request mrr has never seen. Not a re-review: asking twice on an unchanged commit returns the review that already exists and spends nothing \u2014 use rerun_review to force a fresh pass over the same commit. Drafts are reviewed.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "markdown": {
-            "description": "The new comment body, in GitLab-flavoured Markdown",
-            "type": "string"
+          "mrIid": {
+            "description": "The merge-request iid",
+            "type": "integer"
           },
-          "reviewId": {
-            "description": "The review id whose posted comment should be edited",
+          "projectId": {
+            "description": "The mrr project id, from list_projects",
             "type": "string"
           }
         },
         "required": [
-          "reviewId",
-          "markdown"
+          "projectId",
+          "mrIid"
         ],
         "type": "object"
       },
-      "name": "update_comment"
+      "name": "review_merge_request"
     },
     {
-      "description": "Search a project's OKF memory. Returns id — kind — title — tags, never full bodies. Use get_memory to read one document.",
+      "description": "Search a project's OKF memory. Returns id \u2014 kind \u2014 title \u2014 tags, never full bodies. Use get_memory to read one document.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -128,47 +257,52 @@
       "name": "search_memory"
     },
     {
-      "description": "List memory documents in a project, optionally restricted to a space (project, mrs, notes). Summaries without bodies.",
+      "description": "Move a finding by hand. WONT_FIX: real, and nobody is fixing it \u2014 you go on the record as having accepted the risk. DUPLICATE: another finding covers it. APPROVED: accepted as it stands. OPEN: reopen it. DISPUTED is not a state \u2014 it records a disagreement and leaves the finding open and counting. ADDRESSED cannot be set: it means a commit fixed the problem, which is a review's verdict to reach.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "projectId": {
-            "description": "The mrr project id",
+          "findingId": {
+            "description": "The finding id, from get_merge_request",
             "type": "string"
           },
-          "space": {
-            "description": "Space: project, mrs, or notes",
+          "note": {
+            "description": "Why \u2014 kept on the finding's history",
+            "type": "string"
+          },
+          "state": {
+            "description": "OPEN, APPROVED, WONT_FIX, DUPLICATE, or DISPUTED",
             "type": "string"
           }
         },
         "required": [
-          "projectId"
+          "findingId",
+          "state"
         ],
         "type": "object"
       },
-      "name": "list_memories"
+      "name": "set_finding_state"
     },
     {
-      "description": "Read one memory document by id, including its markdown body.",
+      "description": "Replace the body of the review comment mrr posted on the merge request. Use to correct or amend a review in place rather than adding a second comment.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
-          "id": {
-            "description": "The document id from search_memory or list_memories",
+          "markdown": {
+            "description": "The new comment body, in the forge's flavour of Markdown",
             "type": "string"
           },
-          "projectId": {
-            "description": "The mrr project id",
+          "reviewId": {
+            "description": "The review id whose posted comment should be edited",
             "type": "string"
           }
         },
         "required": [
-          "projectId",
-          "id"
+          "reviewId",
+          "markdown"
         ],
         "type": "object"
       },
-      "name": "get_memory"
+      "name": "update_comment"
     }
   ]
 }

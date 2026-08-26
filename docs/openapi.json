@@ -169,11 +169,25 @@
         "type": "object"
       },
       "Cycle": {
-        "description": "One merge request's cycle: live status, every review, every finding, every reply.",
+        "description": "One merge request's cycle: live status, every review, every finding, every reply, and the event log behind the findings' states.",
         "properties": {
+          "events": {
+            "description": "Every event on every finding of this merge request, oldest first. A finding with none predates the log rather than having no history.",
+            "items": {
+              "$ref": "#/components/schemas/FindingEvent"
+            },
+            "type": "array"
+          },
           "findings": {
             "items": {
               "$ref": "#/components/schemas/Finding"
+            },
+            "type": "array"
+          },
+          "participants": {
+            "description": "Who is in the room. Empty on an ad-hoc cycle, which is most of them.",
+            "items": {
+              "$ref": "#/components/schemas/SessionParticipant"
             },
             "type": "array"
           },
@@ -297,9 +311,22 @@
       "Finding": {
         "description": "One finding, and the merge-request thread that carries it.\n\nA finding outlives the review that produced it: when a later commit fixes the problem, mrr resolves the thread the earlier review opened rather than posting \"this is now fixed\" as a new comment.",
         "properties": {
+          "agentRole": {
+            "description": "The concern this came from \u2014 security, tests, performance \u2014 as the reviewer named it. Self-reported in one pass, not a separate agent. Null when it did not say, and on every human finding.",
+            "example": "security",
+            "type": "string"
+          },
           "approvedBy": {
-            "description": "GitLab username of the human who resolved the thread, when the state is APPROVED. Null for OPEN and for ADDRESSED.",
+            "description": "Forge username of the human who resolved the thread, when the state is APPROVED. Null for OPEN and for ADDRESSED.",
             "example": "romanbotnari",
+            "type": "string"
+          },
+          "authorForge": {
+            "description": "Forge username that filed it, when it came from the forge.",
+            "type": "string"
+          },
+          "authorUser": {
+            "description": "mrr user id that filed it, when it was filed through mrr.",
             "type": "string"
           },
           "body": {
@@ -338,6 +365,14 @@
           "noteId": {
             "type": "string"
           },
+          "origin": {
+            "description": "Who filed it. Null on findings from before origins existed, which were all AGENT.",
+            "enum": [
+              "AGENT",
+              "HUMAN"
+            ],
+            "type": "string"
+          },
           "projectId": {
             "type": "string"
           },
@@ -360,16 +395,128 @@
             "type": "string"
           },
           "state": {
-            "description": "OPEN \u2014 still standing as of the most recent review.\nADDRESSED \u2014 a later commit fixed it; mrr resolved the thread.\nAPPROVED \u2014 a human resolved the thread on GitLab, accepting the finding as it stands. mrr records who and keeps the thread closed.",
+            "description": "OPEN \u2014 still standing as of the most recent review.\nADDRESSED \u2014 a later commit fixed it; mrr resolved the thread.\nAPPROVED \u2014 a human resolved the thread on the forge, accepting the finding as it stands. mrr records who and keeps the thread closed.\nWONT_FIX \u2014 a human decided it is real and is not being fixed. The record says who accepted the risk.\nDUPLICATE \u2014 a human closed it as another finding's twin.\nPENDING \u2014 the reviewer drafted it and it has not reached the forge, because this project holds findings for a human to release. It still counts against the merge gate: nobody has decided it is wrong, only that nobody has looked yet.\nDISCARDED \u2014 somebody read a pending finding before it was posted and decided it was not worth raising. Deliberately not WONT_FIX, where the problem is real and the risk was accepted on the record.\n\nThere is no DISPUTED state on purpose. A contested finding stays OPEN and keeps counting against the merge gate; the disagreement is a `DISPUTED` event on it. A sixth state would be either a veto anybody could hold indefinitely, or a green merge request with a live disagreement under it.",
             "enum": [
               "OPEN",
+              "PENDING",
               "ADDRESSED",
-              "APPROVED"
+              "APPROVED",
+              "WONT_FIX",
+              "DUPLICATE",
+              "DISCARDED"
             ],
             "type": "string"
           },
           "title": {
             "description": "One-line statement of the problem.",
+            "example": "Off-by-one overruns the array on every row",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "FindingEvent": {
+        "description": "One thing that happened to a finding. `findings.state` says where a finding stands; these say how it got there and who moved it. Append-only, and never backfilled \u2014 a finding with no events predates the log.",
+        "properties": {
+          "actorForge": {
+            "description": "Forge username, when the act came from the forge. Null for an agent act and for one performed in mrr.",
+            "example": "romanbotnari",
+            "type": "string"
+          },
+          "actorKind": {
+            "description": "Who acted. SYSTEM is mrr's own bookkeeping \u2014 never a judgement about the code.",
+            "enum": [
+              "AGENT",
+              "HUMAN",
+              "SYSTEM"
+            ],
+            "type": "string"
+          },
+          "actorUser": {
+            "description": "mrr user id, when the act came through mrr. Null for an agent act and for one that arrived from the forge.",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "detail": {
+            "description": "The model's reason, or the human's note.",
+            "type": "string"
+          },
+          "findingId": {
+            "type": "string"
+          },
+          "headSha": {
+            "description": "Commit the act was judged against.",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "CREATED \u2014 the finding was filed.\nADDRESSED \u2014 a commit fixed it, or a reply convinced the model it was settled.\nAPPROVED \u2014 a human resolved the thread on the forge, accepting it as it stands.\nPROPOSED_ADDRESSED \u2014 an agent believes it is fixed but may not close it, because a human authored it. A human act is still required.\nREOPENED \u2014 it came back.\nWONT_FIX, DUPLICATE \u2014 a human triaged it.\nRELEASED \u2014 a human let a held finding through to the forge.\nDISCARDED \u2014 a human dropped a held finding before it was ever posted.\nDISPUTED \u2014 somebody contested it. The finding stays OPEN and keeps counting against the merge gate; this records the disagreement, it does not resolve it.\nCOMMENTED \u2014 something was said about it that changed no state.",
+            "enum": [
+              "CREATED",
+              "ADDRESSED",
+              "APPROVED",
+              "PROPOSED_ADDRESSED",
+              "REOPENED",
+              "WONT_FIX",
+              "DUPLICATE",
+              "DISPUTED",
+              "RELEASED",
+              "DISCARDED",
+              "COMMENTED"
+            ],
+            "type": "string"
+          },
+          "mrIid": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "replyId": {
+            "description": "The reply that produced it, when there was one.",
+            "type": "string"
+          },
+          "reviewId": {
+            "description": "The review that produced it, when there was one.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "FindingUpsert": {
+        "description": "A finding raised by a person.",
+        "properties": {
+          "body": {
+            "description": "The detail, in Markdown.",
+            "type": "string"
+          },
+          "filePath": {
+            "description": "Path as it appears in the diff. Omit for a finding about the change as a whole.",
+            "example": "src/main/java/Report.java",
+            "type": "string"
+          },
+          "line": {
+            "description": "Line in the new file. Omit to leave it unanchored.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "severity": {
+            "description": "Defaults to MAJOR.",
+            "enum": [
+              "BLOCKER",
+              "MAJOR",
+              "MINOR"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "description": "One-line statement of the problem. Required.",
             "example": "Off-by-one overruns the array on every row",
             "type": "string"
           }
@@ -981,6 +1128,14 @@
           "latestReviewId": {
             "type": "string"
           },
+          "mode": {
+            "description": "AD_HOC is every merge request's default: the agent reviews, the status follows the findings, no ceremony. FORMAL adds named participants who must sign off before mrr will call it clean.",
+            "enum": [
+              "AD_HOC",
+              "FORMAL"
+            ],
+            "type": "string"
+          },
           "mrIid": {
             "format": "int64",
             "type": "integer"
@@ -998,6 +1153,15 @@
           "projectId": {
             "type": "string"
           },
+          "sessionState": {
+            "description": "Where the review session stands, as distinct from where the code stands.",
+            "enum": [
+              "UNDER_REVIEW",
+              "SUMMARIZED",
+              "CLOSED"
+            ],
+            "type": "string"
+          },
           "title": {
             "description": "GitLab title from the latest review, when we have one.",
             "type": "string"
@@ -1008,6 +1172,41 @@
           },
           "userContext": {
             "description": "Owner-written notes included in the next review of this MR. Blank means none.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "NoteUpsert": {
+        "description": "A note kept on the finding's history.",
+        "properties": {
+          "note": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "OperatorReport": {
+        "description": "What a project's operator token is and what it unlocks. Checked when the project page loads.",
+        "properties": {
+          "configured": {
+            "description": "Whether the project has an operator token at all.",
+            "type": "boolean"
+          },
+          "requirements": {
+            "description": "One row per thing the operator token gates.",
+            "items": {
+              "$ref": "#/components/schemas/Requirement"
+            },
+            "type": "array"
+          },
+          "reviewUsername": {
+            "description": "Forge username the review bot's token belongs to, for comparison.",
+            "type": "string"
+          },
+          "username": {
+            "description": "Forge username the operator token belongs to, when the forge would say.",
+            "example": "romanbotnari",
             "type": "string"
           }
         },
@@ -1033,6 +1232,34 @@
           "total": {
             "format": "int32",
             "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "ParticipantUpsert": {
+        "description": "Somebody in the room for this review.",
+        "properties": {
+          "identity": {
+            "description": "An mrr user id, a forge username, or an agent role.",
+            "example": "romanbotnari",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Which identity space. Defaults to FORGE.",
+            "enum": [
+              "USER",
+              "FORGE",
+              "AGENT"
+            ],
+            "type": "string"
+          },
+          "required": {
+            "description": "Must sign off before the request can go CLEAN in a formal session.",
+            "type": "boolean"
+          },
+          "role": {
+            "description": "Free text: author, reviewer, security\u2026",
+            "type": "string"
           }
         },
         "type": "object"
@@ -1113,6 +1340,10 @@
             "description": "Base URL of the forge holding this project \u2014 this is what makes self-hosted work.",
             "example": "https://gitlab.com",
             "type": "string"
+          },
+          "holdFindings": {
+            "description": "Hold the reviewer's findings back as PENDING instead of posting them, until somebody releases or discards each one. They count against the merge gate while they wait. Default false: the review posts as soon as it finishes, which is what most teams want.",
+            "type": "boolean"
           },
           "id": {
             "type": "string"
@@ -1403,6 +1634,73 @@
         },
         "type": "object"
       },
+      "SessionParticipant": {
+        "description": "One participant in a merge request's review session. `required` participants must sign off before mrr will call the request clean.",
+        "properties": {
+          "addedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "identity": {
+            "description": "An mrr user id, a forge username, or an agent role \u2014 whichever `kind` says.",
+            "example": "romanbotnari",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Which identity space `identity` is in. AGENT is mrr itself, or one of its named review roles.",
+            "enum": [
+              "USER",
+              "FORGE",
+              "AGENT"
+            ],
+            "type": "string"
+          },
+          "mrIid": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "required": {
+            "description": "When true, the request cannot go CLEAN until this participant has signed off, however few findings are left.",
+            "type": "boolean"
+          },
+          "role": {
+            "description": "Free text: author, reviewer, security, whatever the team calls it.",
+            "type": "string"
+          },
+          "signedOffAt": {
+            "description": "When they signed off. Null until they do.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SessionUpsert": {
+        "description": "The review session's mode and state. Omitted fields keep their value.",
+        "properties": {
+          "mode": {
+            "description": "AD_HOC \u2014 today's behaviour, and the default. FORMAL \u2014 participants and sign-off, opted into per merge request.",
+            "enum": [
+              "AD_HOC",
+              "FORMAL"
+            ],
+            "type": "string"
+          },
+          "sessionState": {
+            "description": "UNDER_REVIEW: the session is live. SUMMARIZED: somebody wrote it up, and findings can still move. CLOSED: the review is over \u2014 which is not the same as the request being merged or closed, that is the forge's call and shows in `currentStatus`.",
+            "enum": [
+              "UNDER_REVIEW",
+              "SUMMARIZED",
+              "CLOSED"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "SettingsPatch": {
         "description": "Partial update. Null fields are left unchanged.",
         "properties": {
@@ -1541,6 +1839,29 @@
         },
         "type": "object"
       },
+      "StateUpsert": {
+        "description": "A hand-set finding state, and why.",
+        "properties": {
+          "note": {
+            "description": "Why, kept on the finding's history.",
+            "type": "string"
+          },
+          "state": {
+            "description": "OPEN | APPROVED | WONT_FIX | DUPLICATE.",
+            "enum": [
+              "OPEN",
+              "PENDING",
+              "ADDRESSED",
+              "APPROVED",
+              "WONT_FIX",
+              "DUPLICATE",
+              "DISCARDED"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "ThreadUpsert": {
         "description": "An overall GitLab discussion on the merge request, not a finding reply.",
         "properties": {
@@ -1667,6 +1988,10 @@
             "description": "Your forge's base URL. This is what makes self-hosted work. Required on create unless a catalog host is set. Name kept for compatibility; it is the base URL of whichever forge `forge` names.",
             "example": "https://gitlab.com",
             "type": "string"
+          },
+          "holdFindings": {
+            "description": "Hold the reviewer's findings as PENDING instead of posting them, until somebody releases or discards each one. They count against the merge gate while they wait. Default false.",
+            "type": "boolean"
           },
           "librarianEnabled": {
             "description": "Enable the optional librarian addon. Disable never deletes memory.",
@@ -3035,6 +3360,38 @@
         ]
       }
     },
+    "/api/projects/{id}/operator": {
+      "get": {
+        "description": "The operator token is the identity a person writes under when they act through mrr \u2014 merging, commenting, and filing a finding of their own. Without one those are unavailable.\n\nTwo things are checked live: that the forge accepts the token, and who it belongs to. The second is the one that matters \u2014 an operator token resolving to the same account as the review bot would put your findings under the agent's name. Whether the token may *write* is not checked, because the only way to test that is to comment on one of your merge requests; that row says so rather than guessing.",
+        "operationId": "operator",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorReport"
+                }
+              }
+            },
+            "description": "No such project, or not yours"
+          }
+        },
+        "summary": "What this project's operator token is, and what it unlocks",
+        "tags": [
+          "Projects"
+        ]
+      }
+    },
     "/api/projects/{id}/skills": {
       "get": {
         "operationId": "listSkills",
@@ -3563,6 +3920,340 @@
         ]
       }
     },
+    "/api/projects/{projectId}/merge-requests/{iid}/findings": {
+      "post": {
+        "description": "A finding you raise yourself, not the reviewer's. Same object, same thread, and it counts against the merge gate the same way \u2014 the difference is that a later review may not close it. It can say the code looks fixed; you close it by resolving the thread.\n\nPosted with `gitlabOperatorToken` and attributed to you, so it never appears under the review bot's identity. A project without that token cannot file findings from mrr at all.\n\n`filePath` + `line` anchor it to the diff where the host accepts the position, and fall back to an unanchored thread where it does not.",
+        "operationId": "fileFinding",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FindingUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "400": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Finding"
+                }
+              }
+            },
+            "description": "No operator token, no title, or the MR has never been reviewed"
+          },
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Finding"
+                }
+              }
+            },
+            "description": "No such project, MR, or not yours"
+          }
+        },
+        "summary": "File a finding as a person",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}/findings/{findingId}/discard": {
+      "post": {
+        "description": "Drops it before it ever reaches the forge. Deliberately not `WONT_FIX`: nothing was posted and nobody accepted a risk, so recording it as an accepted risk would put a claim on the record that nobody made.",
+        "operationId": "discardFinding",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "findingId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NoteUpsert"
+              }
+            }
+          }
+        },
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Finding"
+                }
+              }
+            },
+            "description": "No such finding, project, or not yours"
+          },
+          "409": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Finding"
+                }
+              }
+            },
+            "description": "It is not held \u2014 already posted, or closed"
+          }
+        },
+        "summary": "Discard a held finding",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}/findings/{findingId}/dispute": {
+      "post": {
+        "description": "The finding stays `OPEN` and keeps counting against the merge gate \u2014 a contested blocker that stops counting is how a ledger starts lying. What this records is the disagreement, on the finding's history, so it still ends in a real outcome: fixed, accepted, or won't fix.",
+        "operationId": "disputeFinding",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "findingId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NoteUpsert"
+              }
+            }
+          }
+        },
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Finding"
+                }
+              }
+            },
+            "description": "No such finding, project, or not yours"
+          }
+        },
+        "summary": "Record that you disagree with a finding",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}/findings/{findingId}/release": {
+      "post": {
+        "description": "On a project with `holdFindings`, the reviewer stores its findings `PENDING` and posts nothing. This is what lets one through: it opens the thread, anchored to the line the reviewer named, and the finding becomes `OPEN`.\n\nPosted under the review token, because it is still the reviewer's finding \u2014 releasing it says a person read it, not that they wrote it. Who released it is on the finding's history.\n\nSend `title` or `body` to edit it on the way out; omit both to post it as written.",
+        "operationId": "releaseFinding",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "findingId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FindingUpsert"
+              }
+            }
+          }
+        },
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Finding"
+                }
+              }
+            },
+            "description": "No such finding, project, or not yours"
+          },
+          "409": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Finding"
+                }
+              }
+            },
+            "description": "It is not held \u2014 already posted, or closed"
+          }
+        },
+        "summary": "Release a held finding onto the request",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}/findings/{findingId}/state": {
+      "put": {
+        "description": "`WONT_FIX` \u2014 real, and nobody is fixing it; you go on the record as having accepted the risk. `DUPLICATE` \u2014 another finding already covers it. `APPROVED` \u2014 accepted as it stands. `OPEN` \u2014 reopen it, which also clears the earlier sign-off.\n\n`ADDRESSED` is not settable: it means a commit fixed the problem, which is the reviewer's verdict to reach, not a label to apply.\n\nThe thread on the request follows the state where the host can close and reopen threads.",
+        "operationId": "triageFinding",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "findingId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StateUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "400": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Finding"
+                }
+              }
+            },
+            "description": "ADDRESSED, or an unknown state"
+          },
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Finding"
+                }
+              }
+            },
+            "description": "No such finding, project, or not yours"
+          },
+          "409": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Finding"
+                }
+              }
+            },
+            "description": "It moved while you were looking at it"
+          }
+        },
+        "summary": "Triage a finding by hand",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
     "/api/projects/{projectId}/merge-requests/{iid}/merge": {
       "post": {
         "description": "Uses `gitlabOperatorToken` against GitLab `PUT \u2026/merge`. Marks the local cycle MERGED even if the webhook is slow. The review bot token is never sent.",
@@ -3609,6 +4300,353 @@
           }
         },
         "summary": "Merge the request from mrr",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}/participants": {
+      "get": {
+        "operationId": "participants",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SessionParticipant"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "No such project, MR, or not yours"
+          }
+        },
+        "summary": "List who is in the room for this review",
+        "tags": [
+          "Merge requests"
+        ]
+      },
+      "post": {
+        "description": "`identity` is an mrr user id, a forge username, or an agent role, according to `kind` \u2014 the same two identity spaces used everywhere else, with no mapping between them. Adding somebody already in the room updates their role rather than failing.\n\n`required` is what makes a formal session more than a list of names: mrr will not call the request clean until every required participant signs off.",
+        "operationId": "addParticipant",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ParticipantUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "400": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionParticipant"
+                }
+              }
+            },
+            "description": "No identity"
+          },
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionParticipant"
+                }
+              }
+            },
+            "description": "No such project, MR, or not yours"
+          }
+        },
+        "summary": "Add or update a participant",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}/participants/{identity}": {
+      "delete": {
+        "operationId": "removeParticipant",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "identity",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "404": {
+            "description": "No such participant, project, MR, or not yours"
+          }
+        },
+        "summary": "Remove a participant",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}/participants/{identity}/sign-off": {
+      "post": {
+        "description": "Says **you** have looked at this merge request as it stands. You can only sign off as yourself: owning the project is not the same as being the person who was asked to review, and a sign-off somebody else recorded on your behalf would be the ledger claiming a review that never happened \u2014 which is the one thing a formal session exists to prevent.\n\nThat means only a `USER` participant can sign off here, matched against your own mrr user id. mrr has no way to authenticate a forge account, so a `FORGE` participant is a name on the list rather than someone who can press this; make them a `USER` participant if their sign-off has to gate the merge.\n\n**A new commit clears every sign-off**, because approving what you read yesterday is not approving what was pushed since.",
+        "operationId": "signOff",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "identity",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionParticipant"
+                }
+              }
+            },
+            "description": "Not you, or an identity mrr cannot authenticate"
+          },
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionParticipant"
+                }
+              }
+            },
+            "description": "No such participant, project, MR, or not yours"
+          },
+          "409": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionParticipant"
+                }
+              }
+            },
+            "description": "You had already signed off"
+          }
+        },
+        "summary": "Sign off as a participant",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}/review": {
+      "post": {
+        "description": "Reviews the request as the forge has it right now, without waiting for a webhook or the catch-up scan. Works on a request mrr has never seen \u2014 it reads the merge request live rather than from anything already stored \u2014 so this is also how you get a cycle for one whose webhook was never registered.\n\nNot a re-review. Reviews are keyed on `(project, mrIid, head sha)`, so asking twice on an unchanged commit returns `200` with the review that already exists and spends nothing. To force a fresh pass over the same commit, use `POST /api/reviews/{id}/rerun`.\n\nDrafts are reviewed. `skipDrafts` exists so that every push to an unfinished branch does not cost a model call; asking for one explicitly answers that question.",
+        "operationId": "reviewNow",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            },
+            "description": "A review of this commit already exists"
+          },
+          "202": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            },
+            "description": "Queued; poll the review"
+          },
+          "400": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            },
+            "description": "The project is disabled"
+          },
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            },
+            "description": "No such project, no such request on the forge, or not yours"
+          },
+          "409": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            },
+            "description": "The forge has already merged or closed it"
+          }
+        },
+        "summary": "Review this merge request now",
+        "tags": [
+          "Merge requests"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{iid}/session": {
+      "put": {
+        "description": "`AD_HOC` is the default and what every merge request has always had: the agent reviews, the status follows the findings, no ceremony. `FORMAL` adds the rule that mrr will not call the request `CLEAN` until every **required** participant has signed off, however few findings are left \u2014 and auto-approve follows the same rule, so mrr cannot approve a session its own status page calls `NEEDS_WORK`.\n\n`sessionState` is where the *review* stands, which is not where the merge request stands: `CLOSED` here means the review is over, while merged and closed remain the forge's call and show in `currentStatus`.",
+        "operationId": "setSession",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "iid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/MrStatus"
+                }
+              }
+            },
+            "description": "No such project, MR, or not yours"
+          }
+        },
+        "summary": "Set the review session's mode and state",
         "tags": [
           "Merge requests"
         ]

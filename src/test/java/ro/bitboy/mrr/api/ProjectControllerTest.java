@@ -140,7 +140,7 @@ class ProjectControllerTest {
 
         ProjectController.Upsert noEntry = new ProjectController.Upsert(
                 "calc", true, null, null, null, "https://gitlab.com", "group/calc", "glpat-x",
-                null, null, null, null, false, 1, List.of(), false, false);
+                null, null, null, null, false, 1, List.of(), false, false, false);
         assertThatThrownBy(() -> projects.create(alice, noEntry))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).getMessage())
@@ -252,6 +252,6 @@ class ProjectControllerTest {
         return new ProjectController.Upsert(
                 "calc", true, forge, forgeInstanceId, null, gitlabUrl, repoId, "glpat-x", null,
                 null, llmProviderId == null ? defaultLlm.id() : llmProviderId,
-                null, false, 1, List.of(), false, false);
+                null, false, 1, List.of(), false, false, false);
     }
 }
