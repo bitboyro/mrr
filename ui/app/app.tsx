@@ -699,64 +699,74 @@ function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
         page says so, and the README’s <em>Which forge</em> table has the full comparison.
       </p>
 
-      <h2>1. Log in</h2>
-      <pre className="token-box">{`┌─ mrr  root admin token ────────────────────────────────────┐
+      <div className="steps">
+      <div className="step" data-n="1">
+        <h2>Log in</h2>
+        <pre className="token-box">{`┌─ mrr  root admin token ────────────────────────────────────┐
 │  mrr_…                                                     │
 └────────────────────────────────────────────────────────────┘`}</pre>
-      <p>
-        First boot prints a root token — it’s also saved at <code>/data/root-token.txt</code>.
-        Paste it on the login screen. There’s no password.
-      </p>
-      {onLogin && <TokenForm onLogin={onLogin} />}
-      <p>
-        Later, from Admin, you can issue one user token per person so nobody has to share root.
-      </p>
+        <p>
+          First boot prints a root token — it’s also saved at <code>/data/root-token.txt</code>.
+          Paste it on the login screen. There’s no password.
+        </p>
+        {onLogin && <TokenForm onLogin={onLogin} />}
+        <p className="muted">
+          Later, from Admin, you can issue one user token per person so nobody has to share root.
+        </p>
+      </div>
 
-      <h2>2. Add your project</h2>
-      <p><strong>Projects → New Project.</strong> You’ll need:</p>
-      <ul>
-        <li>Your forge URL — <code>https://gitlab.com</code>, <code>https://codeberg.org</code>,
-          your own Forgejo, <code>https://github.com</code>, or a GHES host</li>
-        <li>
-          The repository: on GitLab the project ID or <code>group/project</code>; on Forgejo and
-          GitHub <code>owner/repo</code>
-        </li>
-        <li>
-          A GitLab token — a <strong>project access token</strong> is the easy answer:
-          bot user, Developer role, <code>api</code> scope
-        </li>
-        <li>
-          Your model provider — Anthropic, or OpenAI-compatible with a base URL for
-          Ollama / vLLM
-        </li>
-      </ul>
-      <p>That’s it. mrr scans your open merge requests and gets to work.</p>
-      <p className="muted">
-        For the first review, try max turns 1 with tools off — quickest way to confirm
-        everything’s wired up.
-      </p>
+      <div className="step" data-n="2">
+        <h2>Add your project</h2>
+        <p><strong>Projects → New Project.</strong> You’ll need:</p>
+        <ul>
+          <li>Your forge URL — <code>https://gitlab.com</code>, <code>https://codeberg.org</code>,
+            your own Forgejo, <code>https://github.com</code>, or a GHES host</li>
+          <li>
+            The repository: on GitLab the project ID or <code>group/project</code>; on Forgejo and
+            GitHub <code>owner/repo</code>
+          </li>
+          <li>
+            A GitLab token — a <strong>project access token</strong> is the easy answer:
+            bot user, Developer role, <code>api</code> scope. Full permission tables are{" "}
+            <a href="#tokens">below</a>
+          </li>
+          <li>
+            Your model provider — Anthropic, or OpenAI-compatible with a base URL for
+            Ollama / vLLM
+          </li>
+        </ul>
+        <p>That’s it. mrr scans your open merge requests and gets to work.</p>
+        <p className="muted">
+          For the first review, try max turns 1 with tools off — quickest way to confirm
+          everything’s wired up.
+        </p>
+      </div>
 
-      <h2>3. Add a webhook (recommended, not required)</h2>
-      <p>
-        mrr checks for new commits on its own, so reviews will show up regardless. The webhook
-        just makes them instant.
-      </p>
-      <p>
-        After you create the project, copy the URL and secret — shown once — into{" "}
-        <strong>GitLab → Settings → Webhooks</strong>, and tick:
-      </p>
-      <ul>
-        <li><strong>Merge request events</strong></li>
-        <li>
-          <strong>Comments</strong> — needed for more than you might think: replies on mrr’s
-          threads, comments on a diff line becoming findings of your own, and the
-          <code>mrr:</code> commands. Leave it unticked and those go quiet with no error.
-        </li>
-      </ul>
-      <p>
-        <code>MRR_BASE_URL</code> has to be reachable from GitLab. If it ever changes, edit the
-        existing hook rather than adding a second one — two hooks means every review runs twice.
-      </p>
+      <div className="step" data-n="3">
+        <h2>Add a webhook <span className="pill">optional</span></h2>
+        <p>
+          mrr checks for new commits on its own, so reviews will show up regardless. The webhook
+          just makes them instant.
+        </p>
+        <p>
+          After you create the project, copy the URL and secret — shown once — into{" "}
+          <strong>GitLab → Settings → Webhooks</strong>, and tick:
+        </p>
+        <ul>
+          <li><strong>Merge request events</strong></li>
+          <li>
+            <strong>Comments</strong> — needed for more than you might think: replies on mrr’s
+            threads, comments on a diff line becoming findings of your own, and the{" "}
+            <code>mrr:</code> commands. Leave it unticked and those go quiet with no error.
+          </li>
+        </ul>
+        <p className="callout warn">
+          <code>MRR_BASE_URL</code> has to be reachable from GitLab. If it ever changes, edit the
+          existing hook rather than adding a second one — <strong>two hooks means every review
+          runs twice</strong>.
+        </p>
+      </div>
+      </div>
 
       <h2>What a review looks like</h2>
       <ul>
@@ -785,15 +795,133 @@ function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
         <strong>Skip drafts</strong>.
       </p>
 
-      <h2>Which GitLab token?</h2>
-      <p className="muted">
-        On Forgejo or GitHub the shape is the same — a bot account with write access to pull
-        requests — but the names differ, and GitHub’s fine-grained PAT needs{" "}
-        <strong>Contents: Read and write</strong> as well as Pull requests, which is
-        counter-intuitive for an operation about pull requests and the usual cause of a 403.
+      <h2 id="tokens">Which token, and what it may do</h2>
+      <p>
+        mrr uses up to two tokens per project, belonging to two different accounts. They are
+        not interchangeable, and they do not want the same permissions.
       </p>
+
+      <div className="duo">
+        <div className="tok bot">
+          <h4>Review token</h4>
+          <p className="who">required · the bot’s identity</p>
+          <p>
+            What the reviewer reads the diff with. Every overview comment and finding thread
+            goes out under this account.
+          </p>
+        </div>
+        <div className="tok op">
+          <h4>Operator token</h4>
+          <p className="who">optional · your identity</p>
+          <p>
+            A <em>separate</em> account. It’s who you write as when you act through mrr —
+            filing a finding of your own, commenting, merging. Without it those are
+            unavailable, and the project page says so.
+          </p>
+        </div>
+      </div>
+
+      <p className="callout stop">
+        Point the operator token at the same account as the review bot and{" "}
+        <strong>mrr refuses it</strong> — your findings would go out under the agent’s name.
+        The review bot also ignores its own comments, both identities, so you need a third,
+        ordinary account to talk to it.
+      </p>
+
+      <h3>Review token — permissions</h3>
+      <ul className="perms">
+        <li>
+          <span className="pill ok">always</span>
+          <div>
+            <code>Merge Request: Read</code>, <code>Create</code>, <code>Update</code>
+            <span className="why">
+              Read the diff, post the overview comment, open and edit finding threads.
+            </span>
+          </div>
+        </li>
+        <li>
+          <span className="pill warn">if enabled</span>
+          <div>
+            <code>Merge Request: Approve</code>
+            <span className="why">
+              Auto-approve only. The token’s identity also has to be allowed to approve under
+              your approval rules and CODEOWNERS.
+            </span>
+          </div>
+        </li>
+        <li>
+          <span className="pill warn">if enabled</span>
+          <div>
+            <code>Repository: Read</code>, <code>Commit: Read</code>, <code>Project: Read</code>
+            <span className="why">For <code>read_file</code> and the librarian.</span>
+          </div>
+        </li>
+        <li>
+          <span className="pill bad">never</span>
+          <div>
+            Merge, repo write, <code>Code: Push</code>, <code>Code: Read</code>, webhook scopes
+            <span className="why">
+              mrr never pushes as the bot, never merges as the bot, and never creates the hook
+              itself. This row is GitLab’s — on GitHub the bot does need write to the contents
+              scope, for the reason in the translation table below.
+            </span>
+          </div>
+        </li>
+      </ul>
+
+      <h3>Operator token — permissions</h3>
+      <ul className="perms">
+        <li>
+          <span className="pill ok">always</span>
+          <div>
+            <code>Merge Request: Read</code>, <code>Create</code>, <code>Update</code>
+            <span className="why">
+              Post a thread as you, anchor a finding to a diff line, and close that thread when
+              you mark it won’t fix or approved.
+            </span>
+          </div>
+        </li>
+        <li>
+          <span className="pill ok">always</span>
+          <div>
+            Enough scope to identify itself
+            <span className="why">
+              mrr asks the forge who the token belongs to and compares it with the review bot.
+              One too narrow to answer shows as unknown on the project page — mrr still tries
+              to use it.
+            </span>
+          </div>
+        </li>
+        <li>
+          <span className="pill warn">to merge</span>
+          <div>
+            <code>Merge</code>, plus the right to merge the target branch
+            <span className="why">
+              Only for the Merge button — this is the one permission the review token must not
+              have. On a protected branch the account has to be in <em>Allowed to merge</em>,
+              which is usually Maintainer rather than Developer.
+            </span>
+          </div>
+        </li>
+        <li>
+          <span className="pill bad">never</span>
+          <div>
+            <code>Code: Push</code>, webhook scopes
+            <span className="why">Same as the review token, and for the same reasons.</span>
+          </div>
+        </li>
+      </ul>
+
+      <p className="callout">
+        mrr checks that the forge accepts the operator token and who it belongs to. It
+        deliberately does <strong>not</strong> check whether it may write — the only way to
+        test that would be to comment on one of your merge requests. So a token scoped too
+        narrowly fails on first use with the forge’s own error, not with a warning up front.
+      </p>
+
+      <h3>Either token can be any of these</h3>
       <table>
-        <thead><tr><th>Token</th><th>Notes</th></tr></thead>
+        <thead><tr><th>Credential</th><th>Notes</th></tr></thead>
         <tbody>
           <tr>
             <td>Project or group access token</td>
@@ -804,52 +932,91 @@ function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
           </tr>
           <tr>
             <td>Fine-grained PAT</td>
-            <td>Scoped to a single project. Permissions below.</td>
+            <td>Scoped to a single project. Permissions as above.</td>
           </tr>
           <tr>
             <td>Classic PAT</td>
-            <td><code>api</code> scope, and the user needs Developer on the project.</td>
-          </tr>
-          <tr>
-            <td><strong>Operator token</strong> (optional, second account)</td>
             <td>
-              A <em>separate</em> account from the review bot. It’s the identity you write
-              under when you act through mrr — filing a finding of your own, commenting,
-              merging. Without one those are unavailable, and the project page says so. Point
-              it at the same account as the review bot and mrr refuses it: your findings would
-              go out under the agent’s name.
+              <code>api</code> scope, and the user needs Developer on the project — Maintainer
+              if it is the operator token and you want to merge.
             </td>
           </tr>
         </tbody>
       </table>
       <p className="muted">
-        The review bot ignores its own comments — both identities — so replying from either
-        account is invisible to mrr. That’s what stops it answering itself; it also means you
-        need a third, ordinary account to talk to it.
-      </p>
-      <p className="muted">
-        Deploy tokens and CI job tokens won’t work — mrr sends the token as{" "}
-        <code>PRIVATE-TOKEN</code>.
+        Deploy tokens and CI job tokens won’t work anywhere — mrr sends the token as the account
+        it belongs to (<code>PRIVATE-TOKEN</code> on GitLab, <code>Authorization: Bearer</code>{" "}
+        on GitHub, <code>Authorization: token</code> on Forgejo).
       </p>
 
-      <h3>Fine-grained permissions</h3>
+      <h3>The same permissions on GitHub and Forgejo</h3>
       <p>
-        Always: <code>Merge Request: Read</code>, <code>Create</code>, <code>Update</code>.
+        Two tokens, two accounts, same idea everywhere — but the names differ, and so does how
+        finely you can slice them.
       </p>
-      <p>Only if you turn the matching feature on:</p>
-      <ul>
-        <li>
-          <code>Merge Request: Approve</code> — for auto-approve. The token’s identity also has
-          to be allowed to approve under your approval rules and CODEOWNERS.
-        </li>
-        <li>
-          <code>Repository: Read</code>, <code>Commit: Read</code>, <code>Project: Read</code> —
-          for <code>read_file</code> and the librarian.
-        </li>
-      </ul>
-      <p>
-        Please don’t grant Merge, repo write, <code>Code: Push</code>, <code>Code: Read</code>,
-        or webhook scopes. mrr never pushes, never merges, and never creates the hook itself.
+      <table className="xlate">
+        <thead>
+          <tr>
+            <th>What it’s for</th>
+            <th>GitLab</th>
+            <th>GitHub fine-grained</th>
+            <th>Forgejo / Gitea</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Know whose token it is</td>
+            <td>any valid token</td>
+            <td>any valid token</td>
+            <td><code>read:user</code></td>
+          </tr>
+          <tr>
+            <td>Read the request and its diff</td>
+            <td><code>Merge Request: Read</code></td>
+            <td><code>Pull requests: Read</code></td>
+            <td><code>read:repository</code></td>
+          </tr>
+          <tr>
+            <td>Post and edit findings</td>
+            <td><code>Merge Request: Create</code>, <code>Update</code></td>
+            <td><code>Pull requests: Read and write</code></td>
+            <td><code>write:issue</code></td>
+          </tr>
+          <tr>
+            <td>Resolve a finding’s thread</td>
+            <td>included above</td>
+            <td><strong><code>Contents: Read and write</code></strong> as well</td>
+            <td>varies by instance — mrr probes it</td>
+          </tr>
+          <tr>
+            <td><code>read_file</code> and the librarian</td>
+            <td><code>Repository</code>, <code>Commit</code>, <code>Project: Read</code></td>
+            <td><code>Contents: Read-only</code></td>
+            <td><code>read:repository</code></td>
+          </tr>
+          <tr>
+            <td>Merge — operator token only</td>
+            <td><code>Merge</code> + allowed to merge the branch</td>
+            <td><code>Contents</code> + <code>Pull requests: Read and write</code></td>
+            <td><code>write:repository</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p className="callout warn">
+        <strong>GitHub:</strong> <code>Contents: Read and write</code> is not optional for the
+        review bot. Resolving a review thread has no REST endpoint at all — it is the GraphQL{" "}
+        <code>resolveReviewThread</code>, and that will not answer without it. So the “never
+        grant repo write” advice above is GitLab’s alone. This is the usual cause of a 403 that
+        looks like it should be about pull requests.
+      </p>
+
+      <p className="callout warn">
+        <strong>Forgejo and Gitea:</strong> the scopes are coarser than GitLab’s — there is no
+        merge-request-only write. <code>write:repository</code> also grants updating repository
+        files, so the tight split GitLab allows can’t be reproduced. Give it to the operator
+        token only if you want the Merge button, and leave the review bot on{" "}
+        <code>read:repository</code> + <code>write:issue</code>.
       </p>
 
       <h2>Optional extras</h2>
