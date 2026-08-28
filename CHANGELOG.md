@@ -6,7 +6,52 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
+### Changed
+
+- **The setup page now says what the operator token needs.** It had one permission list, headed
+  "Fine-grained permissions", sitting under a section about tokens in general — so it read as
+  though it covered both tokens. It never did: it was the review bot's list, and the operator
+  token's requirements are **not the same**. The one that matters is `Merge`, which the page
+  told you in the same breath not to grant, because for the review bot it should not be. It is
+  the operator token that needs it, and only if you want the Merge button — plus the right to
+  merge the target branch, which on a protected branch usually means Maintainer rather than
+  Developer. Somebody following the page exactly got a Merge button that failed with the
+  forge's own 403 and nothing explaining why.
+
+  Both tokens now have their own list, each row tagged with how binding it is — always, only
+  with a feature on, or never grant this. The page also says outright that mrr checks who the
+  operator token belongs to but deliberately never checks whether it may *write*, so a token
+  scoped too narrowly fails on first use rather than at setup.
+
+  The operator token has come out of the "which credential" table, which was comparing project
+  access tokens with fine-grained and classic PATs and then listing a second *account* as if it
+  were a fourth kind of credential. Identity and credential shape are separate choices, and
+  either token can be any of the three shapes.
+
+- **And what those permissions are called on GitHub and Forgejo.** The page had one sentence
+  about GitHub and nothing about Forgejo, on a product whose whole point is that the forge is
+  per project. There is now a row-per-job table across all three, and it exists because the
+  translation is not mechanical — **the least-privilege split GitLab allows does not survive
+  the trip**:
+
+  - On **GitHub**, `Contents: Read and write` is not optional for the review bot. Resolving a
+    review thread has no REST endpoint at all — it is the GraphQL `resolveReviewThread` — and
+    that will not answer without it. So the "never grant repo write" row is GitLab's alone, and
+    the page now says so on the row itself rather than leaving it to be discovered as a 403.
+  - On **Forgejo and Gitea** the scopes are coarser: there is no merge-request-only write, and
+    `write:repository` also grants updating repository files. The tight split simply cannot be
+    reproduced, so the page says to keep the review bot on `read:repository` + `write:issue` and
+    give the broader scope to the operator token only if the Merge button is wanted.
+
+  The note about deploy and CI job tokens was GitLab-shaped too, naming only `PRIVATE-TOKEN`; it
+  now names the header each forge actually gets.
+
+- **The setup page reads like the rest of the app.** It was a wall of undifferentiated prose in
+  one colour — no accents, no hierarchy beyond headings, nothing to scan for — while every other
+  page uses the same gold accent, pills and cards. Setup steps are numbered and connected, the
+  two tokens are a pair of cards accented in the colour of what each one is, permissions are
+  rows with a status pill, and warnings are asides with a left accent rather than another
+  paragraph. No new design vocabulary: it is the one the app already had, finally applied here.
 
 - **A closed finding cannot be disputed.** `mrr: dispute` recorded the disagreement whatever
   state the finding was in, so an `ADDRESSED` or `WONT_FIX` one ended up carrying an objection

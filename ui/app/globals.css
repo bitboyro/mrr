@@ -565,14 +565,13 @@ label.check {
   cursor: pointer;
 }
 
-.howto h1 { margin-bottom: 8px; }
+.howto { max-width: 760px; }
+.howto h1 { margin-bottom: 8px; font-size: 26px; }
 .howto .tag { color: var(--muted); font-size: 14px; margin: 0 0 10px; }
-.howto .lead { color: var(--muted); margin-bottom: 18px; }
-.howto h2 { margin-top: 22px; margin-bottom: 8px; }
-.howto h3 { margin: 14px 0 6px; font-size: 12px; font-weight: 550; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.howto .lead { color: var(--muted); margin-bottom: 18px; font-size: 16px; }
 .howto p { margin: 0 0 8px; }
 .howto p, .howto li { color: var(--fg); font-size: 15px; }
-.howto li { margin: 4px 0; }
+.howto li { margin: 5px 0; }
 .howto ul { padding-left: 1.2em; margin: 0 0 8px; }
 .howto pre.token-box {
   max-height: none;
@@ -583,3 +582,145 @@ label.check {
 .howto .token-form { max-width: 420px; margin: 16px 0 24px; }
 .howto table { margin: 4px 0 10px; }
 .howto td:first-child { white-space: nowrap; font-family: var(--font-mono); font-size: 12px; }
+/* The forge translation table's first column is prose, not a credential name. */
+.howto table.xlate td:first-child {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  white-space: normal;
+  color: var(--muted);
+}
+.howto table.xlate td { vertical-align: top; }
+.howto table.xlate code { font-size: 12px; }
+
+/* Section headings get an eyebrow rule so the page has a skeleton you can scan. */
+.howto h2 {
+  margin: 40px 0 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-size: 17px;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.howto h2::before {
+  content: "";
+  width: 18px;
+  height: 2px;
+  background: var(--gold);
+  flex: none;
+  transform: translateY(-4px);
+}
+.howto h3 {
+  margin: 20px 0 8px;
+  font-size: 11px;
+  font-weight: 550;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-family: var(--font-mono);
+  color: var(--muted);
+}
+
+/* Numbered setup steps, with a connector so 1-2-3 reads as one run. */
+.howto .step { position: relative; padding-left: 44px; margin: 0 0 30px; }
+.howto .step::before {
+  content: attr(data-n);
+  position: absolute;
+  left: 0;
+  top: -2px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid var(--gold);
+  color: var(--gold);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.howto .step::after {
+  content: "";
+  position: absolute;
+  left: 13px;
+  top: 30px;
+  bottom: -30px;
+  width: 1px;
+  background: var(--line);
+}
+/* Scoped to the wrapper: `:last-of-type` would mean the last div in .howto, which is
+   a later card grid, not the last step. */
+.howto .steps > .step:last-child::after { display: none; }
+.howto .step > h2 {
+  margin: 0 0 8px;
+  padding-top: 0;
+  border-top: 0;
+  font-size: 16px;
+}
+.howto .step > h2::before { display: none; }
+
+/* Two-up cards for things that are genuinely a pair (the two tokens). */
+.howto .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 14px 0 18px; }
+.howto .duo > * { min-width: 0; }
+@media (max-width: 720px) { .howto .duo { grid-template-columns: 1fr; } }
+
+.howto .tok {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--silver);
+  border-radius: var(--radius);
+  background: var(--fill);
+  padding: 14px 16px;
+}
+.howto .tok.bot { border-left-color: var(--gold); }
+.howto .tok.op { border-left-color: var(--ok); }
+.howto .tok h4 {
+  margin: 0 0 2px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.howto .tok .who {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+.howto .tok p { font-size: 14px; }
+.howto .tok p:last-child { margin-bottom: 0; }
+
+/* Permission rows: a pill says how binding it is, mono says what to tick. */
+.howto .perms { list-style: none; padding: 0; margin: 10px 0 14px; }
+.howto .perms li {
+  display: grid;
+  grid-template-columns: 104px 1fr;
+  gap: 12px;
+  align-items: baseline;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+  margin: 0;
+  font-size: 14px;
+}
+.howto .perms li > .pill { white-space: nowrap; }
+@media (max-width: 560px) {
+  .howto .perms li { grid-template-columns: 1fr; gap: 6px; }
+}
+.howto .perms li:last-child { border-bottom: 0; }
+.howto .perms .pill { justify-self: start; }
+.howto .perms code {
+  font-size: 12px;
+  color: var(--fg);
+  background: rgba(184, 180, 172, 0.1);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.howto .perms .why { display: block; color: var(--muted); font-size: 13px; margin-top: 3px; }
+
+/* Asides carry a left accent so a warning is distinguishable from a note at a glance. */
+.howto .callout {
+  margin: 14px 0;
+  border-left: 3px solid var(--gold);
+}
+.howto .callout.warn { border-left-color: var(--warn); }
+.howto .callout.stop { border-left-color: var(--danger); }
+.howto .callout strong { color: var(--fg); }
