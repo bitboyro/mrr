@@ -76,6 +76,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Bundled reviewers for TypeScript, Python and Rust.** `java-reviewer` was the only language
+  skill shipping in the jar, so every other project either wrote its own or reviewed with the
+  generic prompt. The three new skills read like their Java sibling and use the same
+  `blocker` / `major` / `minor` vocabulary, so a repository containing more than one language
+  gets comparable verdicts rather than as many standards as it has languages.
+
+  Each is built around **what that language leaves unchecked**, because that is where the
+  reading time is worth spending and it is the one thing a generic prompt cannot know:
+
+  - `typescript-reviewer` — the escapes that switch the checker off (`any`, an unverified
+    `as`, `!`, a fresh `@ts-ignore`), the runtime facts types cannot save you from (a request
+    body's annotation validates nothing, numbers are doubles, `catch (e)` gives you
+    `unknown`), and floating promises.
+  - `python-reviewer` — that nothing is checked before it runs, so rarely-exercised paths
+    carry the risk; plus the traps that look correct on the page (a mutable default argument,
+    a closure over a loop variable, `assert` used as validation and removed by `-O`, an
+    f-string in a log call).
+  - `rust-reviewer` — explicitly **not** the borrow checker's job. It says so, and spends
+    itself on what the compiler permits instead: panics as this language's null dereference,
+    overflow that aborts in debug and silently wraps in release, guards held across `.await`,
+    and any new `unsafe` block that does not state the invariant making it sound.
+
+  All three infer the project's version, config and framework from the surrounding code
+  rather than assuming them, and each is told to **report a project-wide setting once in the
+  summary instead of filing a finding per line** — TypeScript with `strict` off, an
+  unannotated Python codebase — because a review that reports the project's own settings back
+  at it a hundred times is a review nobody reads.
+
+- **`mr-review` now speaks the host's output contract.** It told the model to prefix comments
+  `issue:` / `suggestion:` / `nitpick:` and to close with a verdict of "approved" or "changes
+  required" — none of which exist in the JSON the host actually requires, whose fields are
+  `severity` and `role`. A skill inventing a second vocabulary on top of the one being parsed
+  is how a finding ends up with a severity nobody chose. It now maps that judgement onto
+  `severity`, uses `role` for the concern, and describes the verdict as what the severities
+  add up to.
+
+  It also says how it composes: skills are concatenated, so when a language skill is enabled
+  alongside it, the more specific one's severity call wins and neither should file a second
+  finding on the same line. Its YAML frontmatter is gone — nothing parsed it, and it was
+  reaching the model as literal text under a heading the host had already written.
+
 - **Formal review sessions, opt-in per merge request.** Every merge request is `AD_HOC` by
   default — the agent reviews, the status follows the findings, no ceremony, exactly as before.
   `PUT …/merge-requests/{iid}/session` switches one to `FORMAL`, which adds the rule Crucible
