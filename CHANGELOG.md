@@ -6,6 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Forgejo or Gitea token was written to the log in full.** The redactor skipped the auth
+  scheme `Bearer` and nothing else, but Forgejo and Gitea are sent `Authorization: token
+  <secret>` — so it redacted the word *token* and left the credential standing on the line
+  after it. GitLab (`PRIVATE-TOKEN:`) and GitHub (`Bearer`) were both covered; only the forge
+  whose scheme word was not in the pattern leaked, and it leaked every time the HTTP wire logger
+  was turned up. The scheme is now optional and covers `Bearer`, `token` and `Basic`.
+
+  Anyone who has run a Forgejo or Gitea project with wire logging above WARN should rotate that
+  token: it will be in whatever those logs were shipped to.
+
+- **A token that may not comment no longer reports itself as a rejected diff line.** Posting a
+  finding anchored to a line is the one call whose 4xx is an ordinary answer — hosts refuse an
+  unchanged line or an invented path routinely — so `exchangeRejectable` read every 4xx as that
+  refusal. **401 and 403 are not that.** No host answers "this line cannot be commented on" with
+  an authentication status; they use 400, 404 or 422. GitHub in particular answers 403 for a
+  scope a fine-grained token or an App installation was never granted, so a token allowed to
+  comment but not to review would post every finding unanchored, permanently, while the log
+  blamed each line in turn. Both statuses now fail with a message that says the token is not
+  allowed to do this — everything else keeps the old behaviour.
+
+- **Bare GitHub tokens are redacted like GitLab's.** The second redaction net — for a token that
+  reached a log line with nothing around it but its own shape — matched only GitLab's `glpat-`
+  family. It now also matches `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` and `github_pat_`. It
+  deliberately does **not** try to match a Forgejo token, which is forty hex characters and
+  therefore the same shape as every commit sha in these logs; a test pins that decision so the
+  asymmetry is not "fixed" later by a pattern that would redact the shas mrr exists to discuss.
+
 ### Changed
 
 - **The setup page now says what the operator token needs.** It had one permission list, headed

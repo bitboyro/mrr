@@ -122,6 +122,14 @@ public abstract class ForgeHttp {
      * as {@link #exchange} would: those are not evidence the request itself was invalid, and
      * treating them as a routine refusal would silently fall back to an unanchored thread
      * (or, worse, post a duplicate one) instead of failing the review the way an outage should.
+     *
+     * <p><strong>401 and 403 are excluded from that.</strong> No host answers "this line cannot
+     * be commented on" with an authentication or permission status — they use 400, 404 or 422 —
+     * so reading those two as a position refusal turns a token problem into a sentence about
+     * the diff. It matters most on GitHub, where a fine-grained token or an App installation
+     * answers 403 for a scope it was never granted: a token that may comment but may not review
+     * would otherwise post every finding unanchored for good, while the log blamed each line in
+     * turn. The caller cannot tell the difference, so it is drawn here.
      */
     protected Optional<JsonNode> exchangeRejectable(Project project, HttpMethod method,
                                                     String path, Object body) {
@@ -129,6 +137,12 @@ public abstract class ForgeHttp {
         try {
             return Optional.ofNullable(send(project, method, url, body).getBody());
         } catch (RestClientResponseException e) {
+            HttpStatus status = HttpStatus.resolve(e.getStatusCode().value());
+            if (status == HttpStatus.UNAUTHORIZED || status == HttpStatus.FORBIDDEN) {
+                throw failed(method, path, "with " + e.getStatusCode()
+                        + " — the token is not allowed to do this, which is not the same as the "
+                        + "host refusing the line");
+            }
             if (e.getStatusCode().is4xxClientError()) {
                 return Optional.empty();
             }
