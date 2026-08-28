@@ -1,9 +1,20 @@
----
-name: mr-review
-description: Review a merge/pull request — what to read before the diff, how to write comments people act on, how to close the review. Language-agnostic.
----
-
 # Reviewing a merge request
+
+How to conduct a review, in any language. This skill owns the judgement and the
+conduct; a language skill enabled next to it owns the specifics.
+
+Do not invent an output format. The host already requires a JSON verdict with
+`summary`, `findings`, and `prior`. Everything below is about what goes in those
+fields.
+
+## Working alongside other skills
+
+More than one skill can be enabled at once, and each arrives under its own
+`## Skill:` heading. When a language or domain skill is present, it is the more
+specific one: its checklists and its severity calls win. Do not restate its rules
+back to it, and do not open two findings on the same line because two skills
+happen to describe the same problem — one finding, at the severity the more
+specific skill would give it.
 
 ## Don't alter the intent
 
@@ -19,20 +30,24 @@ the ticket.
 - Adjacent problems the change makes worse are fair game. Adjacent problems it
   merely sits next to are not.
 
-## Comments
+## Findings
 
 - **Say why.** "This drops the error" beats "wrong". The reason is what lets the
   author fix it without a round-trip.
-- **Mark how binding it is.** Prefix each comment: `issue:` must change,
-  `suggestion:` worth considering, `nitpick:` take it or leave it, `question:`
-  I don't understand this yet. Ambiguity about which one you meant is where
-  review threads go bad.
-- **Anchor to lines.** A comment on the exact line it concerns. General
-  observations go in the summary, not sprinkled across the file.
+- **Mark how binding it is.** `severity` is the field for that: `blocker` and
+  `major` are what stops a merge, `minor` is take it or leave it. Don't invent a
+  second vocabulary on top — no `issue:` / `nit:` prefixes inside the title. Two
+  vocabularies in one review is where threads go bad.
+- **Say which concern it came from.** `role` — `correctness`, `security`,
+  `tests`, `performance`, `style`. It's how an author triages fifteen findings.
+- **Anchor to lines.** `file` and `line` have to exist in the diff. General
+  observations belong in `summary`, not sprinkled across files.
 - **Ask instead of asserting when you're unsure.** "What happens if this is
-  empty?" is cheaper for both of you than a wrong accusation.
-- **Praise what's earned.** A clean decomposition or a well-chosen test is worth
-  a line. Not every MR has one; don't manufacture it.
+  empty?" is cheaper for both of you than a wrong accusation. But if you can't
+  name the input that breaks it, the question goes in `summary` — an unfounded
+  finding still counts against the merge gate.
+- **Praise what's earned** — in `summary`. `findings` are problems only. Not
+  every MR has something to praise; don't manufacture it.
 
 ## What to actually look for
 
@@ -49,7 +64,14 @@ Roughly in order of what's worth your attention:
 
 ## Closing it out
 
-Leave one summary comment that states the verdict plainly: approved, approved
-with nits, or changes required — and if changes are required, which of your
-comments block. A review with fifteen inline comments and no summary leaves the
-author guessing what stops the merge.
+`summary` is the review for anyone who reads only one thing: what the change
+does, what you checked, and why it is safe to merge — or what still stands in the
+way. Write it even when `findings` is empty. "LGTM" is not a review.
+
+The verdict isn't a separate word, it's what the severities add up to. If nothing
+is `blocker` or `major`, say plainly that the change is safe to merge. If
+something is, name it in `summary` as well — fifteen findings and a summary that
+doesn't say which ones block leaves the author guessing.
+
+`prior` is where earlier threads get settled: mark each one `addressed` or
+`still_present`. Don't re-raise a prior finding by repeating it in `findings`.
