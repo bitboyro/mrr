@@ -2,7 +2,7 @@
 set -e
 # Bind-mounts often arrive as root:root. The process runs as uid 10001; fix
 # ownership while we still have root, then drop privileges.
-mkdir -p /data /data/memory
+mkdir -p /data /data/memory /data/repos
 if [ "$(id -u)" = "0" ]; then
   chown -R mrr:mrr /data
   # su resets PATH to the login.defs default, which does not include

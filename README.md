@@ -247,6 +247,41 @@ plaintext rows once a key is set, and cannot open rows sealed with a key you no 
 Both mean re-entering every project's credentials, so treat the key as permanent. This protects
 copies of the database — backups, snapshots, a disk that leaves the building — not a live host.
 
+### Source on disk, and how to decline it
+
+By default mrr holds no source at rest. Every repository read goes through the forge API, and
+nothing lands on the volume but the database, the root token, and the memory corpus.
+
+Three optional tools change that. `symbol_at`, `find_references` and `co_changed` answer
+questions a diff cannot — *what definition is this line inside, who calls the thing this change
+touched, and which files usually move with this one but did not this time* — and answering the
+second and third at any speed needs a local copy of the repository.
+
+The trade is opt-in and per project. A project that does not enable one of these tools never
+gets a mirror, which is how a team declines source at rest. Enabling one clones the repository
+into `/data/repos/{projectId}.git` on the next review.
+
+Worth knowing:
+
+- **No new permission.** The same `read_repository` / `Contents: Read-only` that already backs
+  `read_file` authorises the clone. There is no second token and nothing to re-issue.
+- **The mirror is bare** — no checkout, no working tree. Only the object database.
+- **The token is never written into the repository.** It goes on each request; the stored remote
+  URL is plain. A URL carrying a PAT would end up in `.git/config`, in JGit's exception
+  messages, and from there in logs.
+- **Nothing is ever pushed.** Every operation is a fetch.
+- **`co_changed` reads no file content at all.** It walks commit metadata to learn which paths
+  changed together and never opens a blob — enforced by a test, not by good intentions.
+- **Disk is bounded.** `MRR_REPO_MAX_BYTES` caps the total and `MRR_REPO_MAX_PROJECT_BYTES` caps
+  one repository; least-recently-used mirrors are evicted to stay inside them, and a repository
+  over its per-project limit is deleted rather than kept.
+- **You can delete a mirror at any time** with `DELETE /api/projects/{id}/repo`, or by turning
+  the tools off. The coupling index survives, because it holds no source.
+
+If a clone fails, is still running, or is turned off, reviews carry on over the API — the tools
+that need a mirror are simply not offered that review. That is the normal first-review state, and
+it is not an error.
+
 ## API and MCP
 
 **`/swagger-ui`** on a running instance is the full surface, or read

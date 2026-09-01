@@ -152,6 +152,23 @@ public interface Forge {
     /** Unified compare, truncated. Empty if either SHA is missing or the host 404s. */
     Optional<String> compare(Project project, String from, String to, int maxChars);
 
+    /**
+     * Where this host publishes merge/pull request heads, as a git refspec.
+     *
+     * <p>Only the repo layer uses this, and only so a fetch makes an MR head SHA reachable.
+     * That matters because a merge request's head is frequently on no branch at all — a fork,
+     * or a branch already deleted — so fetching {@code refs/heads/*} alone would leave the
+     * exact revision under review unresolvable, and answering against the wrong revision is
+     * worse than not answering.
+     *
+     * <p>This is a per-host fact about ref naming rather than a capability, so it lives here
+     * as a default rather than as a {@link ForgeCapabilities} flag: every host publishes these
+     * refs, they just disagree about what to call them.
+     */
+    default String mrRefSpec() {
+        return "+refs/merge-requests/*/head:refs/mrr/mr/*";
+    }
+
     // ── approval ─────────────────────────────────────────────────────────────────────
 
     void approve(Project project, long mrIid);

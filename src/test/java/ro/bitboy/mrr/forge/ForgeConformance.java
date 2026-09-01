@@ -199,6 +199,29 @@ abstract class ForgeConformance {
         assertThat(posted).isEmpty();
     }
 
+    @Test
+    void everyHostAnswersWithSomewhereToCloneFrom() {
+        // The repo layer cannot assemble this itself: a project id may be a numeric GitLab id
+        // rather than a path. Every adapter already reads the repository root object for the
+        // default branch, so the URL is one more field off a response it was fetching anyway.
+        ProjectInfo info = forge().projectInfo(project());
+
+        assertThat(info.defaultBranch()).isEqualTo("main");
+        assertThat(info.cloneable()).isTrue();
+        assertThat(info.cloneUrl()).startsWith("https://").endsWith(".git");
+        // Never credentials in the URL: a PAT here would reach .git/config and the logs.
+        assertThat(info.cloneUrl()).doesNotContain("@").doesNotContain("tok");
+    }
+
+    @Test
+    void everyHostSaysWhereItPublishesMergeRequestHeads() {
+        // An MR head is frequently on no branch at all, so fetching refs/heads/* alone would
+        // leave the exact revision under review unresolvable.
+        String spec = forge().mrRefSpec();
+
+        assertThat(spec).startsWith("+refs/").contains("/head:refs/mrr/mr/*");
+    }
+
     private record ForeignAnchor() implements AnchorRef {
     }
 }

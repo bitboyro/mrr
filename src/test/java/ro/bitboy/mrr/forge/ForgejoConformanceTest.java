@@ -27,6 +27,9 @@ class ForgejoConformanceTest extends ForgeConformance {
     @Override
     protected Map<String, String> routes() {
         return Map.of(
+                ROOT, """
+                        {"default_branch":"main","description":"d","name":"repo",
+                         "clone_url":"https://fj.example/owner/repo.git"}""",
                 ROOT + "/pulls/7", """
                         {"number":7,"title":"t","body":"d","state":"open",
                          "html_url":"https://cb/7","draft":false,

@@ -69,9 +69,17 @@ public record Project(
         @Schema(description = "Maximum model turns per review, including the first. 1 is a single "
                 + "shot with no tools, which is the default and preserves original behaviour.")
         int agentMaxTurns,
-        @Schema(description = "Tool names the reviewer may call: `read_file`, `search_memory`, "
-                + "`read_memory`, `write_memory`. Empty means no tools are advertised. The MR "
-                + "card is always written from the verdict, tools or not.")
+        @Schema(description = "Tool names the reviewer may call: `read_file`, `symbol_at`, "
+                + "`find_references`, `co_changed`, `search_memory`, `read_memory`, "
+                + "`write_memory`. Empty means no tools are advertised. The MR card is always "
+                + "written from the verdict, tools or not.\n\n"
+                + "`symbol_at`, `find_references` and `co_changed` read the repository. "
+                + "Enabling any of them makes mrr keep a local mirror of this project under "
+                + "MRR_REPO_ROOT; a project that enables none never gets one. No extra token "
+                + "scope is required — the read access that already backs `read_file` "
+                + "authorises the clone. `symbol_at` also runs before the model is asked "
+                + "anything, expanding every hunk to its enclosing definition, which is why it "
+                + "is worth enabling even on a single-turn review.")
         List<String> agentTools,
         @Schema(description = "When true, mrr Approves the GitLab MR after a review that leaves "
                 + "zero open findings, and Unapproves if a later commit reintroduces one. The "

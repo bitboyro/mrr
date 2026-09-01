@@ -82,6 +82,36 @@ mrr:
     max-memory-chars: ${MRR_MAX_MEMORY_CHARS:8000}
     max-model-tokens: ${MRR_MAX_MODEL_TOKENS:16000}
     anthropic-effort: ${MRR_ANTHROPIC_EFFORT:high}
+  # The per-project bare mirror the repo-intelligence tools read, and the co-change index
+  # built from its history. A project only gets a mirror once it enables one of those tools,
+  # so an install that never ticks them holds no source on disk and none of this applies.
+  #
+  # Restart-only, unlike the review budgets above: these describe something on disk. Moving
+  # `root` while mirrors exist under the old one would orphan them, and changing the window
+  # mid-index would leave a table whose rows mean two different things.
+  repo:
+    root: ${MRR_REPO_ROOT:/data/repos}
+    # Across every mirror. LRU eviction on the scan tick keeps the total under this.
+    max-bytes: ${MRR_REPO_MAX_BYTES:21474836480}
+    # One repo over this is deleted and marked TOO_LARGE rather than kept; that project stays
+    # API-only. A bounded refusal beats a mysteriously full disk.
+    max-project-bytes: ${MRR_REPO_MAX_PROJECT_BYTES:5368709120}
+    idle-days: ${MRR_REPO_IDLE_DAYS:30}
+    # How long a failed clone is left alone. Without this a project whose token was revoked
+    # would be re-cloned on every webhook.
+    retry-minutes: ${MRR_REPO_RETRY_MINUTES:30}
+    # Commits touching more paths than this are dropped from the co-change walk. Formatting
+    # sweeps and dependency bumps would otherwise couple every file to every other file.
+    max-files-per-commit: ${MRR_COCHANGE_MAX_FILES_PER_COMMIT:20}
+    window-days: ${MRR_COCHANGE_WINDOW_DAYS:730}
+    half-life-days: ${MRR_COCHANGE_HALF_LIFE_DAYS:365}
+    min-support-stored: ${MRR_COCHANGE_MIN_SUPPORT_STORED:3}
+    max-commits: ${MRR_COCHANGE_MAX_COMMITS:50000}
+    # Parsed syntax trees are cached by blob sha and bounded by source bytes, not entry count:
+    # entry count is meaningless when files run from 200 bytes to 2 MB.
+    ast-cache-bytes: ${MRR_AST_CACHE_BYTES:33554432}
+    ast-max-file-bytes: ${MRR_AST_MAX_FILE_BYTES:2097152}
+    tool-call-retention-days: ${MRR_TOOL_CALL_RETENTION_DAYS:90}
 
 springdoc:
   swagger-ui:

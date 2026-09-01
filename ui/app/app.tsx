@@ -77,7 +77,8 @@ type MemoryRun = {
   createdAt: string;
   finishedAt: string | null;
 };
-const AGENT_TOOLS = ["read_file", "search_memory", "read_memory", "write_memory"] as const;
+const AGENT_TOOLS = ["read_file", "symbol_at", "find_references", "co_changed",
+  "search_memory", "read_memory", "write_memory"] as const;
 type MrStatus = {
   mode?: string;
   sessionState?: string;
@@ -247,6 +248,9 @@ type InstanceStats = {
   mrsProcessed: number;
   reviewsTotal: number;
   reviewsByState: Record<string, number>;
+  toolCalls: Record<string, number>;
+  toolCallsLast7Days: Record<string, number>;
+  toolOutcomes: Record<string, number>;
   inFlight: number;
   pendingOrProcessing: number;
   tokens: { input: number; output: number; cacheRead: number };
@@ -853,7 +857,7 @@ function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
           <span className="pill warn">if enabled</span>
           <div>
             <code>Repository: Read</code>, <code>Commit: Read</code>, <code>Project: Read</code>
-            <span className="why">For <code>read_file</code> and the librarian.</span>
+            <span className="why">For <code>read_file</code>, the repo tools and the librarian. No extra token scope: the same read access that backs <code>read_file</code> also authorises the clone.</span>
           </div>
         </li>
         <li>
@@ -989,7 +993,7 @@ function HowTo({ onLogin }: { onLogin?: (me: Me) => void }) {
             <td>varies by instance — mrr probes it</td>
           </tr>
           <tr>
-            <td><code>read_file</code> and the librarian</td>
+            <td><code>read_file</code>, <code>symbol_at</code>, <code>find_references</code>, <code>co_changed</code> and the librarian</td>
             <td><code>Repository</code>, <code>Commit</code>, <code>Project: Read</code></td>
             <td><code>Contents: Read-only</code></td>
             <td><code>read:repository</code></td>
@@ -3000,7 +3004,7 @@ function Trail({ trace, empty }: { trace: AgentTrace | null; empty?: string }) {
 }
 
 function highlightLog(message: string) {
-  const re = /(review [a-zA-Z0-9_-]+|turn \d+\/\d+|stop_reason=\S+|tools?=\S+|read_file|\d+ms|\d+ chars|max_turns=\d+|OPENAI_COMPAT|ANTHROPIC|"[^"]*"|'[^']*'|\b(?:failed|error|ERROR|WARN|truncated)\b)/g;
+  const re = /(review [a-zA-Z0-9_-]+|turn \d+\/\d+|stop_reason=\S+|tools?=\S+|read_file|symbol_at|find_references|co_changed|\d+ms|\d+ chars|max_turns=\d+|OPENAI_COMPAT|ANTHROPIC|"[^"]*"|'[^']*'|\b(?:failed|error|ERROR|WARN|truncated)\b)/g;
   const parts: ReactNode[] = [];
   let last = 0;
   let match: RegExpExecArray | null;
@@ -3013,7 +3017,8 @@ function highlightLog(message: string) {
     if (lower.startsWith("review ") || /^[a-f0-9-]{8,}$/.test(tok)) cls = "log-tok-id";
     else if (/^\d+ms$/.test(tok) || /^\d+ chars$/.test(tok) || lower.startsWith("turn ") || lower.startsWith("max_turns=")) cls = "log-tok-num";
     else if (tok.startsWith("\"") || tok.startsWith("'")) cls = "log-tok-str";
-    else if (lower.startsWith("tool") || lower === "read_file" || lower === "search_memory"
+    else if (lower.startsWith("tool") || lower === "read_file" || lower === "symbol_at"
+      || lower === "find_references" || lower === "co_changed" || lower === "search_memory"
       || lower === "read_memory" || lower === "write_memory" || lower === "list_tree"
       || lower === "openai_compat" || lower === "anthropic") cls = "log-tok-tool";
     else if (lower === "failed" || lower === "error" || lower === "warn" || lower === "truncated") cls = "log-tok-bad";
@@ -3710,6 +3715,42 @@ function Stats() {
           ? ` · Failures: ${Object.entries(stats.failuresByKind).map(([k, v]) => `${k} ${v}`).join(", ")}`
           : ""}
       </p>
+      <h3>Tools</h3>
+      <p className="muted">
+        What the reviewer actually calls, counted from executed calls rather than from project
+        settings &mdash; a tool nobody calls and a tool nobody enabled look the same in the
+        settings and want very different answers. <code>symbol_at</code> includes the
+        hunk expansion mrr runs before every review, which is why it dominates.
+      </p>
+      {Object.keys(stats.toolCalls).length === 0
+        ? <p className="muted">No tool calls yet. Tools are off until a project enables them.</p>
+        : (
+          <table>
+            <thead>
+              <tr><th>Tool</th><th>Calls</th><th>Last 7 days</th></tr>
+            </thead>
+            <tbody>
+              {Object.entries(stats.toolCalls)
+                .sort((a, b) => b[1] - a[1])
+                .map(([tool, n]) => (
+                  <tr key={tool}>
+                    <td><code>{tool}</code></td>
+                    <td>{n.toLocaleString()}</td>
+                    <td>{(stats.toolCallsLast7Days[tool] ?? 0).toLocaleString()}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        )}
+      {Object.keys(stats.toolOutcomes).length > 0 && (
+        <p className="muted">
+          Outcomes: {Object.entries(stats.toolOutcomes).map(([k, v]) => `${k} ${v}`).join(" · ")}
+          {(stats.toolOutcomes.QUOTA ?? 0) > 0
+            ? " — a large QUOTA share means the per-slice allowance is set too low for this workload."
+            : ""}
+        </p>
+      )}
+      <h3>Projects</h3>
       <table>
         <thead>
           <tr><th>Project</th><th>MRs</th><th>Reviews</th><th>Tokens in</th><th>Tokens out</th></tr>

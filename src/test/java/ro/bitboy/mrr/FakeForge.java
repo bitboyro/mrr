@@ -49,6 +49,9 @@ public final class FakeForge implements Forge {
     /** Null means the host rejects every position, which is the default and the common case. */
     public Discussion inlineDiscussion;
     public String tokenUser = "mrr-bot";
+    /** Where the mirror layer is told to clone from. Null means the host reported none. */
+    public String cloneUrl = "https://forge.test/repo.git";
+    public String defaultBranch = "main";
     /** Set to make the token-user lookup blow up the way a 401 or a dead host would. */
     public RuntimeException tokenUserFailure;
     public List<MrCommit> commits = List.of();
@@ -239,7 +242,7 @@ public final class FakeForge implements Forge {
 
     @Override
     public ProjectInfo projectInfo(Project project) {
-        return new ProjectInfo("main", null, project.name());
+        return new ProjectInfo(defaultBranch, null, project.name(), cloneUrl);
     }
 
     @Override

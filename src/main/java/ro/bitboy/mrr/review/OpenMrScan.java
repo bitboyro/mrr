@@ -61,16 +61,26 @@ public class OpenMrScan implements ApplicationRunner {
     });
     private volatile boolean running = true;
     private Thread loop;
+    /** Null in the tests that build this by hand; housekeeping is skipped when it is. */
+    private ro.bitboy.mrr.repo.WorkingCopies copies;
+    private int retentionDays = 90;
+    private int minSupportStored = 3;
+    private int coChangeWindowDays = 730;
 
     @Autowired
     public OpenMrScan(Store store, ForgeFactory forges, Reviewer reviewer, MemoryService memory,
-                      RuntimeSettings settings) {
+                      RuntimeSettings settings, ro.bitboy.mrr.repo.WorkingCopies copies,
+                      ro.bitboy.mrr.MrrProperties properties) {
         this.store = store;
         this.forges = forges;
         this.reviewer = reviewer;
         this.memory = memory;
         this.settings = settings;
         this.bootIntervalMs = settings.scanIntervalMs();
+        this.copies = copies;
+        this.retentionDays = properties.repo().toolCallRetentionDays();
+        this.minSupportStored = properties.repo().minSupportStored();
+        this.coChangeWindowDays = properties.repo().windowDays();
     }
 
     /** Tests: frozen interval, no background loop. */
@@ -110,10 +120,45 @@ public class OpenMrScan implements ApplicationRunner {
             } catch (Exception e) {
                 log.warn("periodic scan failed: {}", e.getMessage());
             }
+            housekeeping();
             if (!running || Thread.currentThread().isInterrupted()) {
                 return;
             }
             sleep(intervalMs());
+        }
+    }
+
+    /**
+     * Disk and table maintenance, on the tick that already exists.
+     *
+     * <p>Both jobs here are the kind that must happen and must never matter: a mirror that
+     * cannot be evicted this pass is evicted the next, and telemetry that outlives its
+     * retention is untidy rather than harmful. So both are wrapped, and neither is allowed to
+     * interrupt the scan they ride along with.
+     */
+    private void housekeeping() {
+        if (copies != null) {
+            try {
+                int evicted = copies.evictToBudget();
+                if (evicted > 0) {
+                    log.info("evicted {} mirror(s) to stay inside the disk budget", evicted);
+                }
+            } catch (Exception e) {
+                log.warn("mirror eviction pass failed: {}", e.getMessage());
+            }
+        }
+        try {
+            store.pruneToolCalls(retentionDays);
+        } catch (Exception e) {
+            log.warn("could not prune tool-call history: {}", e.getMessage());
+        }
+        try {
+            int dropped = store.pruneCoChangePairs(minSupportStored, coChangeWindowDays);
+            if (dropped > 0) {
+                log.info("dropped {} co-change pair(s) that never amounted to coupling", dropped);
+            }
+        } catch (Exception e) {
+            log.warn("could not prune the co-change table: {}", e.getMessage());
         }
     }
 

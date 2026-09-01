@@ -26,6 +26,9 @@ class GitHubConformanceTest extends ForgeConformance {
     @Override
     protected Map<String, String> routes() {
         return Map.of(
+                ROOT, """
+                        {"default_branch":"main","description":"d","name":"repo",
+                         "clone_url":"https://gh.example/owner/repo.git"}""",
                 ROOT + "/pulls/7", """
                         {"number":7,"title":"t","body":"d","state":"open","draft":false,
                          "html_url":"https://gh/7","user":{"login":"ada","name":"Ada"},

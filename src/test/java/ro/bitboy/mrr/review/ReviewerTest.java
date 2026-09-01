@@ -669,4 +669,38 @@ class ReviewerTest {
         return new Reviewer(store, ForgeFactory.fixed(gitlab), properties, new ObjectMapper(),
                 memory, p -> model, workers);
     }
+
+    /**
+     * The guarantee the whole repo layer is built around: it is an optimisation, never a
+     * dependency.
+     *
+     * <p>A project with all three tools enabled and no mirror on disk -- which is every
+     * project's first review, and any project whose host is unreachable -- must still produce
+     * a verdict and post it. If this ever fails, enabling the tools has made mrr less
+     * reliable, which is not a trade worth any amount of context.
+     */
+    @Test
+    void aReviewWithEveryRepoToolEnabledAndNoMirrorStillPostsItsVerdict() {
+        project = TestStores.persist(store, withTools(TestStores.project("u1", "p", "wh"),
+                List.of("symbol_at", "find_references", "co_changed")));
+        model = new RecordingModel(List.of(
+                Result.of("{\"summary\":\"Looks safe\",\"findings\":[],\"prior\":[]}", "end_turn")));
+
+        String id = claim("sha-no-mirror");
+        reviewer().run(id);
+
+        assertThat(store.findReview(id).orElseThrow().state()).isEqualTo(Review.State.READY);
+        assertThat(gitlab.posted).isNotEmpty();
+    }
+
+    private static Project withTools(Project project, List<String> tools) {
+        return new Project(project.id(), project.ownerId(), project.name(), project.enabled(),
+                project.forge(), project.gitlabUrl(), project.gitlabProjectId(),
+                project.gitlabToken(), project.gitlabOperatorToken(), project.webhookSecret(),
+                project.llmProviderId(), project.llm(), project.skill(), project.skipDrafts(),
+                4, tools, project.autoApprove(), project.holdFindings(),
+                project.librarianEnabled(), project.memoryHeadSha(), project.memoryStatus(),
+                project.memoryRefreshedAt(), project.lastErrorKind(), project.lastError(),
+                project.lastErrorAt(), project.createdAt());
+    }
 }

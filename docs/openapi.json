@@ -692,6 +692,27 @@
           },
           "tokensLast7Days": {
             "$ref": "#/components/schemas/TokenTotals"
+          },
+          "toolCalls": {
+            "additionalProperties": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "toolCallsLast7Days": {
+            "additionalProperties": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "toolOutcomes": {
+            "additionalProperties": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "object"
           }
         },
         "type": "object"
@@ -1294,7 +1315,7 @@
             "type": "integer"
           },
           "agentTools": {
-            "description": "Tool names the reviewer may call: `read_file`, `search_memory`, `read_memory`, `write_memory`. Empty means no tools are advertised. The MR card is always written from the verdict, tools or not.",
+            "description": "Tool names the reviewer may call: `read_file`, `symbol_at`, `find_references`, `co_changed`, `search_memory`, `read_memory`, `write_memory`. Empty means no tools are advertised. The MR card is always written from the verdict, tools or not.\n\n`symbol_at`, `find_references` and `co_changed` read the repository. Enabling any of them makes mrr keep a local mirror of this project under MRR_REPO_ROOT; a project that enables none never gets one. No extra token scope is required \u2014 the read access that already backs `read_file` authorises the clone. `symbol_at` also runs before the model is asked anything, expanding every hunk to its enclosing definition, which is why it is worth enabling even on a single-turn review.",
             "items": {
               "type": "string"
             },
@@ -1508,6 +1529,69 @@
           },
           "trace": {
             "$ref": "#/components/schemas/AgentTrace"
+          }
+        },
+        "type": "object"
+      },
+      "RepoStatus": {
+        "description": "The state of a project's local mirror and its co-change index. Absent or failed is a normal state, not an outage: reviews continue over the API and the tools that need a mirror are simply not offered.",
+        "properties": {
+          "coChangeCommits": {
+            "description": "Non-sweep commits folded into the co-change index.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "coChangeFrom": {
+            "description": "Oldest commit the index covers.",
+            "type": "string"
+          },
+          "coChangeSkipped": {
+            "description": "Commits dropped because they touched more paths than the sweep threshold. A large share here means the threshold wants tuning.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "coChangeState": {
+            "description": "NONE | INDEXING | READY | PARTIAL | FAILED",
+            "type": "string"
+          },
+          "defaultBranch": {
+            "type": "string"
+          },
+          "fetchedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "fetchedSha": {
+            "description": "Commit the last fetch left the mirror at.",
+            "type": "string"
+          },
+          "historyComplete": {
+            "description": "False while a backfill is incomplete, so a thin answer can be discounted rather than trusted.",
+            "type": "boolean"
+          },
+          "lastError": {
+            "description": "Why the last clone or fetch failed, if it did.",
+            "type": "string"
+          },
+          "lastUsedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "sizeBytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "state": {
+            "description": "ABSENT | CLONING | READY | FAILED | TOO_LARGE | EVICTED",
+            "enum": [
+              "ABSENT",
+              "CLONING",
+              "READY",
+              "FAILED",
+              "TOO_LARGE",
+              "EVICTED"
+            ],
+            "type": "string"
           }
         },
         "type": "object"
@@ -3239,7 +3323,7 @@
     "/api/projects/{id}/memory/refresh": {
       "post": {
         "description": "Requires librarianEnabled. Returns immediately; poll the run while RUNNING.",
-        "operationId": "refresh",
+        "operationId": "refresh_1",
         "parameters": [
           {
             "in": "path",
@@ -4652,6 +4736,85 @@
         ]
       }
     },
+    "/api/projects/{projectId}/repo": {
+      "delete": {
+        "description": "Removes the working copy from disk. The coupling index is kept, since it holds no source and took real history to build; a later review re-clones and carries on from where it left off.",
+        "operationId": "evict",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "Delete the mirror",
+        "tags": [
+          "Repository mirror"
+        ]
+      },
+      "get": {
+        "operationId": "status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepoStatus"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "The state of this project's mirror and its co-change index",
+        "tags": [
+          "Repository mirror"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/repo/refresh": {
+      "post": {
+        "description": "Returns immediately; the work runs in the background. Also the way to retry a mirror whose last attempt failed, without waiting out the retry window.",
+        "operationId": "refresh",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "summary": "Fetch now, rather than waiting for the next review",
+        "tags": [
+          "Repository mirror"
+        ]
+      }
+    },
     "/api/replies/{id}": {
       "get": {
         "description": "Includes the prompt sent to the model and the agent trace.",
@@ -5351,18 +5514,6 @@
       "name": "Catalogs"
     },
     {
-      "description": "The record of every review mrr has run: the webhook that triggered it, the merge request as it stood at that commit, the exact prompt sent to the model, and what came back.\n\nA review is a snapshot, not a live view of the MR \u2014 retitle an MR and push again and you get a second review carrying the new title, with the first left intact.",
-      "name": "Reviews"
-    },
-    {
-      "description": "Identity. Only an ADMIN token can create a user or mint a token \u2014 this is the single rule the whole multi-tenant model rests on. A USER token can list and revoke its own tokens and do nothing else here.",
-      "name": "Users and tokens"
-    },
-    {
-      "description": "Live status of merge requests mrr has reviewed. Distinct from a Review, which is one commit: this is where the MR stands now \u2014 reviewing, needs work, or clean.",
-      "name": "Merge requests"
-    },
-    {
       "description": "Named instruction documents owned by the caller (or, for ADMIN, every user). Attaching a library skill to a project does not copy the body \u2014 edits here apply on the next review of every attached project. Delete is 409 while a project still uses the skill.",
       "name": "Skill library"
     },
@@ -5375,16 +5526,32 @@
       "name": "Projects"
     },
     {
-      "description": "Where a forge delivers merge- and pull-request events. The only endpoint that does not take an mrr API token \u2014 a forge has no way to hold one.",
-      "name": "Webhook"
-    },
-    {
       "description": "Runtime log levels and the in-memory log ring. Admin only. Levels are not persisted: a restart restores `logging.level` from config. Set `ro.bitboy.mrr` to DEBUG to log full agent message bodies. `GET /api/logs` is the tail.",
       "name": "Loggers"
     },
     {
       "description": "Liveness. Used by the container healthcheck.",
       "name": "Health"
+    },
+    {
+      "description": "The record of every review mrr has run: the webhook that triggered it, the merge request as it stood at that commit, the exact prompt sent to the model, and what came back.\n\nA review is a snapshot, not a live view of the MR \u2014 retitle an MR and push again and you get a second review carrying the new title, with the first left intact.",
+      "name": "Reviews"
+    },
+    {
+      "description": "Identity. Only an ADMIN token can create a user or mint a token \u2014 this is the single rule the whole multi-tenant model rests on. A USER token can list and revoke its own tokens and do nothing else here.",
+      "name": "Users and tokens"
+    },
+    {
+      "description": "Live status of merge requests mrr has reviewed. Distinct from a Review, which is one commit: this is where the MR stands now \u2014 reviewing, needs work, or clean.",
+      "name": "Merge requests"
+    },
+    {
+      "description": "The local copy mrr keeps of a project, and the file-coupling index built from its history.\n\nA project gets one only once it enables a tool that needs it, so an install that never does holds no source on disk. Absent or failed is a normal state rather than an outage: reviews continue over the API, and the tools that need a mirror are simply not offered.",
+      "name": "Repository mirror"
+    },
+    {
+      "description": "Where a forge delivers merge- and pull-request events. The only endpoint that does not take an mrr API token \u2014 a forge has no way to hold one.",
+      "name": "Webhook"
     },
     {
       "description": "Skills and documents the reviewer may use for a project. Enable or disable each one without a code change \u2014 the next review picks the set up. A skill may also be scoped to source branches by glob or regex.",

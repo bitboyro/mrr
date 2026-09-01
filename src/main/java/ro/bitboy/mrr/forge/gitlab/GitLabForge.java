@@ -468,7 +468,8 @@ public class GitLabForge extends ForgeHttp implements Forge {
     public ProjectInfo projectInfo(Project project) {
         JsonNode body = exchange(project, HttpMethod.GET, "", null);
         return new ProjectInfo(textOrNull(body.path("default_branch")),
-                textOrNull(body.path("description")), textOrNull(body.path("name")));
+                textOrNull(body.path("description")), textOrNull(body.path("name")),
+                textOrNull(body.path("http_url_to_repo")));
     }
 
     @Override

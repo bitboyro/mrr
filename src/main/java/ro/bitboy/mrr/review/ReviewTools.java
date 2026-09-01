@@ -9,6 +9,7 @@ import ro.bitboy.mrr.memory.MemoryService;
 import ro.bitboy.mrr.memory.MemoryStore;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.ReviewModel.ToolSpec;
+import ro.bitboy.mrr.repo.RepoToolNames;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -27,12 +28,36 @@ final class ReviewTools {
     }
 
     static List<ToolSpec> forProject(Project project) {
+        return forProject(project, false, false);
+    }
+
+    /**
+     * The tools this project may call on this review.
+     *
+     * <p>{@code repoReady} and {@code coChangeReady} gate on what is actually available right
+     * now rather than on what the project enabled. Advertising a tool that will only refuse
+     * costs a turn, and turns are the scarce resource in this loop — which is the same reason
+     * nothing at all is advertised at {@code agentMaxTurns() <= 1}.
+     *
+     * <p>{@code symbol_at} is not gated: it answers from the forge API when there is no mirror,
+     * so it works on a project's very first review.
+     */
+    static List<ToolSpec> forProject(Project project, boolean repoReady, boolean coChangeReady) {
         List<ToolSpec> tools = new ArrayList<>();
         if (project.agentMaxTurns() <= 1) {
             return tools;
         }
         if (project.toolEnabled(READ_FILE)) {
             tools.add(readFile());
+        }
+        if (project.toolEnabled(RepoToolNames.SYMBOL_AT)) {
+            tools.add(symbolAt());
+        }
+        if (project.toolEnabled(RepoToolNames.FIND_REFERENCES) && repoReady) {
+            tools.add(findReferences());
+        }
+        if (project.toolEnabled(RepoToolNames.CO_CHANGED) && coChangeReady) {
+            tools.add(coChanged());
         }
         if (project.toolEnabled(SEARCH_MEMORY) || project.toolEnabled(READ_MEMORY)
                 || project.toolEnabled(WRITE_MEMORY)) {
@@ -65,6 +90,95 @@ final class ReviewTools {
                                 "end_line", Map.of("type", "integer",
                                         "description", "1-based last line to include")),
                         "required", List.of("path")));
+    }
+
+
+    static ToolSpec symbolAt() {
+        return new ToolSpec(RepoToolNames.SYMBOL_AT,
+                """
+                Map a line to the definition that encloses it — the whole function, method or \
+                class it sits in, instead of the three lines of context the diff gives you. \
+                Use it when a hunk's meaning depends on code the diff did not show. A line in \
+                an import block or a comment has no enclosing definition; that answers \
+                `symbol: null`, which is an answer and not an error. `tier` says how the \
+                answer was produced: `ast_filtered` is a real parse, `textual` means mrr has \
+                no grammar for this file and could not name the definition.""",
+                Map.of(
+                        "type", "object",
+                        "properties", Map.of(
+                                "file", Map.of("type", "string",
+                                        "description", "Repository path as it appears in the diff"),
+                                "line", Map.of("type", "integer",
+                                        "description", "1-based line inside the definition you want"),
+                                "ref", Map.of("type", "string",
+                                        "description", "Commit sha. Omit for the merge-request "
+                                                + "head, which is what you want."),
+                                "include_body", Map.of("type", "boolean",
+                                        "description", "Default true"),
+                                "max_body_lines", Map.of("type", "integer",
+                                        "description", "Default 200. A longer body comes back as "
+                                                + "head and tail with body_truncated set.")),
+                        "required", List.of("file", "line")));
+    }
+
+    static ToolSpec findReferences() {
+        return new ToolSpec(RepoToolNames.FIND_REFERENCES,
+                """
+                Find where a symbol is used. Ask before concluding that changing or removing \
+                something is safe. The answer is ranked and capped: read `total` against \
+                `returned` — seeing eight of three hundred callers is not the same as there \
+                being eight. `grouped` is always complete even when the results are a sample, \
+                so "280 of 312 in legacy/" is often the whole answer; narrow with \
+                `filter.only_modules` rather than paging. Each hit carries its own `tier`: \
+                `textual` means a byte match in a file mrr cannot parse, so phrase any finding \
+                built on one as a question. Tests are included on purpose — a broken call site \
+                in a test is real evidence a contract changed.""",
+                Map.of(
+                        "type", "object",
+                        "properties", Map.of(
+                                "name", Map.of("type", "string",
+                                        "description", "The symbol name to look for"),
+                                "symbol_id", Map.of("type", "string",
+                                        "description", "An id from symbol_at; preferred over name"),
+                                "file", Map.of("type", "string",
+                                        "description", "Where it is defined — improves ranking"),
+                                "ref", Map.of("type", "string"),
+                                "max_results", Map.of("type", "integer",
+                                        "description", "Default 8"),
+                                "handle", Map.of("type", "string",
+                                        "description", "Opaque cursor from a previous call, to "
+                                                + "see the next page. Pass it back verbatim."),
+                                "filter", Map.of("type", "object",
+                                        "description", "exclude_tests, exclude_generated, "
+                                                + "only_modules (array of path prefixes), "
+                                                + "only_changed_in_mr")),
+                        "required", List.of()));
+    }
+
+    static ToolSpec coChanged() {
+        return new ToolSpec(RepoToolNames.CO_CHANGED,
+                """
+                List files that have historically changed alongside this one. Use it to notice \
+                what a change may have forgotten: a file strongly coupled to one being edited, \
+                that this merge request does not touch, is worth asking about. Answered from \
+                commit metadata only — this tool never reads file contents. Renames are not \
+                followed, and `history_complete` says whether the index is still filling, so \
+                treat a thin answer as thin rather than as evidence of no coupling.""",
+                Map.of(
+                        "type", "object",
+                        "properties", Map.of(
+                                "file", Map.of("type", "string",
+                                        "description", "Repository path as it appears in the diff"),
+                                "min_support", Map.of("type", "integer",
+                                        "description", "Commits containing both. Default 5."),
+                                "min_confidence", Map.of("type", "number",
+                                        "description", "Default 0.6"),
+                                "max_results", Map.of("type", "integer",
+                                        "description", "Default 10"),
+                                "exclude_changed_in_mr", Map.of("type", "boolean",
+                                        "description", "Default true — the interesting answer is "
+                                                + "what this change did not touch")),
+                        "required", List.of("file")));
     }
 
     static ToolSpec searchMemory() {
