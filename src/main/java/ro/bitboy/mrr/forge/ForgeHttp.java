@@ -8,6 +8,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.web.ApiException;
@@ -221,15 +222,21 @@ public abstract class ForgeHttp {
         }
     }
 
-    /** A body the host returns as text rather than JSON — a raw file. */
+    /**
+     * A body the host returns as text rather than JSON — a raw file.
+     *
+     * <p>The accept override <em>replaces</em> whatever {@link #authHeaders} set, rather than
+     * adding to it. {@code header()} appends, so adding here would send two Accept values;
+     * GitHub echoes the pair back as one comma-joined {@code Content-Type}, which is not a
+     * legal media type and fails while reading the response, not while sending it.
+     */
     protected String getText(Project project, String url, String... accept) {
-        var spec = http.get().uri(URI.create(url));
-        for (Map.Entry<String, String> header : authHeaders(project).entrySet()) {
-            spec = spec.header(header.getKey(), header.getValue());
-        }
-        if (accept.length > 0) {
-            spec = spec.header(HttpHeaders.ACCEPT, accept);
-        }
+        var spec = http.get().uri(URI.create(url)).headers(headers -> {
+            authHeaders(project).forEach(headers::set);
+            if (accept.length > 0) {
+                headers.put(HttpHeaders.ACCEPT, List.of(accept));
+            }
+        });
         return spec.retrieve().body(String.class);
     }
 
@@ -254,6 +261,10 @@ public abstract class ForgeHttp {
             return "error: " + label() + " returned " + e.getStatusCode() + " for " + path;
         } catch (ResourceAccessException e) {
             return "error: " + label() + " timed out or could not be reached for " + path;
+        } catch (RestClientException | IllegalArgumentException e) {
+            // A malformed or unreadable response is still a normal answer to a tool call: the
+            // model gets a line it can act on instead of losing the turn to an exception.
+            return "error: " + label() + " sent a response mrr could not read for " + path;
         }
         if (body == null) {
             return "error: empty file";

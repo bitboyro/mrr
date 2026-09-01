@@ -297,6 +297,52 @@ class GitHubForgeTest {
         return host.url("/").toString().replaceAll("/+$", "");
     }
 
+    /**
+     * The raw-file read must send exactly one Accept. {@code authHeaders} already asks for
+     * {@code vnd.github+json}, and appending the raw type instead of replacing it sent both:
+     * GitHub echoed the pair back as one comma-joined Content-Type, which is not a legal media
+     * type, and read_file died while reading the response rather than while sending it.
+     */
+    @Test
+    void readingARawFileAsksForOneMediaTypeRatherThanTwo() {
+        host.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                seen.add(request);
+                return new MockResponse()
+                        .setHeader("Content-Type", "text/plain; charset=utf-8")
+                        .setBody("line one\nline two\n");
+            }
+        });
+
+        String body = forge.fileAt(project(), "src/Foo.java", "headsha1", null, null, 10_000);
+
+        assertThat(body).isEqualTo("line one\nline two\n");
+        RecordedRequest read = seen.stream()
+                .filter(r -> r.getPath() != null && r.getPath().contains("/contents/"))
+                .findFirst().orElseThrow();
+        assertThat(read.getHeaders().values(HttpHeaders.ACCEPT))
+                .containsExactly("application/vnd.github.raw");
+    }
+
+    /** A response mrr cannot parse is still an answer the model can read, not a lost turn. */
+    @Test
+    void anUnreadableResponseComesBackAsAnErrorLineRatherThanAnException() {
+        host.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                seen.add(request);
+                return new MockResponse()
+                        .setHeader("Content-Type", "application/vnd.github+json,application/vnd.github.raw")
+                        .setBody("whatever");
+            }
+        });
+
+        assertThat(forge.fileAt(project(), "src/Foo.java", "headsha1", null, null, 10_000))
+                .startsWith("error:")
+                .contains("src/Foo.java");
+    }
+
     private Project project() {
         return project(base());
     }

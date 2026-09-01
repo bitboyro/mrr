@@ -90,6 +90,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`read_file` failed on every GitHub project.** The raw-file read went out asking for two
+  media types at once. `authHeaders` already sets `Accept: application/vnd.github+json`, and
+  `getText` then *added* `application/vnd.github.raw` on top of it — `header()` appends, it does
+  not replace — so GitHub received both, echoed the pair back as a single comma-joined
+  `Content-Type`, and Spring threw `InvalidMediaTypeException` reading a response it had asked
+  for itself. The failure surfaced as `tool read_file failed`, which reads like a permission
+  problem and is not one. The accept override now replaces the header instead of joining it.
+  GitLab and Forgejo were never affected: neither passes an override, so neither ever sent two.
+
+- **An unreadable response no longer costs the reviewer a turn.** `readFileBody` catches a 4xx
+  and a timeout and turns each into an `error:` line the model can act on, but anything else —
+  the malformed `Content-Type` above included — escaped both catches and killed the tool call.
+  A file that cannot be read is a normal answer to a tool call, so it now comes back as a
+  sentence rather than an exception.
+
 - **A Forgejo or Gitea token was written to the log in full.** The redactor skipped the auth
   scheme `Bearer` and nothing else, but Forgejo and Gitea are sent `Authorization: token
   <secret>` — so it redacted the word *token* and left the credential standing on the line
