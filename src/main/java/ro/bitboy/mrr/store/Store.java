@@ -35,6 +35,11 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import ro.bitboy.mrr.repo.RepoState;
+import ro.bitboy.mrr.repo.RepoStatus;
+import ro.bitboy.mrr.repo.WorkingCopies;
+
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -1404,9 +1409,11 @@ public class Store {
                 rs.getString("id"), rs.getString("name"), rs.getLong("mrs"),
                 rs.getLong("reviews"), rs.getLong("input_tokens"), rs.getLong("output_tokens")))
                 .list();
+        String weekAgo = Instant.now().minus(7, ChronoUnit.DAYS).toString();
         return new InstanceStats(mrsProcessed, reviewsTotal, byState, inFlight, pendingOrProcessing,
                 tokens, last7, findingsOpen, findingsAddressed, findingsApproved,
-                meanReady, failures, projects);
+                meanReady, failures, toolCallCounts(null), toolCallCounts(weekAgo),
+                toolOutcomeCounts(), projects);
     }
 
     private InstanceStats.TokenTotals tokenTotals(String sinceIso) {
@@ -2062,5 +2069,440 @@ public class Store {
     private static Integer nullableInt(ResultSet rs, String column) throws SQLException {
         int value = rs.getInt(column);
         return rs.wasNull() ? null : value;
+    }
+
+    // ── the repository mirror ────────────────────────────────────────────────────────
+
+    private static final String REPO_SELECT = """
+            SELECT project_id, state, default_branch, fetched_sha, fetched_at, size_bytes,
+                   last_used_at, last_attempt_at, last_error, cochange_state, cochange_head_sha,
+                   cochange_from, cochange_commits, cochange_skipped
+            FROM repos
+            """;
+
+    public Optional<RepoStatus> findRepo(String projectId) {
+        return db.sql(REPO_SELECT + " WHERE project_id = ?")
+                .param(projectId)
+                .query((rs, n) -> toRepoStatus(rs))
+                .optional();
+    }
+
+    private RepoStatus toRepoStatus(java.sql.ResultSet rs) throws java.sql.SQLException {
+        String coState = rs.getString("cochange_state");
+        return new RepoStatus(
+                RepoState.parse(rs.getString("state")),
+                rs.getString("default_branch"),
+                rs.getString("fetched_sha"),
+                instantOrNull(rs.getString("fetched_at")),
+                rs.getLong("size_bytes"),
+                instantOrNull(rs.getString("last_used_at")),
+                rs.getString("last_error"),
+                coState == null ? "NONE" : coState,
+                rs.getLong("cochange_commits"),
+                rs.getLong("cochange_skipped"),
+                rs.getString("cochange_from"),
+                "READY".equals(coState));
+    }
+
+    private static Instant instantOrNull(String iso) {
+        if (iso == null || iso.isBlank()) {
+            return null;
+        }
+        try {
+            return Instant.parse(iso);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** Creates the row on first sight so every later write is a plain UPDATE. */
+    private void ensureRepoRow(String projectId) {
+        db.sql("""
+                INSERT INTO repos (project_id, state, size_bytes, cochange_state,
+                                   cochange_commits, cochange_skipped, created_at)
+                VALUES (?, 'ABSENT', 0, 'NONE', 0, 0, ?)
+                ON CONFLICT DO NOTHING
+                """)
+                .params(projectId, Instant.now().toString())
+                .update();
+    }
+
+    public void markRepoState(String projectId, RepoState state, String error) {
+        ensureRepoRow(projectId);
+        db.sql("UPDATE repos SET state = ?, last_error = ? WHERE project_id = ?")
+                .params(state.name(), error, projectId)
+                .update();
+    }
+
+    public void markRepoAttempt(String projectId) {
+        ensureRepoRow(projectId);
+        db.sql("UPDATE repos SET last_attempt_at = ? WHERE project_id = ?")
+                .params(Instant.now().toString(), projectId)
+                .update();
+    }
+
+    public void markRepoReady(String projectId, String path, String defaultBranch,
+                              String fetchedSha, long sizeBytes) {
+        ensureRepoRow(projectId);
+        String now = Instant.now().toString();
+        db.sql("""
+                UPDATE repos SET state = 'READY', path = ?, default_branch = ?, fetched_sha = ?,
+                       fetched_at = ?, size_bytes = ?, last_used_at = ?, last_error = NULL
+                WHERE project_id = ?
+                """)
+                .params(path, defaultBranch, fetchedSha, now, sizeBytes, now, projectId)
+                .update();
+    }
+
+    public void markRepoTooLarge(String projectId, long sizeBytes) {
+        ensureRepoRow(projectId);
+        db.sql("""
+                UPDATE repos SET state = 'TOO_LARGE', size_bytes = ?, path = NULL,
+                       last_error = 'the mirror is larger than the per-project budget'
+                WHERE project_id = ?
+                """)
+                .params(sizeBytes, projectId)
+                .update();
+    }
+
+    public void touchRepo(String projectId) {
+        db.sql("UPDATE repos SET last_used_at = ? WHERE project_id = ?")
+                .params(Instant.now().toString(), projectId)
+                .update();
+    }
+
+    /** When the last clone or fetch was attempted, successful or not — the retry window. */
+    public Optional<Instant> lastRepoAttempt(String projectId) {
+        return db.sql("SELECT last_attempt_at FROM repos WHERE project_id = ?")
+                .param(projectId)
+                .query((rs, n) -> instantOrNull(rs.getString("last_attempt_at")))
+                .optional()
+                .flatMap(Optional::ofNullable);
+    }
+
+    public List<WorkingCopies.RepoRow> reposForEviction() {
+        return db.sql("""
+                SELECT project_id, size_bytes, last_used_at, state FROM repos
+                WHERE state IN ('READY', 'FAILED', 'EVICTED', 'TOO_LARGE')
+                """)
+                .query((rs, n) -> new WorkingCopies.RepoRow(
+                        rs.getString("project_id"),
+                        rs.getLong("size_bytes"),
+                        instantOrNull(rs.getString("last_used_at")),
+                        RepoState.parse(rs.getString("state"))))
+                .list();
+    }
+
+    // ── the co-change index ──────────────────────────────────────────────────────────
+
+    /** One aggregated pair, ready to fold into the table. */
+    public record CoChangeRow(String pathA, String pathB, int support, int recencyScore,
+                              String lastCoChanged) {
+    }
+
+    /** The oldest commit a capped backfill reached, so the next pass can carry on from it. */
+    public Optional<String> coChangeBackfill(String projectId) {
+        return db.sql("SELECT cochange_backfill_sha FROM repos WHERE project_id = ?")
+                .param(projectId)
+                .query((rs, n) -> rs.getString("cochange_backfill_sha"))
+                .optional()
+                .flatMap(Optional::ofNullable);
+    }
+
+    public Optional<String> coChangeHead(String projectId) {
+        return db.sql("SELECT cochange_head_sha FROM repos WHERE project_id = ?")
+                .param(projectId)
+                .query((rs, n) -> rs.getString("cochange_head_sha"))
+                .optional()
+                .flatMap(Optional::ofNullable);
+    }
+
+    /** The decay origin, fixed on first index so a stored score never has to be recomputed. */
+    public Optional<Instant> coChangeEpoch(String projectId) {
+        return db.sql("SELECT cochange_epoch FROM repos WHERE project_id = ?")
+                .param(projectId)
+                .query((rs, n) -> instantOrNull(rs.getString("cochange_epoch")))
+                .optional()
+                .flatMap(Optional::ofNullable);
+    }
+
+    public void markCoChangeState(String projectId, String state) {
+        ensureRepoRow(projectId);
+        db.sql("UPDATE repos SET cochange_state = ? WHERE project_id = ?")
+                .params(state, projectId)
+                .update();
+    }
+
+    /**
+     * Records what a pass folded in.
+     *
+     * <p>{@code backfillSha} is the oldest commit reached. It is what makes a capped pass
+     * resumable: without it, storing the tip as indexed would tell the next pass that
+     * everything below it was already seen, and the unwalked history would be skipped for
+     * good rather than merely deferred.
+     */
+    public void markCoChangeIndexed(String projectId, String headSha, String backfillSha,
+                                    Instant epoch, String oldestIso, int commits, int skipped,
+                                    String state) {
+        ensureRepoRow(projectId);
+        db.sql("""
+                UPDATE repos SET cochange_state = ?, cochange_head_sha = ?,
+                       cochange_backfill_sha = ?,
+                       cochange_epoch = COALESCE(cochange_epoch, ?), cochange_from = ?,
+                       cochange_commits = cochange_commits + ?,
+                       cochange_skipped = cochange_skipped + ?, cochange_indexed_at = ?
+                WHERE project_id = ?
+                """)
+                .params(state, headSha, backfillSha, epoch.toString(), oldestIso, commits,
+                        skipped, Instant.now().toString(), projectId)
+                .update();
+    }
+
+    /** Drops a project's coupling data, for a rebuild after history was rewritten. */
+    public void clearCoChange(String projectId) {
+        db.sql("DELETE FROM cochange_pairs WHERE project_id = ?").param(projectId).update();
+        db.sql("DELETE FROM cochange_files WHERE project_id = ?").param(projectId).update();
+        db.sql("""
+                UPDATE repos SET cochange_head_sha = NULL, cochange_backfill_sha = NULL,
+                       cochange_from = NULL, cochange_commits = 0, cochange_skipped = 0,
+                       cochange_state = 'INDEXING'
+                WHERE project_id = ?
+                """).param(projectId).update();
+    }
+
+    public void addCoChangeFileCounts(String projectId, Map<String, Integer> counts) {
+        String now = Instant.now().toString();
+        counts.forEach((path, commits) -> db.sql("""
+                INSERT INTO cochange_files (project_id, path, commits, last_seen)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (project_id, path) DO UPDATE SET
+                    commits = cochange_files.commits + excluded.commits,
+                    last_seen = excluded.last_seen
+                """).params(projectId, path, commits, now).update());
+    }
+
+    /**
+     * Folds pair deltas in. Always accumulates; nothing is filtered on the way in.
+     *
+     * <p>The support threshold exists to keep this table off the square of the file count, and
+     * it took two attempts to put it in the right place. Applying it per pass is wrong,
+     * because it has to mean <em>cumulative</em> support and a pass only ever carries a delta:
+     * a pair moving together once per push, or once per backfill segment, never reaches three
+     * within any single pass and would be discarded forever however often it recurred.
+     *
+     * <p>The first correction exempted incremental passes and kept the test for backfills, on
+     * the reasoning that a backfill is one walk carrying the whole history. Making a capped
+     * backfill resumable quietly invalidated that: a segmented backfill is several passes, and
+     * the same loss came back through the other door.
+     *
+     * <p>So the threshold is no longer an insertion filter at all. It governs pruning instead —
+     * {@link #pruneCoChangePairsFor} once a backfill finishes and the counts are final, and
+     * {@link #pruneCoChangePairs} for pairs that later age out of the window. Both act on
+     * accumulated support, which is the only quantity the threshold was ever about.
+     */
+    public int addCoChangePairs(String projectId, List<CoChangeRow> rows) {
+        int written = 0;
+        for (CoChangeRow row : rows) {
+            int updated = db.sql("""
+                    UPDATE cochange_pairs SET support = support + ?,
+                           recency_score = recency_score + ?,
+                           last_co_changed = CASE WHEN ? > last_co_changed
+                                                  THEN ? ELSE last_co_changed END
+                    WHERE project_id = ? AND path_a = ? AND path_b = ?
+                    """)
+                    .params(row.support(), row.recencyScore(), row.lastCoChanged(),
+                            row.lastCoChanged(), projectId, row.pathA(), row.pathB())
+                    .update();
+            if (updated > 0) {
+                written++;
+                continue;
+            }
+
+            db.sql("""
+                    INSERT INTO cochange_pairs (project_id, path_a, path_b, support,
+                                                recency_score, last_co_changed)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT DO NOTHING
+                    """)
+                    .params(projectId, row.pathA(), row.pathB(), row.support(),
+                            row.recencyScore(), row.lastCoChanged())
+                    .update();
+            written++;
+        }
+        return written;
+    }
+
+    /**
+     * Drops one project's pairs that never reached the threshold.
+     *
+     * <p>Run once a backfill completes, which is the first moment the accumulated counts are
+     * final and a sub-threshold pair can be called noise rather than merely unfinished. This
+     * is what keeps the steady-state table off the square of the file count; the cost of
+     * getting there is that an incomplete backfill holds more rows than it eventually will.
+     */
+    public int pruneCoChangePairsFor(String projectId, int minSupportStored) {
+        return db.sql("DELETE FROM cochange_pairs WHERE project_id = ? AND support < ?")
+                .params(projectId, minSupportStored)
+                .update();
+    }
+
+    /**
+     * Removes pairs that never amounted to coupling.
+     *
+     * <p>What keeps the table bounded now that incremental passes accumulate everything. A pair
+     * still under the threshold whose last co-change is older than the window co-occurred a
+     * couple of times long ago and stopped, which is noise; one that keeps recurring holds its
+     * row and eventually crosses the threshold on its own.
+     */
+    public int pruneCoChangePairs(int minSupportStored, int windowDays) {
+        String cutoff = Instant.now().minus(java.time.Duration.ofDays(windowDays)).toString();
+        return db.sql("""
+                DELETE FROM cochange_pairs
+                WHERE support < ? AND last_co_changed < ?
+                """)
+                .params(minSupportStored, cutoff)
+                .update();
+    }
+
+    public int coChangeFileCommits(String projectId, String path) {
+        return db.sql("SELECT commits FROM cochange_files WHERE project_id = ? AND path = ?")
+                .params(projectId, path)
+                .query((rs, n) -> rs.getInt("commits"))
+                .optional()
+                .orElse(0);
+    }
+
+    /** Neighbours of a file, most strongly coupled first. Unfiltered — tests and ranking. */
+    public List<CoChangeNeighbour> coChangeNeighbours(String projectId, String path, int limit) {
+        return coChangeNeighbours(projectId, path, 0, null, List.of(), limit);
+    }
+
+    /**
+     * Neighbours matching every criterion, most strongly coupled first.
+     *
+     * <p>Every filter is in the query, and that is the point rather than an optimisation.
+     * Selecting a fixed number of rows by score and then discarding some in Java means the
+     * discarded ones are never replaced by the next eligible rows, so a file whose strongest
+     * neighbours are all excluded reports far fewer than it has — and reports a total that
+     * agrees with the short list, which is precisely the kind of quiet undercount the envelope
+     * exists to prevent.
+     *
+     * <p>{@code minSupport} carries the confidence bound too: confidence is support over the
+     * queried file's own commit count, which is known before the query runs, so the caller
+     * folds the two into one integer rather than filtering afterwards.
+     */
+    public List<CoChangeNeighbour> coChangeNeighbours(String projectId, String path,
+                                                      int minSupport, String notBefore,
+                                                      List<String> excludePaths, int limit) {
+        List<Object> params = new ArrayList<>(List.of(projectId, path, minSupport));
+        String sql = """
+                SELECT p.path_b AS other, p.support, p.recency_score, p.last_co_changed,
+                       COALESCE(f.commits, 0) AS other_commits
+                FROM cochange_pairs p
+                LEFT JOIN cochange_files f
+                       ON f.project_id = p.project_id AND f.path = p.path_b
+                WHERE p.project_id = ? AND p.path_a = ? AND p.support >= ?
+                """
+                + windowClause(notBefore, params)
+                + excludeClause(excludePaths, params)
+                + " ORDER BY p.recency_score DESC LIMIT ?";
+        params.add(limit);
+        return db.sql(sql)
+                .params(params)
+                .query((rs, n) -> new CoChangeNeighbour(
+                        rs.getString("other"), rs.getInt("support"),
+                        rs.getInt("recency_score"), rs.getString("last_co_changed"),
+                        rs.getInt("other_commits")))
+                .list();
+    }
+
+    /** How many neighbours match, so the envelope can report an honest total. */
+    public int coChangeNeighbourCount(String projectId, String path, int minSupport,
+                                      String notBefore, List<String> excludePaths) {
+        List<Object> params = new ArrayList<>(List.of(projectId, path, minSupport));
+        String sql = """
+                SELECT COUNT(*) AS n FROM cochange_pairs p
+                WHERE p.project_id = ? AND p.path_a = ? AND p.support >= ?
+                """
+                + windowClause(notBefore, params)
+                + excludeClause(excludePaths, params);
+        return db.sql(sql).params(params)
+                .query((rs, n) -> rs.getInt("n"))
+                .optional()
+                .orElse(0);
+    }
+
+    /** ISO-8601 text compares correctly with {@code >=} on both backends. */
+    private static String windowClause(String notBefore, List<Object> params) {
+        if (notBefore == null) {
+            return "";
+        }
+        params.add(notBefore);
+        return " AND p.last_co_changed >= ?";
+    }
+
+    private static String excludeClause(List<String> excludePaths, List<Object> params) {
+        if (excludePaths == null || excludePaths.isEmpty()) {
+            return "";
+        }
+        params.addAll(excludePaths);
+        return " AND p.path_b NOT IN ("
+                + String.join(", ", java.util.Collections.nCopies(excludePaths.size(), "?"))
+                + ")";
+    }
+
+    public record CoChangeNeighbour(String path, int support, int recencyScore,
+                                    String lastCoChanged, int otherCommits) {
+    }
+
+    // ── tool-call stats ──────────────────────────────────────────────────────────────
+
+    /**
+     * Records one executed tool call.
+     *
+     * <p>Written from the dispatch path, so it counts what actually ran rather than what was
+     * advertised. That distinction is the whole point: a tool nobody calls and a tool nobody
+     * enabled look identical from the project settings, and only this table tells them apart.
+     */
+    public void recordToolCall(String projectId, String reviewId, String actor, String tool,
+                               String outcome, String tier, String degraded, int resultChars,
+                               long elapsedMs) {
+        db.sql("""
+                INSERT INTO tool_calls (id, project_id, review_id, actor, tool, outcome, tier,
+                                        degraded, result_chars, elapsed_ms, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)
+                .params(Ids.newId(), projectId, reviewId, actor, tool, outcome, tier, degraded,
+                        resultChars, elapsedMs, Instant.now().toString())
+                .update();
+    }
+
+    public Map<String, Long> toolCallCounts(String sinceIso) {
+        var spec = sinceIso == null
+                ? db.sql("SELECT tool, COUNT(*) AS n FROM tool_calls GROUP BY tool")
+                : db.sql("SELECT tool, COUNT(*) AS n FROM tool_calls WHERE created_at >= ? "
+                        + "GROUP BY tool").param(sinceIso);
+        Map<String, Long> out = new LinkedHashMap<>();
+        spec.query((rs, n) -> {
+            out.put(rs.getString("tool"), rs.getLong("n"));
+            return null;
+        }).list();
+        return out;
+    }
+
+    public Map<String, Long> toolOutcomeCounts() {
+        Map<String, Long> out = new LinkedHashMap<>();
+        db.sql("SELECT outcome, COUNT(*) AS n FROM tool_calls GROUP BY outcome")
+                .query((rs, n) -> {
+                    out.put(rs.getString("outcome"), rs.getLong("n"));
+                    return null;
+                }).list();
+        return out;
+    }
+
+    /** Keeps the table from growing without bound. Called from the scan tick. */
+    public int pruneToolCalls(int retentionDays) {
+        String cutoff = Instant.now().minus(java.time.Duration.ofDays(retentionDays)).toString();
+        return db.sql("DELETE FROM tool_calls WHERE created_at < ?").param(cutoff).update();
     }
 }

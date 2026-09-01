@@ -30,6 +30,11 @@ import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Review;
 import ro.bitboy.mrr.model.ReviewModel;
 import ro.bitboy.mrr.model.ReviewModelFactory;
+import ro.bitboy.mrr.repo.RepoState;
+import ro.bitboy.mrr.repo.RepoToolContext;
+import ro.bitboy.mrr.repo.RepoToolNames;
+import ro.bitboy.mrr.repo.RepoTools;
+import ro.bitboy.mrr.repo.WorkingCopies;
 import ro.bitboy.mrr.store.Store;
 import ro.bitboy.mrr.web.ApiException;
 
@@ -74,18 +79,37 @@ public class Reviewer {
     private final Function<Project, ReviewModel> models;
     private final ExecutorService workers;
     private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
+    /**
+     * Null in the tests that build a Reviewer by hand. A review must work without these — the
+     * whole repo layer is an optimisation, never a dependency — so every use is guarded.
+     */
+    private WorkingCopies copies;
+    private RepoTools repoTools;
+    private Prefetch prefetch;
     private final ConcurrentHashMap<String, Object> mrLocks = new ConcurrentHashMap<>();
 
     @Autowired
     public Reviewer(Store store, ForgeFactory forges, ReviewModelFactory models,
-                    RuntimeSettings settings, ObjectMapper mapper, MemoryService memory) {
+                    RuntimeSettings settings, ObjectMapper mapper, MemoryService memory,
+                    WorkingCopies copies, RepoTools repoTools, Prefetch prefetch) {
         this(store, forges, settings, mapper, memory, models::forProject,
                 newPool(settings.review().workers()));
+        this.copies = copies;
+        this.repoTools = repoTools;
+        this.prefetch = prefetch;
     }
 
     public Reviewer(Store store, ForgeFactory forges, MrrProperties properties, ObjectMapper mapper,
              MemoryService memory, Function<Project, ReviewModel> models, ExecutorService workers) {
         this(store, forges, RuntimeSettings.frozen(properties), mapper, memory, models, workers);
+    }
+
+    /** Attaches the repository layer to a Reviewer built by hand, for the tests that need it. */
+    public Reviewer withRepoTools(WorkingCopies copies, RepoTools repoTools, Prefetch prefetch) {
+        this.copies = copies;
+        this.repoTools = repoTools;
+        this.prefetch = prefetch;
+        return this;
     }
 
     public Reviewer(Store store, ForgeFactory forges, RuntimeSettings settings, ObjectMapper mapper,
@@ -226,7 +250,7 @@ public class Reviewer {
                     review.mrIid(), shortSha(review.headSha()));
         }
 
-        var tools = ReviewTools.forProject(project);
+        var tools = ReviewTools.forProject(project, repoReady(project), coChangeReady(project));
         List<AgentSkill> skills = store.listSkills(project.id());
         List<AgentDocument> documents = store.listDocuments(project.id());
         String sourceBranch = diff.sourceBranch();
@@ -870,15 +894,18 @@ public class Reviewer {
         if (slices.size() <= 1) {
             DiffWindows.Slice slice = slices.getFirst();
             Diff view = diff.forSlice(slice.paths(), slice.text(), slice.clipped());
-            String user = Prompts.user(view, priorOpen, documents, maxDoc, userContext);
+            String user = Prompts.user(view, priorOpen, documents, maxDoc, userContext)
+                    + expanded(project, diff, view.files(), review.headSha());
             store.markProcessing(reviewId, system + "\n\n---\n\n" + user);
             log.info("review {} calling {} / {} — {} file(s), {} chars{}, max_turns={}, branch={}",
                     reviewId, project.provider(), project.model(),
                     view.files().size(), view.text().length(),
                     view.truncated() ? ", truncated" : "",
                     project.agentMaxTurns(), diff.sourceBranch());
+            RepoToolContext ctx = RepoToolContext.forSlice(reviewId, review.headSha(),
+                    Set.copyOf(diff.files()));
             Agent.Run run = agent.run(model, system, user, tools, project.agentMaxTurns(),
-                    call -> executeTool(call, project, reviewId, review.headSha()),
+                    call -> executeTool(call, project, reviewId, review.headSha(), ctx),
                     "review " + reviewId, maxTrace);
             return new Ask(run.result(), run.trace(), run.turns(), 1);
         }
@@ -897,9 +924,15 @@ public class Reviewer {
         List<Agent.Run> runs = new ArrayList<>();
         List<String> partials = new ArrayList<>();
         for (DiffWindows.Slice slice : slices) {
-            String user = Prompts.userSlice(diff, slice, documents, maxDoc, userContext, priorOpen);
+            String user = Prompts.userSlice(diff, slice, documents, maxDoc, userContext, priorOpen)
+                    + expanded(project, diff, slice.paths(), review.headSha());
+            // One quota per slice. A slice is already an independent agent run with its own
+            // prompt and turn budget, so it is the natural unit: a quota held per review would
+            // let the first slice spend everything and starve the rest.
+            RepoToolContext ctx = RepoToolContext.forSlice(reviewId, review.headSha(),
+                    Set.copyOf(diff.files()));
             Agent.Run sliceRun = agent.run(model, system, user, tools, project.agentMaxTurns(),
-                    call -> executeTool(call, project, reviewId, review.headSha()),
+                    call -> executeTool(call, project, reviewId, review.headSha(), ctx),
                     "review " + reviewId + " slice " + slice.index() + "/" + slice.of(),
                     maxTrace);
             runs.add(sliceRun);
@@ -940,9 +973,111 @@ public class Reviewer {
                 result.stopReason(), result.echo(), usage);
     }
 
+    /**
+     * Whole-symbol context for the hunks in these paths, or nothing.
+     *
+     * <p>Runs before the model is asked anything, because expanding a hunk to its enclosing
+     * definition is not a judgement call and should not cost a turn. Per slice, since a
+     * merge-request-wide packet would be resent to every slice and undo the packing.
+     */
+    private String expanded(Project project, Diff diff, List<String> paths, String headSha) {
+        if (prefetch == null) {
+            return "";
+        }
+        try {
+            Prefetch.Packet packet = prefetch.expand(project, diff, paths, headSha);
+            if (packet.isEmpty()) {
+                return "";
+            }
+            log.info("pre-fetch expanded {} symbol(s) for {}{}", packet.symbols(),
+                    project.name(), packet.truncated() ? " (cut at its budget)" : "");
+            return "\n" + packet.markdown();
+        } catch (RuntimeException e) {
+            // Context is a bonus. Never let assembling it cost the review.
+            log.warn("pre-fetch failed for {} — continuing without it: {}",
+                    project.name(), e.getMessage());
+            return "";
+        }
+    }
+
+    private boolean repoReady(Project project) {
+        return copies != null && copies.status(project).state() == RepoState.READY;
+    }
+
+    private boolean coChangeReady(Project project) {
+        return copies != null && copies.status(project).coChangeCommits() > 0;
+    }
+
+    /**
+     * Runs one tool call and records that it ran.
+     *
+     * <p>The recording sits here rather than in each tool because this is the one point every
+     * call passes through, so no dispatch branch has to remember to account for itself.
+     */
     private String executeTool(ReviewModel.ToolCall call, Project project, String reviewId,
-                               String headSha) {
+                               String headSha, RepoToolContext ctx) {
+        long started = System.currentTimeMillis();
+        String result = runTool(call, project, reviewId, headSha, ctx);
+        record(project, reviewId, call.name(), result, System.currentTimeMillis() - started);
+        return result;
+    }
+
+    private void record(Project project, String reviewId, String tool, String result,
+                        long elapsedMs) {
+        try {
+            String outcome = outcomeOf(result);
+            store.recordToolCall(project.id(), reviewId, "REVIEWER", tool, outcome,
+                    fieldOf(result, "tier"), fieldOf(result, "degraded"),
+                    result == null ? 0 : result.length(), elapsedMs);
+        } catch (RuntimeException e) {
+            // Telemetry must never be the thing that fails a review.
+            log.debug("could not record the {} call: {}", tool, e.getMessage());
+        }
+    }
+
+    private static String outcomeOf(String result) {
+        if (result == null) {
+            return "ERROR";
+        }
+        if (result.startsWith("error:")) {
+            return "ERROR";
+        }
+        if (result.contains("\"refusal\":\"quota_exhausted\"")) {
+            return "QUOTA";
+        }
+        if (result.contains("\"refusal\"")) {
+            return "REFUSED";
+        }
+        if (result.contains("\"degraded\"") && !result.contains("\"degraded\":\"full\"")) {
+            return "DEGRADED";
+        }
+        return "OK";
+    }
+
+    /** Pulls one string field out of a rendered answer without parsing the whole thing. */
+    private static String fieldOf(String json, String field) {
+        if (json == null) {
+            return null;
+        }
+        String needle = "\"" + field + "\":\"";
+        int at = json.indexOf(needle);
+        if (at < 0) {
+            return null;
+        }
+        int from = at + needle.length();
+        int end = json.indexOf('"', from);
+        return end < 0 ? null : json.substring(from, end);
+    }
+
+    private String runTool(ReviewModel.ToolCall call, Project project, String reviewId,
+                           String headSha, RepoToolContext ctx) {
         String name = call.name();
+        if (RepoToolNames.isRepoTool(name)) {
+            if (repoTools == null) {
+                return "error: the repository tools are not available on this instance";
+            }
+            return repoTools.execute(name, call.argumentsJson(), project, ctx);
+        }
         if (ReviewTools.READ_FILE.equals(name)) {
             try {
                 JsonNode args = mapper.readTree(call.argumentsJson() == null ? "{}" : call.argumentsJson());

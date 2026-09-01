@@ -179,6 +179,10 @@ public class SchemaPatch {
         addColumn("memory_runs", "output_tokens", "INTEGER NOT NULL DEFAULT 0");
         addColumn("memory_runs", "cache_read_tokens", "INTEGER NOT NULL DEFAULT 0");
         addColumn("agent_skills", "library_id", "TEXT");
+        // Added after `repos` first shipped on this branch, so a database created by an
+        // earlier build has the table but not the column. CREATE TABLE IF NOT EXISTS will not
+        // add it, and a co-change backfill would fail on the missing frontier.
+        addColumn("repos", "cochange_backfill_sha", "TEXT");
         db.sql("""
                 CREATE TABLE IF NOT EXISTS settings (
                     key   TEXT PRIMARY KEY,

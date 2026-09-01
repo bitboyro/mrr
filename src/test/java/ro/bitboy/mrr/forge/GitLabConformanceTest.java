@@ -23,6 +23,9 @@ class GitLabConformanceTest extends ForgeConformance {
     @Override
     protected Map<String, String> routes() {
         return Map.of(
+                ROOT, """
+                        {"default_branch":"main","description":"d","name":"repo",
+                         "http_url_to_repo":"https://gl.example/group/repo.git"}""",
                 ROOT + "/merge_requests/7/changes", """
                         {"title":"t","description":"d","source_branch":"fix/x",
                          "target_branch":"main","web_url":"https://gl/7",

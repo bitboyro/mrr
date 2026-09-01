@@ -522,11 +522,18 @@ public class ForgejoForge extends ForgeHttp implements Forge {
         return readFileBody(project, url, path, startLine, endLine, maxChars);
     }
 
+    /** Both hosts publish pull-request heads under refs/pull, not refs/merge-requests. */
+    @Override
+    public String mrRefSpec() {
+        return "+refs/pull/*/head:refs/mrr/mr/*";
+    }
+
     @Override
     public ProjectInfo projectInfo(Project project) {
         JsonNode body = exchange(project, HttpMethod.GET, "", null);
         return new ProjectInfo(textOrNull(body.path("default_branch")),
-                textOrNull(body.path("description")), textOrNull(body.path("name")));
+                textOrNull(body.path("description")), textOrNull(body.path("name")),
+                textOrNull(body.path("clone_url")));
     }
 
     @Override

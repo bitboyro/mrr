@@ -6,6 +6,88 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Three tools that answer what a diff cannot.** `symbol_at` maps a line to the definition it
+  sits inside, `find_references` finds who uses a symbol, and `co_changed` names the files that
+  historically move with one but did not move in this change. A diff carries three lines of
+  context either side of an edit; a reviewer needs the whole function and the call sites. Until
+  now the model either asked for files speculatively, spending turns and context, or reasoned
+  about code it could not see.
+
+  Every answer follows one contract: **cap it, admit it was capped, say how sure you are.**
+  Admitting it is the part that matters. A model shown eight callers and no count concludes
+  "eight callers, all checked, safe to merge"; shown `total: 312` it concludes the opposite.
+  Capping without reporting the cap is worse than not answering, because it turns a gap into
+  confidence. Each result also carries the tier that produced it, so a byte match in a file mrr
+  cannot parse never reads as a confirmed call site — findings open threads that count against
+  a merge gate, and a confident wrong one costs somebody real time.
+
+  Whole-symbol expansion of every hunk runs **before** the model is asked anything, and is
+  gated only on the tool being enabled — not on the agent loop. A single-shot review, which is
+  mrr's default and what most installs run, now starts from the definitions rather than from
+  three lines of context.
+
+- **A per-project mirror, opt-in and bounded.** Enabling one of these tools clones the
+  repository under `/data/repos`. This is a change in what mrr keeps at rest and is documented
+  as one in the README: a project that enables none of them never gets a mirror, which is how a
+  team declines. **No new token scope** — the read access that already backs `read_file`
+  authorises the clone. The mirror is bare, the token is never written into `.git/config`, and
+  nothing is ever pushed. Disk is capped per repository and in total, with least-recently-used
+  eviction on the scan tick.
+
+  `acquire` never blocks and never throws. A review stalled behind a monorepo clone is a worse
+  product than one honest about a missing tier, so the first review answers `symbol_at` from
+  the forge API, is not offered `find_references` at all, and the second review has everything.
+  A clone that fails never fails a review — `ReviewerTest` pins that.
+
+- **Tool-usage stats.** `GET /api/stats` and the Stats page now report which tools were called,
+  over all time and the last seven days, and how those calls ended. Counted from executed calls
+  rather than from project settings, because a tool nobody calls and a tool nobody enabled look
+  identical in the settings and want very different answers. The outcome breakdown is the one
+  that earns its place: a search called forty times that answers `QUOTA` thirty of them means
+  the per-slice allowance is set wrong, and no other number would show that.
+
+### Notes on what was deliberately not built
+
+- **Push webhooks do not feed the coupling index.** The obvious design — accumulate pairs from
+  push payloads, never clone — does not survive contact: GitLab and GitHub both truncate the
+  `commits` array to twenty per push. A squash-merge of a long branch silently drops history,
+  and accumulated history is the only thing `co_changed` has. A `git fetch` and a walk from the
+  last indexed commit is complete instead, and heals itself after downtime.
+
+- **mrr never reports the `resolved` tier.** It would mean running the repository's own build to
+  resolve dependencies, which is a trust boundary the product should not cross. Requests for it
+  are downgraded with a note rather than quietly answered at a lower tier. Ingesting a SCIP
+  index produced by the customer's own CI remains the way in, and the symbol-id scheme does not
+  preclude it.
+
+- **`review_budget` is reported, not enforced.** Nothing in the process decides how many tokens
+  a model spends, so a global cap would be a number on the Configure page that does nothing.
+  The per-call and per-slice budgets are real and are enforced in characters.
+
+- **`window_days` filters rather than re-aggregates.** Pairs are stored aggregated, and a
+  per-query window cannot be recovered from an aggregate; bucketing would cost roughly twelve
+  times the rows for two years of history. The parameter filters on when a pair last moved
+  together, and any answer that used it says so.
+
+- **Renames are not followed.** Following them needs blob content for similarity detection,
+  which is exactly the expensive thing worth measuring before building. Every `co_changed`
+  answer discloses it, so a thin result reads as thin rather than as evidence of no coupling.
+
+- **A capped backfill is resumable.** `MRR_COCHANGE_MAX_COMMITS` bounds how much history one
+  pass walks, and the pass records the oldest commit it reached. Later passes resume from that
+  frontier and walk further back, so bounding the work never means losing the rest of the
+  history — and `history_complete` stays false, honestly, until the walk reaches the root.
+
+- **The coupling threshold prunes; it does not filter on the way in.** It exists to keep the
+  pair table off the square of the file count, but it has to mean *cumulative* support, and a
+  single indexing pass only ever carries a delta. So every pass accumulates, and the threshold
+  is applied at the two moments the counts are actually final: once when a backfill finishes,
+  and thereafter to pairs that age out of the window. One consequence is deliberate: evidence
+  a completing backfill judged noise is gone, so a pair that co-occurred once before mrr was
+  installed starts counting from zero afterwards.
+
 ### Fixed
 
 - **A Forgejo or Gitea token was written to the log in full.** The redactor skipped the auth

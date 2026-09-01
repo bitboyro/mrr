@@ -41,7 +41,8 @@ USER root
 EXPOSE 8130
 ENV MRR_DB_PATH=/data/mrr.db \
     MRR_ROOT_TOKEN_FILE=/data/root-token.txt \
-    MRR_MEMORY_ROOT=/data/memory
+    MRR_MEMORY_ROOT=/data/memory \
+    MRR_REPO_ROOT=/data/repos
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s \
   CMD ["sh", "-c", "wget -qO- http://localhost:8130/health || exit 1"]

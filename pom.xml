@@ -33,6 +33,22 @@
       The Postgres driver is runtime-scoped and costs nothing until MRR_DB_URL names one:
       no code imports it, and Spring Boot picks a driver from the URL scheme. SQLite stays
       the default and the only backend a single-box deployment needs.
+
+      JGit and tree-sitter are the next exception, and they are one decision rather than two:
+      reading a repository at a commit is what the repo-intelligence tools *are*, and both
+      alternatives were worse. Shelling out to `git` means a binary in the runtime image, a
+      subprocess per call, and parsing porcelain. A language server means running the
+      customer's build, which is a trust boundary mrr does not want to cross. JGit is pure
+      Java and in-process, and its core pulls only JavaEWAH, slf4j and commons-codec. The ssh
+      and gpg modules are deliberately absent: mrr clones over HTTPS with the same token it
+      already uses for the API, and never verifies a signature.
+
+      tree-sitter is JNI with prebuilt natives for the two architectures mrr ships on, and it
+      is the only way to answer "which function is this line in" without a compiler. One
+      artifact per grammar, tracking the bundled reviewer skills — Java, TypeScript,
+      JavaScript, Python, Rust. The jar grows by roughly the size of those natives, and that
+      is the price of the tools. Everything else above is unchanged: still no Security, still
+      no JPA, still no WebFlux, still Maven Central only, still no `git` in the image.
     -->
     <properties>
         <java.version>21</java.version>
@@ -41,6 +57,13 @@
         <anthropic.version>2.34.0</anthropic.version>
         <sqlite.version>3.46.1.3</sqlite.version>
         <springdoc.version>2.8.5</springdoc.version>
+        <jgit.version>7.7.1.202607240634-r</jgit.version>
+        <tree-sitter.version>0.26.6</tree-sitter.version>
+        <ts-java.version>0.23.5</ts-java.version>
+        <ts-typescript.version>0.23.2</ts-typescript.version>
+        <ts-javascript.version>0.25.0</ts-javascript.version>
+        <ts-python.version>0.25.0</ts-python.version>
+        <ts-rust.version>0.24.0</ts-rust.version>
         <exec-plugin.version>3.5.0</exec-plugin.version>
         <!--
           docs/openapi.json is exported from a live instance during `mvn verify`: the spec
@@ -99,6 +122,52 @@
             <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
             <version>${springdoc.version}</version>
         </dependency>
+        <!--
+          The repository layer. HTTPS transport only; org.eclipse.jgit.ssh.* and the gpg
+          module are not declared, so neither Apache MINA nor BouncyCastle is on the path.
+        -->
+        <dependency>
+            <groupId>org.eclipse.jgit</groupId>
+            <artifactId>org.eclipse.jgit</artifactId>
+            <version>${jgit.version}</version>
+        </dependency>
+
+        <!--
+          The AST layer. The core binding plus one grammar per language mrr ships a reviewer
+          skill for. Each grammar artifact carries its own prebuilt natives for
+          x86_64/aarch64 linux and macOS; there is nothing to build and nothing to install.
+        -->
+        <dependency>
+            <groupId>io.github.bonede</groupId>
+            <artifactId>tree-sitter</artifactId>
+            <version>${tree-sitter.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.bonede</groupId>
+            <artifactId>tree-sitter-java</artifactId>
+            <version>${ts-java.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.bonede</groupId>
+            <artifactId>tree-sitter-typescript</artifactId>
+            <version>${ts-typescript.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.bonede</groupId>
+            <artifactId>tree-sitter-javascript</artifactId>
+            <version>${ts-javascript.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.bonede</groupId>
+            <artifactId>tree-sitter-python</artifactId>
+            <version>${ts-python.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.bonede</groupId>
+            <artifactId>tree-sitter-rust</artifactId>
+            <version>${ts-rust.version}</version>
+        </dependency>
+
         <dependency>
             <groupId>org.yaml</groupId>
             <artifactId>snakeyaml</artifactId>

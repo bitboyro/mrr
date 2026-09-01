@@ -455,3 +455,91 @@ CREATE INDEX IF NOT EXISTS idx_forge_instances_owner ON forge_instances(owner_id
 CREATE UNIQUE INDEX IF NOT EXISTS idx_forge_instances_shared_name
     ON forge_instances(name) WHERE owner_id IS NULL;
 
+
+-- ── the repository layer ──────────────────────────────────────────────────────────────
+--
+-- A project gets a bare mirror on disk only once it enables one of the repo-intelligence
+-- tools, so an install that never ticks them has no rows here and holds no source at rest.
+-- State lives in the database rather than being read off the filesystem so that the
+-- eviction pass on the scan tick does not have to stat every mirror to decide anything.
+CREATE TABLE IF NOT EXISTS repos (
+    project_id          TEXT PRIMARY KEY REFERENCES projects(id),
+    -- ABSENT | CLONING | READY | FAILED | TOO_LARGE | EVICTED
+    state               TEXT NOT NULL,
+    path                TEXT,
+    default_branch      TEXT,
+    fetched_sha         TEXT,
+    fetched_at          TEXT,
+    size_bytes          INTEGER NOT NULL DEFAULT 0,
+    last_used_at        TEXT,
+    -- When the last clone or fetch was attempted, successful or not. A failed clone is left
+    -- alone for retry-minutes so a project whose token was revoked is not re-cloned on every
+    -- webhook delivery.
+    last_attempt_at     TEXT,
+    last_error          TEXT,
+    -- NONE | INDEXING | READY | PARTIAL | FAILED
+    cochange_state      TEXT,
+    cochange_head_sha   TEXT,                        -- newest commit folded in; the forward edge
+    -- Oldest commit folded in. A backfill that hits its commit cap stops here and resumes from
+    -- this point on the next pass, so bounding the work per pass never means losing the rest
+    -- of the history permanently.
+    cochange_backfill_sha TEXT,
+    cochange_from       TEXT,                        -- ISO date of the oldest commit walked
+    cochange_epoch      TEXT,                        -- decay origin; scores are relative to it
+    cochange_commits    INTEGER NOT NULL DEFAULT 0,
+    cochange_skipped    INTEGER NOT NULL DEFAULT 0,  -- sweeps dropped by the file-count filter
+    cochange_indexed_at TEXT,
+    created_at          TEXT NOT NULL
+);
+
+-- How many non-sweep commits touched each path: the denominator of `confidence`, and what
+-- makes file_commit_count one indexed lookup rather than a scan.
+CREATE TABLE IF NOT EXISTS cochange_files (
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    path       TEXT NOT NULL,
+    commits    INTEGER NOT NULL,
+    last_seen  TEXT NOT NULL,
+    PRIMARY KEY (project_id, path)
+);
+
+-- Ordered pairs: a row for (a -> b) and another for (b -> a). `confidence` is directional --
+-- it is support over the commits touching the file the caller asked about -- so one symmetric
+-- row would make every lookup a UNION over two column positions. Twice the rows, one index,
+-- and no OR in the hot path.
+CREATE TABLE IF NOT EXISTS cochange_pairs (
+    project_id      TEXT NOT NULL REFERENCES projects(id),
+    path_a          TEXT NOT NULL,
+    path_b          TEXT NOT NULL,
+    support         INTEGER NOT NULL,                -- commits containing both
+    -- Age-decayed support, x1000, measured from repos.cochange_epoch rather than from now.
+    -- A fixed origin means a stored score never ages, so the table never needs rewriting;
+    -- shifting to "now" would be one constant factor across every row of a project and so
+    -- cannot reorder anything. INTEGER because the two backends agree on integer arithmetic
+    -- and disagree on float formatting, and every ratio this feeds is computed in Java.
+    recency_score   INTEGER NOT NULL,
+    last_co_changed TEXT NOT NULL,
+    PRIMARY KEY (project_id, path_a, path_b)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cochange_pairs_lookup
+    ON cochange_pairs(project_id, path_a, recency_score);
+
+-- One row per tool call the reviewer or librarian actually executed, written from the
+-- dispatch path. It counts what ran rather than what was advertised, which is the only way
+-- to tell a tool nobody calls from a tool nobody enabled.
+CREATE TABLE IF NOT EXISTS tool_calls (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL REFERENCES projects(id),
+    review_id    TEXT,                               -- NULL for a librarian run
+    actor        TEXT NOT NULL,                      -- REVIEWER | LIBRARIAN | REPLIER
+    tool         TEXT NOT NULL,
+    outcome      TEXT NOT NULL,                      -- OK | ERROR | REFUSED | QUOTA | DEGRADED
+    tier         TEXT,                               -- repo tools only
+    degraded     TEXT,                               -- repo tools only
+    result_chars INTEGER NOT NULL DEFAULT 0,
+    elapsed_ms   INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_calls_project ON tool_calls(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool, created_at DESC);
