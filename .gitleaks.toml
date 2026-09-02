@@ -1,0 +1,17 @@
+title = "mrr gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake GitLab PAT fixtures used in secret-box and store tests"
+paths = [
+  '''src/test/java/ro/bitboy/mrr/secret/.*Test\.java''',
+  '''src/test/java/ro/bitboy/mrr/store/StoreSecretsTest\.java''',
+]
+regexes = [
+  '''glpat-abcdefghijklmnopqrst''',
+  '''glpat-zyxwvutsrqponmlkjihg''',
+  '''glpat-rotatedrotatedrotated''',
+  '''glpat-plaintext-from-an-older-database''',
+]

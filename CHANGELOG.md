@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Apache-2.0 license.** `LICENSE`, `NOTICE`, and `CONTRIBUTING.md` added ahead of publishing
+  the repository as a public GitHub push mirror of the canonical GitLab repo. `.gitleaks.toml`
+  allowlists the fake PAT fixtures in the secret-box tests.
+
 - **Three tools that answer what a diff cannot.** `symbol_at` maps a line to the definition it
   sits inside, `find_references` finds who uses a symbol, and `co_changed` names the files that
   historically move with one but did not move in this change. A diff carries three lines of
