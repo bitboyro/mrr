@@ -365,3 +365,13 @@ They drop and recreate the schema, so do not aim them at anything you care about
 Java 21, Spring Boot 3.4, SQLite (or Postgres), and the Anthropic SDK. No Spring Security, no
 JPA, no Actuator — see the comments in `pom.xml` for why. Release history is in
 [CHANGELOG.md](CHANGELOG.md).
+
+## Contributing
+
+The canonical repository is on GitLab; GitHub is a read-only mirror. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for how patches are accepted.
+
+## License
+
+Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Copyright 2026 Roman Botnari.
