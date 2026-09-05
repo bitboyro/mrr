@@ -105,7 +105,7 @@ public class Trigger {
         if (state == null) {
             return false;
         }
-        String value = state.toLowerCase();
+        String value = state.toLowerCase(java.util.Locale.ROOT);
         return value.contains("merged") || value.contains("closed");
     }
 

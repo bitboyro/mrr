@@ -85,7 +85,7 @@ public record ForgeEvent(Kind kind, Action action, long mrIid, String headSha, b
     /** What the ignore log calls this delivery when nothing was done with it. */
     public String reason() {
         return switch (kind) {
-            case MERGE_REQUEST -> "action_" + (rawKind == null ? action.name().toLowerCase() : rawKind);
+            case MERGE_REQUEST -> "action_" + (rawKind == null ? action.name().toLowerCase(java.util.Locale.ROOT) : rawKind);
             case NOTE -> "note";
             case OTHER -> "not_a_merge_request_event";
         };

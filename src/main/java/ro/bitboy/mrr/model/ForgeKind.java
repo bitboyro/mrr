@@ -35,7 +35,7 @@ public enum ForgeKind {
         if (text == null || text.isBlank()) {
             return null;
         }
-        return switch (text.trim().toLowerCase()) {
+        return switch (text.trim().toLowerCase(java.util.Locale.ROOT)) {
             case "gitlab" -> GITLAB;
             case "forgejo", "gitea", "codeberg" -> FORGEJO;
             case "github", "ghes" -> GITHUB;
@@ -51,7 +51,7 @@ public enum ForgeKind {
 
     /** The path segment mrr publishes for this forge's webhook URL. */
     public String slug() {
-        return name().toLowerCase();
+        return name().toLowerCase(java.util.Locale.ROOT);
     }
 
     public String displayName() {

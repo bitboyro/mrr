@@ -247,6 +247,13 @@ public class Replier {
      * finding OPEN that mrr has decided is addressed. Only the host-side half is conditional —
      * resolve where the host supports it, and a struck-through marker on the comment where it
      * does not, so the thread still reads correctly to a human.
+     *
+     * <p><strong>Unless a person filed the finding.</strong> Then the same rule the reviewer
+     * follows applies here: the agent may say the code looks fixed — its reply on the thread
+     * has already said exactly that — and that is all it may do. It closes nothing and it
+     * touches no thread it did not open. Without this the reply path was a way around
+     * {@link Finding#agentMayClose()}: a comment on somebody's own tracked thread came back
+     * here and could resolve the conversation they started.
      */
     private void closeIfAddressed(Project project, long mrIid, String discussionId,
                                   String replyId, Finding finding,
@@ -254,10 +261,15 @@ public class Replier {
         if (verdict == null || !verdict.addressed() || finding == null) {
             return;
         }
+        if (!finding.agentMayClose()) {
+            log.info("finding {} looks addressed on the reply but a human filed it — "
+                    + "the reply says so and the finding stays open", finding.id());
+            return;
+        }
         if (finding.state() == Finding.State.OPEN) {
             store.markAddressed(FindingEvent.addressedByReply(finding, replyId));
         }
-        if (finding.discussionId() == null) {
+        if (finding.discussionId() == null || !finding.mrrOpenedThread()) {
             return;
         }
         Forge forge = forges.forProject(project);

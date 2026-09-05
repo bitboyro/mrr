@@ -184,6 +184,37 @@ class ReplierTest {
                 assertThat(edit).contains("~~**Addressed**~~"));
     }
 
+    /**
+     * The same rule the reviewer follows, on the reply path: a person filed this, so a person
+     * closes it. The agent may say the code looks fixed — its reply on the thread does exactly
+     * that — and that is all it may do.
+     *
+     * <p>This was the way around {@link Finding#agentMayClose()}: a comment on somebody's own
+     * tracked thread came back through the replier, which closed the finding and resolved a
+     * conversation mrr never opened.
+     */
+    @Test
+    void anAddressedReplyDoesNotCloseAHumansFinding() {
+        String reviewId = store.claimReview(project.id(), 8, "sha-8", "{}", TestStores.mrInfo())
+                .review().id();
+        store.createFinding(new Finding(Ids.newId(), reviewId, project.id(), 8,
+                "B.java", 4, Finding.Severity.MAJOR, "the loop overruns", "off by one",
+                "disc-theirs", "note-t", true, Finding.State.OPEN, Instant.now(), null, null,
+                Finding.Origin.HUMAN, null, "ada"));
+        model = new RecordingModel(List.of(Result.of(
+                "{\"status\":\"addressed\",\"reply\":\"That reads fixed to me.\"}", "end_turn")));
+
+        replier().reply(project.id(), 8, "disc-theirs", null, "fixed in HEAD", "ada");
+
+        // The reply is posted — saying so is the whole of what the agent may do here.
+        assertThat(gitlab.replies).containsExactly("disc-theirs:That reads fixed to me.");
+        // And nothing else moved.
+        assertThat(store.findingsOfMr(project.id(), 8).getFirst().state())
+                .isEqualTo(Finding.State.OPEN);
+        assertThat(store.openFindings(project.id(), 8)).hasSize(1);
+        assertThat(gitlab.resolved).isEmpty();
+    }
+
     private Replier replier() {
         return new Replier(store, ForgeFactory.fixed(gitlab), TestStores.properties(), p -> model, workers);
     }

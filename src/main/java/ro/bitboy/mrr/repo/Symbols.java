@@ -187,9 +187,16 @@ public final class Symbols {
      */
     private static String signature(Source source, TSNode node, int startLine) {
         TSNode body = node.getChildByFieldName("body");
-        int end = body != null && !body.isNull() ? body.getStartByte() : node.getEndByte();
         int cap = source.endOfLine(startLine);
-        String text = source.slice(node.getStartByte(), Math.min(end, Math.max(cap, end)));
+        // Where the grammar names a body, stop at it — that is the whole signature however
+        // many lines it spans. Where it does not (a field, an alias, a grammar that calls the
+        // body something else) the first line is the cap, or the "signature" would be the
+        // definition's entire text. The cap used to be computed and then thrown away by
+        // min(end, max(cap, end)), which is just `end`.
+        int end = body != null && !body.isNull()
+                ? body.getStartByte()
+                : Math.min(node.getEndByte(), cap);
+        String text = source.slice(node.getStartByte(), Math.max(node.getStartByte(), end));
         if (text.length() > 400) {
             text = text.substring(0, 400) + "…";
         }

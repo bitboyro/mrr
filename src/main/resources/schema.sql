@@ -280,11 +280,20 @@ CREATE TABLE IF NOT EXISTS finding_events (
     reply_id     TEXT,            -- the reply that produced it, when there was one
     head_sha     TEXT,
     detail       TEXT,            -- the model's reason, or the human's note
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    -- Position within this finding's history. The clock cannot order these on its own: an event
+    -- and the state change it describes are written in the same Instant, and the tie then fell
+    -- through to a random id. Reviewer.proposeAddressed reads the last event to decide whether
+    -- it has already spoken, so the order has to be the insertion order rather than a coin flip.
+    seq          INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_finding_events_finding ON finding_events(finding_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_finding_events_mr ON finding_events(project_id, mr_iid, created_at);
+-- Enforced, not just intended: recordEvent computes a candidate seq and this is what makes a
+-- second writer racing on the same finding collide instead of silently taking the same
+-- position. See recordEvent for the retry that follows from a collision here.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_events_seq ON finding_events(finding_id, seq);
 
 -- One model answer on a finding thread. A review is a commit; a reply is a human talking
 -- back to a finding mrr already posted. prompt + trace are the transcript.

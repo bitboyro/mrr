@@ -369,8 +369,12 @@ public class Reviewer {
             if (status == MrStatus.Status.CLEAN) {
                 forge(project).approve(project, review.mrIid());
                 store.markMrrApproved(project.id(), review.mrIid(), review.headSha());
+                // shortSha, not substring(0, 8): a short or absent sha would throw here,
+                // after the approval had already gone out and been recorded, and the catch
+                // below would log it as "could not change approval" — the opposite of what
+                // happened.
                 log.info("approved {}!{} at {}", project.name(), review.mrIid(),
-                        review.headSha().substring(0, 8));
+                        shortSha(review.headSha()));
             } else {
                 MrStatus current = store.findMrStatus(project.id(), review.mrIid()).orElse(null);
                 if (current != null && current.mrrApproved()) {
@@ -786,14 +790,26 @@ public class Reviewer {
         synchronized (lockFor(project.id(), mrIid)) {
             List<DiscussionView> threads = listThreads(project, mrIid);
             int open = status.openFindings();
+            // The same gate the review path applies, and for the same reason: on a formal
+            // session zero findings is only half of clean, so computing it from the count
+            // alone here would let the scan quietly flip a request its own status page (and
+            // auto-approve) call NEEDS_WORK.
+            MrStatus.Status gated = MrStatus.gate(open, outstandingSignOffs(status));
             if (adoptHumanResolves(project, mrIid, threads)) {
                 open = store.openFindings(project.id(), mrIid).size();
-                store.upsertMrStatus(project.id(), mrIid,
-                        open == 0 ? MrStatus.Status.CLEAN : MrStatus.Status.NEEDS_WORK,
+                gated = MrStatus.gate(open, outstandingSignOffs(status));
+                store.upsertMrStatus(project.id(), mrIid, gated,
                         status.latestReviewId(), status.latestHeadSha(), open);
             }
-            syncForgeThreads(project, review, open == 0, threads);
+            syncForgeThreads(project, review, gated == MrStatus.Status.CLEAN, threads);
         }
+    }
+
+    /** Required participants who have not signed off. Always 0 on an ad-hoc cycle. */
+    private int outstandingSignOffs(MrStatus status) {
+        return status.mode() == MrStatus.Mode.FORMAL
+                ? store.outstandingSignOffs(status.projectId(), status.mrIid())
+                : 0;
     }
 
     private Object lockFor(String projectId, long mrIid) {

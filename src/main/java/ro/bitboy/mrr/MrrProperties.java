@@ -76,7 +76,7 @@ public record MrrProperties(
             if (effort == null || effort.isBlank()) {
                 return "high";
             }
-            String trimmed = effort.trim().toLowerCase();
+            String trimmed = effort.trim().toLowerCase(java.util.Locale.ROOT);
             return "low".equals(trimmed) ? "low" : "high";
         }
     }

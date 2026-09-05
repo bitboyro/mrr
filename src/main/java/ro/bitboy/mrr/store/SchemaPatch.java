@@ -54,6 +54,10 @@ public class SchemaPatch {
         addColumn("projects", "memory_head_sha", "TEXT");
         addColumn("projects", "memory_status", "TEXT");
         addColumn("projects", "memory_refreshed_at", "TEXT");
+        // Existing rows keep 0, so a finding whose history predates this still orders by the
+        // clock among itself — the same order it had — while everything written from now on
+        // orders by insertion.
+        addColumn("finding_events", "seq", "INTEGER NOT NULL DEFAULT 0");
         addColumn("reviews", "error_kind", "TEXT");
         addColumn("reviews", "agent_turns", "INTEGER NOT NULL DEFAULT 0");
         addColumn("reviews", "trace", "TEXT");
@@ -248,6 +252,43 @@ public class SchemaPatch {
         backfillOverviewThreads();
         migrateLegacySkill();
         backfillSkillLibrary();
+        backfillFindingEventSeq();
+    }
+
+    /**
+     * Gives every pre-existing {@code finding_events} row the position it already had, so the
+     * unique index below can be added without a legacy finding of more than one event
+     * colliding on the {@code seq = 0} every row started at.
+     *
+     * <p>Reproduces the ordering {@code eventsOf} already used — {@code (created_at, id)} — so
+     * a row's position does not move relative to where a reader already saw it; only the
+     * tiebreak on ties in {@code created_at} moves from "whichever id sorts first" to "which
+     * position this backfill assigns", which is the same set of rows in the same relative
+     * order, made concrete once instead of recomputed a different way by every reader.
+     *
+     * <p>Row-value comparison ({@code (b.created_at, b.id) < (a.created_at, a.id)}), which
+     * both backends support: without it, a row's own id would have to be compared against
+     * another row's created_at, which is not the tiebreak {@code eventsOf} used.
+     *
+     * <p>{@code WHERE seq = 0} is what makes this idempotent without a version check: every
+     * row this assigns gets a positive seq, so a second run finds nothing left to do, and a
+     * fresh install's atomic {@link Store#recordEvent} never writes 0 in the first place.
+     */
+    private void backfillFindingEventSeq() {
+        int n = db.sql("""
+                UPDATE finding_events AS a
+                SET seq = (
+                    SELECT COUNT(*) + 1 FROM finding_events AS b
+                    WHERE b.finding_id = a.finding_id
+                      AND (b.created_at, b.id) < (a.created_at, a.id)
+                )
+                WHERE a.seq = 0
+                """).update();
+        if (n > 0) {
+            log.info("schema: assigned a sequence position to {} pre-existing finding event(s)", n);
+        }
+        db.sql("CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_events_seq "
+                + "ON finding_events(finding_id, seq)").update();
     }
 
     /**

@@ -10,7 +10,7 @@ public enum MemoryKind {
     COLLECTION;
 
     public String slug() {
-        return name().toLowerCase();
+        return name().toLowerCase(java.util.Locale.ROOT);
     }
 
     public static Optional<MemoryKind> fromSlug(String slug) {

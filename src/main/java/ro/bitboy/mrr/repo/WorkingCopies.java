@@ -372,6 +372,14 @@ public class WorkingCopies {
      * <p>Called from the scan tick, which already has a loop and an executor. Order is
      * failed and evicted rows whose directory lingers, then anything idle past its window,
      * then least-recently-used. A mirror being read is skipped rather than waited for.
+     *
+     * <p><strong>A row with nothing on disk is not a candidate.</strong> An evicted mirror
+     * keeps its row — that is what stops it being re-cloned on a whim — and its
+     * {@code last_used_at} never moves again, so it stayed permanently "idle" and was
+     * re-evicted on every tick: {@code closeAndDelete} did nothing, and the pass still counted
+     * it and logged it. One idle project produced an eviction line every two minutes forever.
+     * Its stale {@code size_bytes} also stayed in the budget total, so phantom bytes could
+     * push live mirrors out.
      */
     public int evictToBudget() {
         List<RepoRow> rows = store.reposForEviction();
@@ -387,13 +395,23 @@ public class WorkingCopies {
             if (total <= settings.maxBytes() && !idle) {
                 continue;
             }
+            Path dir = pathFor(row.projectId());
+            if (!Files.exists(dir)) {
+                // Already gone. Reclaim only the row's stale size, which is still counted
+                // against the budget, and say nothing — there is no eviction to report.
+                if (row.sizeBytes() > 0) {
+                    store.markRepoEvicted(row.projectId());
+                    total -= row.sizeBytes();
+                }
+                continue;
+            }
             ReentrantReadWriteLock lock = lockFor(row.projectId());
             if (!lock.writeLock().tryLock()) {
                 continue;
             }
             try {
-                closeAndDelete(row.projectId(), pathFor(row.projectId()));
-                store.markRepoState(row.projectId(), RepoState.EVICTED, null);
+                closeAndDelete(row.projectId(), dir);
+                store.markRepoEvicted(row.projectId());
                 total -= row.sizeBytes();
                 removed++;
                 log.info("evicted the mirror for project {} ({})", row.projectId(),
@@ -411,7 +429,7 @@ public class WorkingCopies {
         lock.writeLock().lock();
         try {
             closeAndDelete(projectId, pathFor(projectId));
-            store.markRepoState(projectId, RepoState.EVICTED, null);
+            store.markRepoEvicted(projectId);
         } finally {
             lock.writeLock().unlock();
         }

@@ -249,6 +249,45 @@ class ReviewerTest {
         assertThat(store.outstandingSignOffs(project.id(), 7)).isEqualTo(1);
     }
 
+    /**
+     * The scan's align pass applies the same gate the review path does.
+     *
+     * <p>It used to compute clean from the finding count alone, so a formal session with
+     * required people who had not signed off was flipped to CLEAN a couple of minutes after
+     * the review that correctly called it NEEDS_WORK — and its overview thread resolved with
+     * it, which on GitLab is the merge gate.
+     */
+    @Test
+    void alignForgeDoesNotCallAFormalSessionCleanBeforeItsSignOffs() {
+        String reviewId = claim("sha-formal-align");
+        store.markReady(reviewId, "ov-1", "note-1");
+        store.saveOverview(project.id(), 7, "ov-1", "note-1");
+        store.upsertMrStatus(project.id(), 7, MrStatus.Status.NEEDS_WORK, reviewId,
+                "sha-formal-align", 0);
+        store.setSession(project.id(), 7, MrStatus.Mode.FORMAL,
+                MrStatus.SessionState.UNDER_REVIEW);
+        store.addParticipant(new ro.bitboy.mrr.model.SessionParticipant(
+                project.id(), 7, "ada", ro.bitboy.mrr.model.SessionParticipant.Kind.FORGE,
+                "reviewer", true, null, Instant.now()));
+        // A finding somebody hand-resolved, so the adopt branch runs and rewrites the status.
+        store.createFinding(new Finding(Ids.newId(), reviewId, project.id(), 7,
+                "A.java", 1, Finding.Severity.MAJOR, "leak", "close it",
+                "disc-find", "n-2", true, Finding.State.OPEN, Instant.now(), null));
+        gitlab.discussions.add(new DiscussionView(
+                "ov-1", "note-1", "### mrr review", true, false, null, false));
+        gitlab.discussions.add(new DiscussionView(
+                "disc-find", "n-2", "**[Major]** leak", true, false, null, false));
+        gitlab.resolveAs("disc-find", "ada");
+
+        reviewer().alignForge(project, 7);
+
+        assertThat(store.openFindings(project.id(), 7)).isEmpty();
+        assertThat(store.outstandingSignOffs(project.id(), 7)).isEqualTo(1);
+        assertThat(store.findMrStatus(project.id(), 7).orElseThrow().currentStatus())
+                .isEqualTo(MrStatus.Status.NEEDS_WORK);
+        assertThat(gitlab.resolved).doesNotContain("ov-1:true");
+    }
+
     /** An ad-hoc cycle — which is nearly all of them — is untouched by any of that. */
     @Test
     void anAdHocCycleIsCleanOnFindingsAlone() {

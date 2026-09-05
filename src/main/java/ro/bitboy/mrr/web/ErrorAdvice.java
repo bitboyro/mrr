@@ -17,8 +17,22 @@ public class ErrorAdvice {
 
     private static final Logger log = LoggerFactory.getLogger(ErrorAdvice.class);
 
+    /**
+     * A 4xx is the caller's problem and stays quiet — a bad id or a missing field is not an
+     * event. A 5xx is mrr's, or the forge's, and left no trace at all: a {@code forge_error}
+     * 502 was answered and forgotten, so the only record of a failed merge or a rejected
+     * token was in somebody's browser console. Whether a request even reached the app could
+     * not be settled from the log, which is exactly what a log is for.
+     *
+     * <p>The message carries the host's status but never its body — {@link ApiException} is
+     * built that way because a body can echo the token back — so this is safe to write down.
+     */
     @ExceptionHandler(ApiException.class)
-    public ResponseEntity<ErrorResponse> handle(ApiException e) {
+    public ResponseEntity<ErrorResponse> handle(ApiException e, HttpServletRequest request) {
+        if (e.status().is5xxServerError()) {
+            log.warn("{} {} — {} {}", request.getMethod(), request.getRequestURI(),
+                    e.status().value(), e.getMessage());
+        }
         return ResponseEntity.status(e.status())
                 .body(new ErrorResponse(e.code(), e.getMessage(), null));
     }

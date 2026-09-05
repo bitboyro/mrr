@@ -16,6 +16,6 @@ public enum Degradation {
     COUNT_ONLY;
 
     public String wire() {
-        return name().toLowerCase();
+        return name().toLowerCase(java.util.Locale.ROOT);
     }
 }

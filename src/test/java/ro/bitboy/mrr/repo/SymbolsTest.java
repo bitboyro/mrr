@@ -209,6 +209,47 @@ class SymbolsTest {
         assertThat(s.endLine()).isEqualTo(4);
     }
 
+    /**
+     * A definition whose grammar names no body — a Rust const, a static, a type alias — used
+     * to return its entire text as its "signature", because the first-line cap was computed
+     * and then discarded by {@code min(end, max(cap, end))}, which is just {@code end}.
+     */
+    @Test
+    void aDefinitionWithNoBodyNodeIsCutAtItsFirstLine() {
+        Parsed p = parse("src/lib.rs", """
+                pub const TABLE: [i32; 4] = [
+                    100,
+                    200,
+                    300,
+                ];
+                """);
+
+        Symbol s = Symbols.all(p).stream()
+                .filter(sym -> "TABLE".equals(sym.name())).findFirst().orElseThrow();
+
+        assertThat(s.signature()).isEqualTo("pub const TABLE: [i32; 4] = [");
+        assertThat(s.signature()).doesNotContain("200");
+    }
+
+    /** A body the grammar does name still gives the whole signature, however it is wrapped. */
+    @Test
+    void aMultiLineSignatureIsKeptWholeWhenTheGrammarNamesTheBody() {
+        Parsed p = parse("src/A.java", """
+                class A {
+                    public void withdraw(
+                            int amount,
+                            String reason) {
+                        int x = amount;
+                    }
+                }
+                """);
+
+        Symbol s = Symbols.at(p, 5).orElseThrow();
+
+        assertThat(s.signature()).contains("int amount").contains("String reason");
+        assertThat(s.signature()).doesNotContain("int x = amount");
+    }
+
     @Test
     void everyDefinitionInAFileIsListed() {
         Parsed p = parse("src/A.java", """

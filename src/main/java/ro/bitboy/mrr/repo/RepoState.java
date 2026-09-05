@@ -35,7 +35,7 @@ public enum RepoState {
             return ABSENT;
         }
         try {
-            return valueOf(raw.trim().toUpperCase());
+            return valueOf(raw.trim().toUpperCase(java.util.Locale.ROOT));
         } catch (IllegalArgumentException e) {
             return ABSENT;
         }

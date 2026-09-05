@@ -232,8 +232,49 @@ public class Prefetch {
         return to < 0 ? text.substring(from) : text.substring(from, to);
     }
 
-    private static String unescape(String value) {
-        return value.replace("\\n", "\n").replace("\\t", "\t")
-                .replace("\\\"", "\"").replace("\\\\", "\\");
+    /**
+     * Undoes JSON's backslash escapes in one left-to-right pass.
+     *
+     * <p>Chained {@code replace} calls cannot do this, because the backslash itself has to be
+     * unescaped last and by then the earlier passes have already eaten it: a definition
+     * containing the two characters {@code \n} — a Windows path, a regex, a Java string
+     * literal, all common in reviewed code — arrives as {@code \\n} and the first replace
+     * turns it into a real newline. The model then reads a line break where the source has a
+     * literal backslash.
+     */
+    static String unescape(String value) {
+        StringBuilder out = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c != '\\' || i + 1 >= value.length()) {
+                out.append(c);
+                continue;
+            }
+            char next = value.charAt(++i);
+            switch (next) {
+                case 'n' -> out.append('\n');
+                case 't' -> out.append('\t');
+                case 'r' -> out.append('\r');
+                case 'b' -> out.append('\b');
+                case 'f' -> out.append('\f');
+                case '"' -> out.append('"');
+                case '/' -> out.append('/');
+                case '\\' -> out.append('\\');
+                case 'u' -> {
+                    if (i + 4 < value.length()) {
+                        try {
+                            out.append((char) Integer.parseInt(value, i + 1, i + 5, 16));
+                            i += 4;
+                        } catch (NumberFormatException e) {
+                            out.append('\\').append(next);
+                        }
+                    } else {
+                        out.append('\\').append(next);
+                    }
+                }
+                default -> out.append('\\').append(next);
+            }
+        }
+        return out.toString();
     }
 }

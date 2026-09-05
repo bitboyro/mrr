@@ -55,7 +55,7 @@ public final class Vendored {
         if (path == null) {
             return false;
         }
-        String lower = path.toLowerCase();
+        String lower = path.toLowerCase(java.util.Locale.ROOT);
         return lower.contains("/test/") || lower.contains("/tests/")
                 || lower.startsWith("test/") || lower.startsWith("tests/")
                 || lower.contains("/spec/") || lower.endsWith("_test.go")

@@ -90,6 +90,43 @@ class ForgeHttpTest {
                 .hasMessageContaining("502");
     }
 
+    // ── sliceLines ───────────────────────────────────────────────────────────────────
+
+    @Test
+    void aLineRangeReturnsExactlyThoseLines() {
+        assertThat(ForgeHttp.sliceLines("a\nb\nc\nd", 2, 3)).isEqualTo("b\nc");
+        assertThat(ForgeHttp.sliceLines("a\nb\nc\nd", 3, null)).isEqualTo("c\nd");
+        assertThat(ForgeHttp.sliceLines("a\nb\nc\nd", null, 2)).isEqualTo("a\nb");
+        assertThat(ForgeHttp.sliceLines("a\nb\nc\nd", null, null)).isEqualTo("a\nb\nc\nd");
+    }
+
+    /** An end past the last line is a clamp, not an error — the file simply stops. */
+    @Test
+    void anEndPastTheLastLineIsClamped() {
+        assertThat(ForgeHttp.sliceLines("a\nb\nc", 2, 900)).isEqualTo("b\nc");
+    }
+
+    /**
+     * The one answer that must never be the whole file. It used to be: asking for lines
+     * 5000–5100 of a three-line file returned all three lines with nothing to say they were
+     * not the lines asked for, and a finding would then be filed against a line that does not
+     * exist.
+     */
+    @Test
+    void aRangePastTheEndOfTheFileSaysSoRatherThanReturningTheFile() {
+        assertThat(ForgeHttp.sliceLines("a\nb\nc", 5000, 5100))
+                .startsWith("error:")
+                .contains("3 line(s)")
+                .doesNotContain("a\nb\nc");
+    }
+
+    @Test
+    void anInvertedRangeSaysSoRatherThanReturningTheFile() {
+        assertThat(ForgeHttp.sliceLines("a\nb\nc", 3, 1))
+                .startsWith("error:")
+                .doesNotContain("a\nb\nc");
+    }
+
     /** The smallest adapter that can reach the shared plumbing. */
     private final class TestForge extends ForgeHttp {
 

@@ -25,7 +25,7 @@ public record Refusal(String refusal, String tool, String reason, Integer limit,
 
     public static Refusal noWorkingCopy(String tool, RepoState state) {
         return new Refusal("working_copy_unavailable", tool,
-                "this project's mirror is " + state.name().toLowerCase(),
+                "this project's mirror is " + state.name().toLowerCase(java.util.Locale.ROOT),
                 null, null,
                 state == RepoState.CLONING
                         ? "A copy is being fetched now and a later review will have it. Work "

@@ -873,6 +873,41 @@ class StoreTest {
     }
 
     /**
+     * History comes back in the order it was written, even when the clock cannot tell two
+     * events apart.
+     *
+     * <p>Every event here shares one {@code Instant}, which is not contrived: an event and the
+     * state change it describes are written microseconds apart and did tie in practice. The
+     * order then fell through to a random UUID, so this read was a coin flip — and
+     * {@code Reviewer.proposeAddressed} branches on the last event to decide whether it has
+     * already said a finding looks fixed, so the coin flip was a duplicate comment on
+     * somebody's thread or silence where mrr should have spoken.
+     */
+    @Test
+    void historyKeepsItsOrderWhenEveryEventSharesATimestamp() {
+        Project project = TestStores.persist(store, project(alice.id(), "alice-seq"));
+        String reviewId = store.claimReview(project.id(), 9, "sha-1", "{}", mrInfo()).review().id();
+        Finding f = store.createFinding(finding(reviewId, project.id(), 9, "disc-seq"));
+        Instant frozen = Instant.parse("2026-01-01T00:00:00Z");
+
+        List<FindingEvent.Kind> written = List.of(
+                FindingEvent.Kind.PROPOSED_ADDRESSED, FindingEvent.Kind.DISPUTED,
+                FindingEvent.Kind.REOPENED, FindingEvent.Kind.WONT_FIX);
+        for (FindingEvent.Kind kind : written) {
+            store.recordEvent(new FindingEvent(Ids.newId(), f.id(), project.id(), 9, kind,
+                    FindingEvent.ActorKind.HUMAN, null, "ada", reviewId, null, "sha-1",
+                    null, frozen));
+        }
+
+        assertThat(store.eventsOf(f.id())).extracting(FindingEvent::kind)
+                .containsExactly(FindingEvent.Kind.CREATED, FindingEvent.Kind.PROPOSED_ADDRESSED,
+                        FindingEvent.Kind.DISPUTED, FindingEvent.Kind.REOPENED,
+                        FindingEvent.Kind.WONT_FIX);
+        assertThat(store.eventsOf(f.id()).getLast().kind())
+                .isEqualTo(FindingEvent.Kind.WONT_FIX);
+    }
+
+    /**
      * The race a tracked forge comment can actually lose.
      *
      * <p>Goes straight at the insert, because that is the half that matters: the caller's

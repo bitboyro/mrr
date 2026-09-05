@@ -10,6 +10,8 @@ import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import ro.bitboy.mrr.TestStores;
 import ro.bitboy.mrr.auth.Ids;
 import ro.bitboy.mrr.auth.Principal;
+import ro.bitboy.mrr.model.Finding;
+import ro.bitboy.mrr.model.FindingEvent;
 import ro.bitboy.mrr.model.MergeRequestInfo;
 import ro.bitboy.mrr.model.MrStatus;
 import ro.bitboy.mrr.model.Project;
@@ -91,6 +93,64 @@ class PostgresStoreTest {
         assertThat(tableNames()).contains("users", "tokens", "projects", "llm_providers",
                 "forge_instances", "reviews", "findings", "replies", "mr_status",
                 "memory_documents", "memory_runs", "settings", "skill_library");
+    }
+
+    /**
+     * The race {@code idx_finding_events_seq} exists to close, reproduced for real.
+     *
+     * <p>SQLite cannot show this: it holds one writer at a time regardless of pool size, so
+     * {@code recordEvent}'s {@code SELECT MAX(seq)+1} embedded in the INSERT is trivially
+     * serialized there and the bug never surfaces against it. Postgres runs each connection's
+     * statement under its own snapshot, so two transactions can both read the same
+     * {@code MAX(seq)} before either commits — the classic non-atomic increment. This is why
+     * the race belongs in the Postgres half of the suite rather than the SQLite one.
+     *
+     * <p>Real threads, each its own connection ({@link SimpleDriverDataSource} opens one per
+     * call, same as production Hikari would under load) racing on one finding. Without the
+     * unique index and the retry in {@code recordEvent}, this reliably produced duplicate
+     * {@code seq} values or a lost event under concurrent webhook and reply delivery.
+     */
+    @Test
+    void concurrentEventsOnOneFindingNeverCollideOrGoMissing() throws Exception {
+        Project project = TestStores.persist(store, TestStores.project(alice.id(), "race", "wh"));
+        String reviewId = store.claimReview(project.id(), 9, "sha-1", "{}", mrInfo("race"))
+                .review().id();
+        Finding f = store.createFinding(new Finding(Ids.newId(), reviewId, project.id(), 9,
+                "A.java", 1, Finding.Severity.MAJOR, "title", "body", "disc-race", "note-1",
+                true, Finding.State.OPEN, Instant.now(), null));
+
+        int writers = 12;
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(writers);
+        var ready = new java.util.concurrent.CyclicBarrier(writers);
+        var failures = new java.util.concurrent.ConcurrentLinkedQueue<Throwable>();
+        List<java.util.concurrent.Future<?>> tasks = new java.util.ArrayList<>();
+        for (int i = 0; i < writers; i++) {
+            int n = i;
+            tasks.add(pool.submit(() -> {
+                try {
+                    ready.await(); // every writer fires at once, maximising the overlap
+                    store.recordEvent(new FindingEvent(Ids.newId(), f.id(), project.id(), 9,
+                            FindingEvent.Kind.DISPUTED, FindingEvent.ActorKind.HUMAN, null,
+                            "writer-" + n, reviewId, null, "sha-1", null, Instant.now()));
+                } catch (Throwable t) {
+                    failures.add(t);
+                }
+            }));
+        }
+        for (var task : tasks) task.get(30, java.util.concurrent.TimeUnit.SECONDS);
+        pool.shutdown();
+
+        assertThat(failures).isEmpty();
+        // CREATED plus one per writer — none lost to a silently-swallowed conflict.
+        assertThat(store.eventsOf(f.id())).hasSize(writers + 1);
+        // seq is not on the model — it exists purely to order the history — so read it
+        // straight off the table to check the property the unique index guarantees:
+        // no two events on this finding share a position, and none was skipped.
+        List<Integer> seqs = db.sql("SELECT seq FROM finding_events WHERE finding_id = ? "
+                        + "ORDER BY seq")
+                .param(f.id()).query(Integer.class).list();
+        assertThat(seqs).containsExactlyElementsOf(
+                java.util.stream.IntStream.rangeClosed(1, writers + 1).boxed().toList());
     }
 
     /** projects.llm_provider_id REFERENCES llm_providers(id) — the forward reference. */

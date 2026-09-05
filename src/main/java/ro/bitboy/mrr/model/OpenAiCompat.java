@@ -19,7 +19,7 @@ final class OpenAiCompat {
         if (baseUrl == null || baseUrl.isBlank()) {
             return true;
         }
-        String normalised = baseUrl.replaceAll("/+$", "").toLowerCase();
+        String normalised = baseUrl.replaceAll("/+$", "").toLowerCase(java.util.Locale.ROOT);
         return normalised.equals("https://api.openai.com/v1")
                 || normalised.equals("https://api.openai.com");
     }
@@ -32,7 +32,7 @@ final class OpenAiCompat {
         if (model == null) {
             return false;
         }
-        String id = model.trim().toLowerCase();
+        String id = model.trim().toLowerCase(java.util.Locale.ROOT);
         if (!id.startsWith("gpt-5.")) {
             return false;
         }

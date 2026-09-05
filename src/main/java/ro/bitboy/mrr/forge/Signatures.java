@@ -44,7 +44,7 @@ public final class Signatures {
         }
         return MessageDigest.isEqual(
                 expected.getBytes(StandardCharsets.UTF_8),
-                offered.toLowerCase().getBytes(StandardCharsets.UTF_8));
+                offered.toLowerCase(java.util.Locale.ROOT).getBytes(StandardCharsets.UTF_8));
     }
 
     /** Lowercase hex digest, or null when the JVM has no HMAC-SHA256 (it always does). */
