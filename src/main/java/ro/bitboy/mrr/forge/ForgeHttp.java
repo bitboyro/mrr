@@ -279,6 +279,15 @@ public abstract class ForgeHttp {
         return sliced;
     }
 
+    /**
+     * Lines {@code startLine}..{@code endLine} of a file, 1-based and inclusive.
+     *
+     * <p>A range that lies past the end of the file, or one whose ends are the wrong way
+     * round, says so. It used to fall back to returning the whole file, which is the worst
+     * available answer: a model that asked for lines 5000–5100 of a hundred-line file was
+     * handed lines 1–100 with nothing to say they were not the lines it asked for, and would
+     * then report a finding against a line number that does not exist.
+     */
     protected static String sliceLines(String body, Integer startLine, Integer endLine) {
         if (startLine == null && endLine == null) {
             return body;
@@ -286,8 +295,11 @@ public abstract class ForgeHttp {
         String[] lines = body.split("\n", -1);
         int from = startLine == null ? 1 : Math.max(1, startLine);
         int to = endLine == null ? lines.length : Math.min(lines.length, endLine);
-        if (from > to || from > lines.length) {
-            return body;
+        if (from > lines.length) {
+            return "error: this file has " + lines.length + " line(s); there is no line " + from;
+        }
+        if (from > to) {
+            return "error: start_line " + from + " is after end_line " + endLine;
         }
         StringBuilder out = new StringBuilder();
         for (int i = from; i <= to; i++) {

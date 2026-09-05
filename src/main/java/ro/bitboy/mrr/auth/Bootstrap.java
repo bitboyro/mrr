@@ -57,14 +57,33 @@ public class Bootstrap implements ApplicationRunner {
         writeTokenFile(token);
     }
 
+    /**
+     * The box the root token is printed in.
+     *
+     * <p>Every row is {@code inner} characters wide between the corners. It used to be built
+     * from three unrelated expressions — a title padded by slicing a rule, a middle row of
+     * {@code token + 4}, and a bottom of {@code token + 7} — so the bottom edge overhung by
+     * two columns on every boot, and a token shorter than the title collapsed the box
+     * entirely.
+     */
     private void banner(String token) {
-        String line = "─".repeat(token.length() + 4);
-        System.out.println("┌─ mrr  root admin token " + line.substring(Math.min(line.length(), 24)) + "┐");
-        System.out.println("│  " + token + "  │");
-        System.out.println("└" + line + "──┘");
+        box(token).forEach(System.out::println);
         System.out.println("   Shown once. Create users and tokens with it:");
         System.out.println("   curl -H 'Authorization: Bearer " + Ids.prefixOf(token) + "…' "
                 + properties.baseUrl() + "/api/users");
+    }
+
+    static java.util.List<String> box(String token) {
+        String title = "─ mrr  root admin token ";
+        int inner = Math.max(title.length(), token.length() + 4);
+        return java.util.List.of(
+                "┌" + title + "─".repeat(inner - title.length()) + "┐",
+                "│" + pad("  " + token + "  ", inner) + "│",
+                "└" + "─".repeat(inner) + "┘");
+    }
+
+    private static String pad(String text, int width) {
+        return text.length() >= width ? text : text + " ".repeat(width - text.length());
     }
 
     private void writeTokenFile(String token) {

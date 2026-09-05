@@ -864,30 +864,77 @@ public class Store {
      * finding stands is what the merge gate reads, and weakening it to protect an audit row
      * would invert the priority.
      */
+    /**
+     * Retries on {@code idx_finding_events_seq} rather than pretending {@code MAX(seq) + 1} is
+     * a reservation. It is a read, not a lock: mrr runs on SQLite as well as Postgres, and
+     * neither has a portable {@code SELECT ... FOR UPDATE} that would serialize two writers
+     * racing on the same finding — a reply and a review resolving it at once is the real case,
+     * not a hypothetical one. Two writers can compute the same candidate together; the unique
+     * index is what actually orders them, by letting the second insert fail so it can recompute
+     * against what the first one just wrote. Bounded rather than unbounded, so a bug that made
+     * every attempt collide would surface as an exception instead of a hang.
+     */
+    private static final int MAX_EVENT_SEQ_ATTEMPTS = 8;
+
     public void recordEvent(FindingEvent event) {
-        db.sql("""
-                INSERT INTO finding_events (id, finding_id, project_id, mr_iid, kind, actor_kind,
-                                            actor_user, actor_forge, review_id, reply_id,
-                                            head_sha, detail, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """)
-                .params(event.id(), event.findingId(), event.projectId(), event.mrIid(),
-                        event.kind().name(), event.actorKind().name(), event.actorUser(),
-                        event.actorForge(), event.reviewId(), event.replyId(), event.headSha(),
-                        event.detail(), event.createdAt().toString())
-                .update();
+        for (int attempt = 1; ; attempt++) {
+            try {
+                db.sql("""
+                        INSERT INTO finding_events (id, finding_id, project_id, mr_iid, kind,
+                                                    actor_kind, actor_user, actor_forge,
+                                                    review_id, reply_id, head_sha, detail,
+                                                    created_at, seq)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                (SELECT COALESCE(MAX(seq), 0) + 1 FROM finding_events
+                                 WHERE finding_id = ?))
+                        """)
+                        .params(event.id(), event.findingId(), event.projectId(), event.mrIid(),
+                                event.kind().name(), event.actorKind().name(), event.actorUser(),
+                                event.actorForge(), event.reviewId(), event.replyId(),
+                                event.headSha(), event.detail(), event.createdAt().toString(),
+                                event.findingId())
+                        .update();
+                return;
+            } catch (DataAccessException e) {
+                if (!isUniqueViolation(e) || attempt >= MAX_EVENT_SEQ_ATTEMPTS) {
+                    throw e;
+                }
+                // Somebody else's insert claimed this position between our SELECT and our
+                // INSERT. Recompute against what is there now and try again.
+            }
+        }
     }
 
+    /**
+     * One finding's history, oldest first.
+     *
+     * <p>Ordered on {@code seq} rather than on the clock. Two events written in the same
+     * {@code Instant} — a state change and the event describing it, which is the common case —
+     * tied on {@code created_at} and fell through to a random UUID, so the order was decided
+     * by chance. That is not only a flaky read: {@code Reviewer.proposeAddressed} branches on
+     * {@code getLast().kind()} to decide whether it has already said a finding looks fixed, so
+     * a coin-flip here is a duplicate comment on somebody's thread, or silence where mrr
+     * should have spoken.
+     *
+     * <p>Rows written before {@code seq} existed all carry 0 and so still order among
+     * themselves by the clock, exactly as they did.
+     */
     public List<FindingEvent> eventsOf(String findingId) {
-        return db.sql("SELECT * FROM finding_events WHERE finding_id = ? ORDER BY created_at, id")
+        return db.sql("SELECT * FROM finding_events WHERE finding_id = ? "
+                        + "ORDER BY seq, created_at, id")
                 .param(findingId).query(Store::toFindingEvent).list();
     }
 
-    /** Every event on every finding of one merge request — what the cycle page renders. */
+    /**
+     * Every event on every finding of one merge request — what the cycle page renders.
+     *
+     * <p>The clock leads here, because {@code seq} counts within a finding and says nothing
+     * about two of them; it breaks the tie underneath.
+     */
     public List<FindingEvent> eventsOfMr(String projectId, long mrIid) {
         return db.sql("""
                 SELECT * FROM finding_events WHERE project_id = ? AND mr_iid = ?
-                ORDER BY created_at, id
+                ORDER BY created_at, seq, id
                 """)
                 .params(projectId, mrIid).query(Store::toFindingEvent).list();
     }
@@ -1144,7 +1191,7 @@ public class Store {
             return null;
         }
         try {
-            return MrStatus.Status.valueOf(raw.trim().toUpperCase()).name();
+            return MrStatus.Status.valueOf(raw.trim().toUpperCase(java.util.Locale.ROOT)).name();
         } catch (IllegalArgumentException e) {
             throw ApiException.badRequest("unknown status: " + raw);
         }
@@ -2124,6 +2171,21 @@ public class Store {
                 ON CONFLICT DO NOTHING
                 """)
                 .params(projectId, Instant.now().toString())
+                .update();
+    }
+
+    /**
+     * Evicted, and holding no bytes any more.
+     *
+     * <p>The size has to go with the state. It is what the disk budget is summed from, and a
+     * row that kept its old size after its directory was deleted spent that budget forever —
+     * phantom bytes that could push a live mirror out.
+     */
+    public void markRepoEvicted(String projectId) {
+        ensureRepoRow(projectId);
+        db.sql("UPDATE repos SET state = ?, last_error = NULL, size_bytes = 0 "
+                + "WHERE project_id = ?")
+                .params(RepoState.EVICTED.name(), projectId)
                 .update();
     }
 

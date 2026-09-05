@@ -67,4 +67,40 @@ class ReviewToolsTest {
         assertThat(doc.path()).isEqualTo("project/overview.md");
         assertThat(memory.get(projectId, doc.id()).orElseThrow().body()).contains("Java 21");
     }
+
+    @Test
+    void writingTheSameTitleTwiceUpdatesTheOneDocument() {
+        ReviewTools.executeMemory(mapper, memory, projectId, MemoryActor.LIBRARIAN, null,
+                "write_memory", "{\"title\":\"oauth\",\"body\":\"first\"}");
+        String second = ReviewTools.executeMemory(mapper, memory, projectId,
+                MemoryActor.LIBRARIAN, null, "write_memory",
+                "{\"title\":\"oauth\",\"body\":\"second\"}");
+
+        assertThat(second).startsWith("Updated project/oauth.md");
+        assertThat(memory.list(projectId, "project", null, 10)).hasSize(1);
+    }
+
+    /**
+     * The existing-document lookup matched on a bare {@code endsWith}, so
+     * {@code project/oauth.md} ends with {@code auth.md} — and a note titled "auth"
+     * overwrote the OAuth note instead of getting one of its own.
+     */
+    @Test
+    void aTitleThatIsASuffixOfAnotherGetsItsOwnDocument() {
+        ReviewTools.executeMemory(mapper, memory, projectId, MemoryActor.LIBRARIAN, null,
+                "write_memory", "{\"title\":\"oauth\",\"body\":\"how we do OAuth\"}");
+
+        String result = ReviewTools.executeMemory(mapper, memory, projectId,
+                MemoryActor.LIBRARIAN, null, "write_memory",
+                "{\"title\":\"auth\",\"body\":\"how we do auth generally\"}");
+
+        assertThat(result).startsWith("Created project/auth.md");
+        assertThat(memory.list(projectId, "project", null, 10))
+                .extracting(MemoryDocument::path)
+                .containsExactlyInAnyOrder("project/oauth.md", "project/auth.md");
+        MemoryDocument oauth = memory.list(projectId, "project", null, 10).stream()
+                .filter(d -> "project/oauth.md".equals(d.path())).findFirst().orElseThrow();
+        assertThat(memory.get(projectId, oauth.id()).orElseThrow().body())
+                .contains("how we do OAuth");
+    }
 }

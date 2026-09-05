@@ -19,7 +19,7 @@ public final class Urls {
         } catch (IllegalArgumentException e) {
             throw ApiException.badRequest(field + " is not a valid URL");
         }
-        String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase();
+        String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(java.util.Locale.ROOT);
         if (!scheme.equals("http") && !scheme.equals("https")) {
             throw ApiException.badRequest(field + " must start with http:// or https://");
         }

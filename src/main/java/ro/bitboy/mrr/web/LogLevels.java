@@ -61,7 +61,7 @@ public final class LogLevels {
         } else {
             LogLevel parsed;
             try {
-                parsed = LogLevel.valueOf(trimmed.toUpperCase());
+                parsed = LogLevel.valueOf(trimmed.toUpperCase(java.util.Locale.ROOT));
             } catch (IllegalArgumentException e) {
                 throw ApiException.badRequest("level must be TRACE, DEBUG, INFO, WARN, ERROR, FATAL, OFF, or INHERIT");
             }
@@ -85,7 +85,7 @@ public final class LogLevels {
 
     private static boolean isHttpSecretLogger(String name) {
         for (String pinned : HTTP_SECRET_LOGGERS) {
-            if (pinned.equalsIgnoreCase(name) || name.toLowerCase().startsWith(pinned.toLowerCase() + ".")) {
+            if (pinned.equalsIgnoreCase(name) || name.toLowerCase(java.util.Locale.ROOT).startsWith(pinned.toLowerCase(java.util.Locale.ROOT) + ".")) {
                 return true;
             }
         }

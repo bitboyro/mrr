@@ -200,4 +200,43 @@ class WorkingCopiesTest {
         assertThat(copies.pathFor(project.id())).doesNotExist();
         assertThat(copies.acquire(project, origin.head())).isEmpty();
     }
+
+    /**
+     * An evicted mirror is evicted once.
+     *
+     * <p>Its row stays — that is what stops it being re-cloned on a whim — and its
+     * {@code last_used_at} never moves again, so it read as permanently idle and every scan
+     * tick "evicted" it afresh: a no-op delete, a counted removal, and a log line every two
+     * minutes forever on a production instance.
+     */
+    @Test
+    void anAlreadyEvictedMirrorIsNotEvictedAgainOnEveryTick() {
+        origin = TestRepos.origin(tmp).commit("first", Map.of("a.txt", "1\n"));
+        WorkingCopies copies = copies(origin.url());
+        Project project = project();
+        copies.syncNow(project);
+
+        // Idle days is 30 in this config, so nothing is idle yet and the first pass is a
+        // deliberate eviction rather than the budget's doing.
+        copies.evict(project.id());
+        assertThat(copies.pathFor(project.id())).doesNotExist();
+
+        assertThat(copies.evictToBudget()).isZero();
+        assertThat(copies.evictToBudget()).isZero();
+        assertThat(copies.status(project).state()).isEqualTo(RepoState.EVICTED);
+    }
+
+    /** The budget is summed from the rows, so an evicted one must stop spending it. */
+    @Test
+    void anEvictedRowStopsCountingAgainstTheDiskBudget() {
+        origin = TestRepos.origin(tmp).commit("first", Map.of("a.txt", "1\n"));
+        WorkingCopies copies = copies(origin.url());
+        Project project = project();
+        copies.syncNow(project);
+        assertThat(copies.status(project).sizeBytes()).isPositive();
+
+        copies.evict(project.id());
+
+        assertThat(copies.status(project).sizeBytes()).isZero();
+    }
 }

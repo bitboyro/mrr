@@ -116,8 +116,11 @@ final class ReviewTools {
                                 "include_body", Map.of("type", "boolean",
                                         "description", "Default true"),
                                 "max_body_lines", Map.of("type", "integer",
-                                        "description", "Default 200. A longer body comes back as "
-                                                + "head and tail with body_truncated set.")),
+                                        "description", "Default 200, minimum 2 — a truncated "
+                                                + "body is a head and a tail, so it cannot be "
+                                                + "rendered in fewer. Anything lower is raised "
+                                                + "to 2. A longer body comes back as head and "
+                                                + "tail with body_truncated set.")),
                         "required", List.of("file", "line")));
     }
 
@@ -290,9 +293,14 @@ final class ReviewTools {
                 }
                 MemoryKind kind = actor == MemoryActor.LIBRARIAN ? MemoryKind.PROJECT
                         : (MemoryStore.SPACE_MRS.equals(space) ? MemoryKind.MERGE_REQUEST : MemoryKind.DOCUMENT);
+                // Matched on the whole final segment, not a bare endsWith: "project/oauth.md"
+                // ends with "auth.md", so writing a note titled "Auth" used to overwrite the
+                // OAuth note instead of creating its own.
+                String wanted = "/" + slugFile(title);
                 MemoryDocument existing = MemoryStore.SPACE_PROJECT.equals(space)
                         ? memory.list(projectId, space, null, 50).stream()
-                        .filter(d -> d.path() != null && d.path().endsWith(slugFile(title)))
+                        .filter(d -> d.path() != null
+                                && ("/" + d.path()).endsWith(wanted))
                         .findFirst().orElse(null)
                         : null;
                 if (existing != null) {
@@ -315,7 +323,7 @@ final class ReviewTools {
         if (title == null) {
             return "overview.md";
         }
-        String t = title.toLowerCase().trim();
+        String t = title.toLowerCase(java.util.Locale.ROOT).trim();
         if (t.contains("stack")) {
             return "stack.md";
         }

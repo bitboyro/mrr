@@ -212,7 +212,7 @@ public class McpTools {
         Finding finding = store.findFinding(findingId)
                 .orElseThrow(() -> ApiException.notFound("finding"));
         Project project = store.requireVisible(caller, finding.projectId());
-        String wanted = state == null ? "" : state.trim().toUpperCase();
+        String wanted = state == null ? "" : state.trim().toUpperCase(java.util.Locale.ROOT);
         if (wanted.equals("DISPUTED")) {
             return findings.dispute(Findings.Actor.of(caller), finding, note);
         }

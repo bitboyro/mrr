@@ -350,7 +350,7 @@ public class MemoryStore {
         if (space == null || space.isBlank()) {
             return SPACE_PROJECT;
         }
-        String s = space.trim().toLowerCase().replaceAll("^/+|/+$", "");
+        String s = space.trim().toLowerCase(java.util.Locale.ROOT).replaceAll("^/+|/+$", "");
         if (!s.equals(SPACE_PROJECT) && !s.equals(SPACE_MRS) && !s.equals(SPACE_NOTES)) {
             throw ApiException.badRequest("space must be project, mrs, or notes");
         }

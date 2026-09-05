@@ -35,7 +35,7 @@ public class ModelException extends RuntimeException {
     }
 
     public static ModelException fromHttp(int status, String body) {
-        String haystack = ((body == null ? "" : body) + " status=" + status).toLowerCase();
+        String haystack = ((body == null ? "" : body) + " status=" + status).toLowerCase(java.util.Locale.ROOT);
         FailureKind kind;
         if (status == 401 || status == 403 || haystack.contains("invalid_api_key")
                 || haystack.contains("authentication")) {
@@ -54,7 +54,7 @@ public class ModelException extends RuntimeException {
 
     static ModelException fromSignal(String className, String message, Throwable cause) {
         String haystack = ((className == null ? "" : className) + " "
-                + (message == null ? "" : message)).toLowerCase();
+                + (message == null ? "" : message)).toLowerCase(java.util.Locale.ROOT);
         FailureKind kind;
         if (haystack.contains("ratelimit") || haystack.contains("rate_limit")) {
             kind = haystack.contains("quota") || haystack.contains("credit")

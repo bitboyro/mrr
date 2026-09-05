@@ -34,6 +34,6 @@ public enum Tier {
     }
 
     public String wire() {
-        return name().toLowerCase();
+        return name().toLowerCase(java.util.Locale.ROOT);
     }
 }

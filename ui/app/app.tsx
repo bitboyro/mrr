@@ -355,15 +355,43 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (res.status === 204) return undefined as T;
   const text = await res.text();
   if (!res.ok) {
-    try {
-      const err = JSON.parse(text) as { message?: string };
-      throw new Error(err.message || text);
-    } catch (e) {
-      if (e instanceof Error && e.message !== text) throw e;
-      throw new Error(text || res.statusText);
-    }
+    throw new Error(failureMessage(res, text));
   }
   return text ? (JSON.parse(text) as T) : (undefined as T);
+}
+
+/**
+ * What to show when a request fails.
+ *
+ * The fallback for a body that is not JSON used to be unreachable for the one case it existed
+ * for. `JSON.parse` throws a `SyntaxError`, which is an `Error` whose message ("Unexpected
+ * token '<', \"<!DOCTYPE \"... is not valid JSON") is not the body — so the guard rethrew the
+ * parser's complaint and swallowed the actual failure. Anybody hitting a proxy error page was
+ * shown a sentence about a doctype instead of the status.
+ *
+ * mrr answers every error as JSON (`ErrorAdvice`), and the SPA forward is GET-only on fixed
+ * routes, so an HTML body on an `/api` call did not come from mrr at all: the request never
+ * reached it. Saying that is the useful answer — it sends you to the proxy and the server log
+ * rather than to the endpoint.
+ */
+function failureMessage(res: Response, text: string): string {
+  const body = text.trim();
+  const status = `${res.status} ${res.statusText || "error"}`;
+  if (!body) return status;
+  try {
+    const parsed = JSON.parse(body) as { message?: string };
+    if (parsed && typeof parsed.message === "string" && parsed.message.trim()) {
+      return parsed.message;
+    }
+  } catch {
+    // Not JSON. Never surface the parser's complaint as the failure.
+  }
+  if (body.startsWith("<")) {
+    return `${status} — this answer did not come from mrr. Something in front of it (a proxy `
+      + `or tunnel) returned an HTML page, so mrr was unreachable or restarting. Check the `
+      + `server log for this request.`;
+  }
+  return body.length > 500 ? `${body.slice(0, 500)}…` : body;
 }
 
 function pill(status: string) {

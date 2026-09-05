@@ -129,7 +129,7 @@ public class GitHubForge extends ForgeHttp implements Forge {
     private static String hostOf(String base) {
         try {
             String host = URI.create(base).getHost();
-            return host == null ? "" : host.toLowerCase();
+            return host == null ? "" : host.toLowerCase(java.util.Locale.ROOT);
         } catch (IllegalArgumentException e) {
             return "";
         }

@@ -131,21 +131,55 @@ public class RepoTools {
         Enclosing enclosing = Symbols.enclosing(parsed, symbol)
                 .map(e -> new Enclosing(e.qualifiedName(), e.kind()))
                 .orElse(null);
-        String body = null;
-        boolean truncated = false;
-        if (includeBody) {
-            if (symbol.lineCount() > maxBodyLines) {
-                // Never a silent cut: the model would reason about code that is not there.
-                body = source.lines(symbol.startLine(), symbol.startLine() + 39)
-                        + "\n… " + (symbol.lineCount() - 50) + " lines elided …\n"
-                        + source.lines(symbol.endLine() - 9, symbol.endLine());
-                truncated = true;
-            } else {
-                body = source.lines(symbol.startLine(), symbol.endLine());
-            }
+        Body rendered = includeBody ? body(source, symbol, maxBodyLines) : new Body(null, false);
+        return Budget.write(mapper, new SymbolAt(symbol, rendered.text(), rendered.truncated(),
+                enclosing, ref, Tier.AST_FILTERED.wire(), notes.isEmpty() ? null : notes));
+    }
+
+    /** A definition's source, and whether the middle of it was left out. */
+    record Body(String text, boolean truncated) {
+    }
+
+    /**
+     * The smallest {@code max_body_lines} that can mean anything.
+     *
+     * <p>A truncated body is a head and a tail, so it cannot be rendered in fewer than two
+     * lines — and below this the budget stops bounding the answer: at 1 the head and the tail
+     * are one line each and the reply is two, at 0 or a negative it is still two. A budget the
+     * answer can exceed is not a budget, so anything under this is clamped up to it and the
+     * tool schema documents the floor.
+     */
+    static final int MIN_BODY_LINES = 2;
+
+    /**
+     * The definition's lines, cut to {@code maxBodyLines} when it is longer than that.
+     *
+     * <p>Never a silent cut: the model would otherwise reason about code that is not there.
+     * The head and tail are derived from {@code maxBodyLines} rather than fixed at 40 and 10,
+     * which is what the caller actually asked for. With the fixed window, asking for 20 lines
+     * of a 30-line definition returned 50 lines and told the model "-20 lines elided", and
+     * asking for 200 returned 50 with nothing to say the number had been ignored.
+     *
+     * <p>Once the budget is at or above {@link #MIN_BODY_LINES}, {@code head + tail} is exactly
+     * that budget for every value of it, so a truncated body carries exactly the number of
+     * source lines that were asked for and never more.
+     */
+    static Body body(Source source, Symbol symbol, int maxBodyLines) {
+        int budget = Math.max(MIN_BODY_LINES, maxBodyLines);
+        if (symbol.lineCount() <= budget) {
+            return new Body(source.lines(symbol.startLine(), symbol.endLine()), false);
         }
-        return Budget.write(mapper, new SymbolAt(symbol, body, truncated, enclosing, ref,
-                Tier.AST_FILTERED.wire(), notes.isEmpty() ? null : notes));
+        int head = Math.max(1, budget * 4 / 5);
+        int tail = Math.max(1, budget - head);
+        int elided = symbol.lineCount() - head - tail;
+        if (elided <= 0) {
+            // The window rounds up to the whole definition. Send it rather than announce an
+            // elision of nothing.
+            return new Body(source.lines(symbol.startLine(), symbol.endLine()), false);
+        }
+        return new Body(source.lines(symbol.startLine(), symbol.startLine() + head - 1)
+                + "\n… " + elided + " lines elided …\n"
+                + source.lines(symbol.endLine() - tail + 1, symbol.endLine()), true);
     }
 
     /**
@@ -243,8 +277,7 @@ public class RepoTools {
         Modules modules = Modules.from(copy.paths(commit, p -> true, SCAN_LIMIT));
         String definitionFile = args.path("file").asText(null);
         References.Context searchContext = new References.Context(definitionFile,
-                context.mrPaths(), modules,
-                path -> couplingScore(project, definitionFile, path));
+                context.mrPaths(), modules, couplingLookup(project, definitionFile));
 
         // Every filter, onlyChangedInMr included, is applied inside the scan, so the results,
         // the grouping and the tier floor all describe the same set of files.
@@ -268,7 +301,7 @@ public class RepoTools {
         List<Reference> head = ranked.stream().limit(maxResults).toList();
         String handle = total > head.size() ? context.openCursor(ranked) : null;
         Tier floor = ranked.isEmpty() ? Tier.AST_FILTERED : ranked.stream()
-                .map(r -> Tier.valueOf(r.tier().toUpperCase()))
+                .map(r -> Tier.valueOf(r.tier().toUpperCase(java.util.Locale.ROOT)))
                 .reduce(Tier.AST_FILTERED, Tier::min);
 
         Envelope<Reference> envelope = Envelope.sample(head, total, floor,
@@ -334,18 +367,27 @@ public class RepoTools {
         return out;
     }
 
-    private double couplingScore(Project project, String definitionFile, String path) {
+    /**
+     * Coupling scores for the definition's neighbours, read once.
+     *
+     * <p>The ranker asks this per hit, and a search over a monorepo produces hundreds — so
+     * doing the lookup inside the callback meant two queries per hit, each pulling fifty rows
+     * back to find at most one of them. The neighbourhood does not change during a search, so
+     * it is fetched once here and the callback becomes a map read.
+     */
+    private References.CoChangeLookup couplingLookup(Project project, String definitionFile) {
         if (definitionFile == null) {
-            return 0;
+            return path -> 0;
         }
-        return store.coChangeNeighbours(project.id(), definitionFile, 50).stream()
-                .filter(n -> n.path().equals(path))
-                .findFirst()
-                .map(n -> {
-                    int commits = store.coChangeFileCommits(project.id(), definitionFile);
-                    return commits == 0 ? 0d : (double) n.support() / commits;
-                })
-                .orElse(0d);
+        int commits = store.coChangeFileCommits(project.id(), definitionFile);
+        if (commits == 0) {
+            return path -> 0;
+        }
+        Map<String, Double> scores = new LinkedHashMap<>();
+        for (Store.CoChangeNeighbour n : store.coChangeNeighbours(project.id(), definitionFile, 50)) {
+            scores.putIfAbsent(n.path(), (double) n.support() / commits);
+        }
+        return path -> scores.getOrDefault(path, 0d);
     }
 
     // ── co_changed ───────────────────────────────────────────────────────────────────

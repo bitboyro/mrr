@@ -94,6 +94,125 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A finding's history came back in a random order when two events shared a timestamp.** The
+  event and the state change it describes are written microseconds apart and did tie on
+  `created_at`, and the tiebreak was the event's own id — a random UUID. So the read was a coin
+  flip, and not only for the cycle page: `Reviewer.proposeAddressed` branches on the last event
+  to decide whether it has already said a finding looks fixed, so a flipped pair meant either a
+  duplicate comment on somebody's thread or silence where mrr should have spoken. Events now
+  carry a per-finding `seq` and are ordered on it; rows written before it keep 0 and still order
+  among themselves exactly as they did.
+
+  The first cut of this used `SELECT MAX(seq) + 1` to pick a candidate and trusted it, which is
+  a read, not a reservation: on Postgres two writers racing on the same finding — a reply and a
+  review resolving it at once, which does happen — could both read the same `MAX(seq)` before
+  either committed and both insert it. Reproduced against a real Postgres with twelve threads
+  firing on one finding at once: four events landed on `seq=5` and seven positions were never
+  written at all. `idx_finding_events_seq` now enforces uniqueness and `recordEvent` retries the
+  computation when the index refuses a collision, so the second writer recomputes against what
+  the first one just wrote instead of silently taking its position. SQLite serializes writers by
+  itself and never showed the bug; the regression test runs against Postgres for that reason.
+
+- **An evicted mirror was re-evicted on every scan tick, forever.** Its row stays after the
+  directory is deleted — that is what stops it being re-cloned on a whim — and its
+  `last_used_at` never moves again, so it read as permanently idle and the budget pass
+  "evicted" it afresh every two minutes: a no-op delete, a counted removal, and a log line,
+  indefinitely. Its stale `size_bytes` also stayed in the budget total, so phantom bytes from
+  a mirror that no longer existed could push a live one out. Eviction now zeroes the size with
+  the state, and a row with nothing on disk is not a candidate.
+
+- **A 5xx left no trace in the log.** `ErrorAdvice` answered `ApiException` and forgot it, so a
+  `forge_error` 502 — a merge the forge refused, a token it rejected — existed only in the
+  caller's browser console, and whether a request had even reached mrr could not be settled
+  from the log. 5xx is now logged with the method and path; 4xx stays quiet, because a bad id
+  is the caller's problem and not an event.
+
+- **A failed request showed a JSON parser's complaint instead of what went wrong.** The UI's
+  fallback for an error body that is not JSON was unreachable for the one case it existed for:
+  `JSON.parse` throws a `SyntaxError`, which is an `Error` whose message is not the body, so
+  the guard meant to distinguish it from a deliberate throw rethrew it instead. Anyone whose
+  request was answered by a proxy rather than by mrr — a restart, a tunnel that dropped — was
+  shown `Unexpected token '<', "<!DOCTYPE "... is not valid JSON` and nothing about the status.
+
+  mrr answers every error as JSON and the SPA's HTML forward is GET-only on fixed routes, so
+  an HTML body on an `/api` call means the request never reached mrr at all. The message now
+  says that, and points at the proxy and the server log rather than at the endpoint.
+
+- **The catch-up scan could call a formal session clean before anybody signed off.** The review
+  path computes the merge gate from findings *and* outstanding sign-offs; `alignForge`, which
+  the scan runs every couple of minutes over every open request, computed it from the finding
+  count alone. So a formal session that the review had correctly left `NEEDS_WORK` was flipped
+  to `CLEAN` on the next tick — and its overview thread resolved with it, which on GitLab *is*
+  the merge gate. Both paths now go through `MrStatus.gate`, which is where that rule was
+  already supposed to live.
+
+- **A reply could close a finding a person filed, on a thread mrr never opened.** The reviewer
+  checks `agentMayClose()` before resolving anything and proposes instead; the reply path
+  checked neither that nor `mrrOpenedThread()`. A comment on somebody's own tracked thread came
+  back through the replier, and an `addressed` verdict then marked their finding `ADDRESSED`
+  and pressed Resolve on the conversation they started. Both guards are now on the reply path:
+  the agent still says the code looks fixed — that is what the reply is — and closes nothing.
+
+- **`read_file` returned the whole file when the requested lines did not exist.** A range past
+  the end of the file, or one whose ends were the wrong way round, fell back to the entire
+  body. Asking for lines 5000–5100 of a hundred-line file therefore returned lines 1–100 with
+  nothing to say they were not the lines asked for, and a finding filed against a line that
+  does not exist is the most expensive kind of wrong. It now answers with a line saying how
+  many lines the file actually has.
+
+- **`symbol_at` ignored `max_body_lines`.** The elision window was fixed at 40 head lines and
+  10 tail lines whatever the caller passed, so a request for 200 lines silently got 50, and a
+  request for fewer than 50 got *more* lines than it asked for along with a marker reading
+  "-20 lines elided". Both halves of the window are now derived from the parameter, and the
+  count in the marker is the number of lines actually left out. Pre-fetch passes 120 on every
+  hunk it expands, so this was every review with the repository tools on.
+
+  The parameter now has a documented floor of 2, which is what a head and a tail cost: below
+  it the budget stopped bounding the answer at all — `0` still returned two lines and called
+  itself truncated — and a budget the answer may exceed is not a budget. At or above the floor
+  head and tail add to exactly the number asked for, and a test asserts that over every value
+  from -5 up.
+
+- **A definition with no body node returned its whole text as its signature.** `Symbols`
+  computed a first-line cap and then discarded it — `min(end, max(cap, end))` is just `end` —
+  so a Rust `const`, a `static` or a type alias spanning several lines reported all of them,
+  whitespace-collapsed, as its one-line signature. Definitions whose grammar *does* name a body
+  are unaffected and still keep a wrapped multi-line signature whole.
+
+- **`find_references` ran two queries per hit.** The ranker's coupling lookup was a callback
+  that hit the database each time it was called, pulling fifty neighbour rows back to find at
+  most one of them — so a search returning three hundred hits over a monorepo made six hundred
+  round trips for one number per file. The neighbourhood is fixed for the duration of a search
+  and is now read once.
+
+- **A memory note whose title was a suffix of another overwrote it.** The existing-document
+  lookup matched on a bare `endsWith`, and `project/oauth.md` ends with `auth.md` — so writing
+  a note titled "auth" updated the OAuth note in place instead of creating its own. Matched on
+  the whole final path segment now.
+
+- **Expanded definitions were corrupted by a backslash in the source.** Pre-fetch unescaped the
+  `symbol_at` body with chained `replace` calls, which cannot work: the backslash itself has to
+  be unescaped last, and by then the earlier passes have eaten it. A definition containing the
+  two characters `\` and `n` — a Windows path, a regex, a Java string literal — reached the
+  model as a line break. It is one left-to-right pass now, `\uXXXX` included.
+
+- **Every wire value and enum parser depended on the JVM's default locale.** `name()
+  .toLowerCase()` renders the tier, degradation, forge-kind and repo-state values that go out
+  on the API, and `valueOf(raw.toUpperCase())` reads severities, statuses and states back. On a
+  container started with `LANG=tr_TR.UTF-8` — Turkish lower-cases `I` to a dotless `ı` —
+  `AST_FILTERED` went out as `ast_fıltered` and `find_references` threw
+  `IllegalArgumentException` reading its own tier back. Every one of these is now
+  `Locale.ROOT`, pinned by a test that runs under a Turkish default.
+
+- **A failed approval log line reported the opposite of what happened.** The line printed after
+  a successful auto-approve took `headSha().substring(0, 8)` unguarded. A short or absent sha
+  threw *after* the approval had gone out and been recorded, and the surrounding catch logged
+  it as "could not change approval".
+
+- **The root-token banner was not a rectangle.** Its three rows were built from three unrelated
+  expressions, so the bottom edge overhung by two columns on every first boot, and a token
+  shorter than the title collapsed the box entirely.
+
 - **`read_file` failed on every GitHub project.** The raw-file read went out asking for two
   media types at once. `authHeaders` already sets `Accept: application/vnd.github+json`, and
   `getText` then *added* `application/vnd.github.raw` on top of it — `header()` appends, it does

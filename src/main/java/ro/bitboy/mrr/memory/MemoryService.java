@@ -170,7 +170,7 @@ public class MemoryService {
         if (!findings.isEmpty()) {
             sb.append("\n## Findings\n\n");
             for (Finding f : findings) {
-                sb.append("- [").append(f.severity() == null ? "minor" : f.severity().name().toLowerCase())
+                sb.append("- [").append(f.severity() == null ? "minor" : f.severity().name().toLowerCase(Locale.ROOT))
                         .append("] ").append(f.title() == null ? "" : f.title());
                 if (f.filePath() != null) {
                     sb.append(" (`").append(f.filePath());

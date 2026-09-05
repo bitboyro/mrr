@@ -129,7 +129,7 @@ public record Finding(
         /** Anything unrecognised is a MINOR rather than a dropped finding. */
         public static Severity parse(String raw) {
             if (raw == null) return MINOR;
-            String value = raw.trim().toUpperCase();
+            String value = raw.trim().toUpperCase(java.util.Locale.ROOT);
             for (Severity severity : values()) {
                 if (severity.name().equals(value)) return severity;
             }
