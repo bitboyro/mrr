@@ -94,6 +94,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A stray tool-call-shaped fragment ahead of the verdict could shadow the whole review.** The
+  reviewer's final turn strips every tool, so the model cannot really call one there — but the
+  shape of an attempt can still leak into the text ahead of the real answer, and the fragment
+  is valid JSON entirely on its own. `VerdictParser.extractJson` grabbed the *first* balanced
+  object in the response, so that fragment — not the verdict sitting right after it — was all
+  that ever got read: it parsed cleanly, had neither `summary` nor `findings`, and the review
+  fail-closed with "the model did not return a JSON verdict", which was not what happened.
+  Every balanced top-level object is now collected, and the one actually shaped like a
+  verdict wins; the last candidate is the fallback when none is.
+
+  The first pass at this shared one "looks like a verdict" heuristic — `summary`/
+  `findings` — between `parse` and `parseReply`, which is exactly the wrong shape for the
+  second: a reply prompt carries the original finding as context, so a reply that echoes or
+  quotes it can put a `summary`/`findings`-shaped object ahead of the genuine `{status,
+  reply}` answer, and the shared heuristic handed `parseReply` the wrong one — the same
+  failure this exists to prevent, just for the other caller. Each caller now names the shape
+  it actually wants.
+
+  A ```json fence bypassed all of this a second time: it was checked first and trusted
+  wholesale, so a stray object the model happened to fence — quoted context, an example —
+  still won over a correctly-shaped one sitting in plain text nearby, reached through the one
+  path that skipped `wantedShape` entirely. No special case is needed: the backticks are just
+  characters to a brace-and-quote scan, so a fenced object is found as a candidate the same
+  way a bare one is, and a fence now buys a blob nothing once it is one. Both of these were
+  caught by mrr's own review of this branch, not found ahead of time.
+
+  The stored failure message was not much better once this did happen for a real reason —
+  "the model did not return a JSON verdict" said nothing about what it actually sent back, and
+  reviews.response was not even a click away from the banner that showed it on the MR page.
+  The message now carries a bounded preview of the model's last turn instead of repeating the
+  diagnosis a second time.
+
+- **The forge a project actually uses was shown as "GitLab" regardless.** The MR page's link
+  next to the title, its merge confirmation dialog, the project-level and MR-level failure
+  banners, the overall-thread tooltip, and the commit-diffs loading line all named GitLab
+  unconditionally — wrong for every GitHub and Forgejo project, and, on the librarian's own run
+  failure banner (which posts nothing to any forge), wrong twice over: both the host name and
+  the claim that something was posted at all. The banner's headline is now a prop with a
+  forge-aware default where the page already has the project loaded, and neutral wording
+  ("This run failed.", a plain "Open" link) where fetching the project would cost an extra call
+  just for a label.
+
 - **A finding's history came back in a random order when two events shared a timestamp.** The
   event and the state change it describes are written microseconds apart and did tie on
   `created_at`, and the tiebreak was the event's own id — a random UUID. So the read was a coin
