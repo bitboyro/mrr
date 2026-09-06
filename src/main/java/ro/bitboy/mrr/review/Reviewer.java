@@ -297,10 +297,18 @@ public class Reviewer {
         if (verdict == null || verdict.summary() == null || verdict.summary().isBlank()) {
             // Paid-for output is already on reviews.response. Posting it as prose would look
             // READY and leave the next commit with nothing to resolve.
+            //
+            // The snippet goes on the stored error, not only into the log: "the model did not
+            // return a JSON verdict" was the whole message a person saw, on a review page with
+            // no server-log access and (on the MR page, where the banner also shows) not even
+            // a click away from reviews.response. It said nothing about what the model actually
+            // sent back, which is often the entire answer — a stray tool-call-shaped fragment
+            // ahead of a perfectly good verdict, prose instead of JSON, a refusal.
+            String snippet = preview(result.markdown());
             log.warn("review {} last turn was not a JSON verdict ({} chars): {}",
-                    reviewId, result.markdown().length(), preview(result.markdown()));
-            failClosed(reviewId, FailureKind.OUTPUT, FailureKind.OUTPUT.headline()
-                    + " The model did not return a JSON verdict.");
+                    reviewId, result.markdown().length(), snippet);
+            failClosed(reviewId, FailureKind.OUTPUT,
+                    FailureKind.OUTPUT.headline() + " Its last turn read: " + snippet);
             return;
         }
         verdict = verdict.completePriors(priorOpen);

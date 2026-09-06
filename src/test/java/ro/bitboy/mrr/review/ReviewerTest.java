@@ -471,6 +471,33 @@ class ReviewerTest {
         assertThat(gitlab.posted).isEmpty();
         assertThat(gitlab.inlineAttempts).isEmpty();
         assertThat(memory.upserts).isEqualTo(0);
+        // "The model did not return a JSON verdict" said nothing about what it actually sent
+        // back — on the MR page the banner is all that shows, with reviews.response a click
+        // away. The stored error now carries what the last turn read, not just the diagnosis.
+        assertThat(review.error()).contains(prose);
+    }
+
+    /**
+     * The failure this session was actually chasing, run end to end rather than only at
+     * {@code VerdictParser}. The final turn strips every tool, so the model cannot really call
+     * one, but the shape of an attempt can still leak into the text ahead of the real verdict —
+     * and grabbing the first balanced JSON object used to mean that fragment, not the answer
+     * sitting right after it, was all the review ever read.
+     */
+    @Test
+    void aStrayToolCallShapedFragmentAheadOfTheVerdictStillPostsIt() {
+        model = new RecordingModel(List.of(Result.of(
+                "{\"path\":\"src/harness/cli.py\",\"start_line\":1100,\"end_line\":1210}\n"
+                        + "{\"summary\":\"Looks safe.\",\"findings\":[],\"prior\":[]}",
+                "end_turn")));
+
+        reviewer().run(claim("sha-stray-fragment"));
+
+        Review review = store.findReview(project.id(), 7, "sha-stray-fragment").orElseThrow();
+        assertThat(review.state()).isEqualTo(Review.State.READY);
+        assertThat(review.errorKind()).isNull();
+        assertThat(store.findMrStatus(project.id(), 7).orElseThrow().currentStatus())
+                .isEqualTo(MrStatus.Status.CLEAN);
     }
 
     @Test

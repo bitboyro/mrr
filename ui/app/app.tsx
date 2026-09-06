@@ -408,13 +408,22 @@ function pill(status: string) {
   return <span className={`pill ${cls}`}>{status}</span>;
 }
 
-function FailureBanner({ kind, message }: { kind?: string | null; message?: string | null }) {
+/**
+ * `headline` names what failed and defaults to a claim that holds for every caller that
+ * doesn't override it: something meant to reach the forge did not. It used to say "to
+ * GitLab" unconditionally — wrong on a GitHub or Forgejo project, and wrong in a different
+ * way for the librarian's run failure, which posts nothing anywhere and was shown the same
+ * sentence regardless.
+ */
+function FailureBanner({ kind, message, headline }: {
+  kind?: string | null; message?: string | null; headline?: string;
+}) {
   if (!kind && !message) return null;
   return (
     <div className="banner">
       <div className="row">
         {kind && pill(kind)}
-        <strong>Nothing was posted to GitLab.</strong>
+        <strong>{headline ?? "Nothing was posted."}</strong>
       </div>
       {message && <p>{message}</p>}
     </div>
@@ -1200,7 +1209,8 @@ function ProjectHome({ id }: { id: string }) {
         {" · "}turns {project.agentMaxTurns}
         {project.agentTools.length ? ` · tools ${project.agentTools.join(",")}` : ""}
       </p>
-      <FailureBanner kind={project.lastErrorKind} message={project.lastError} />
+      <FailureBanner kind={project.lastErrorKind} message={project.lastError}
+        headline={`Nothing was posted to ${FORGE_NAMES[project.forge]}.`} />
       <ForgeSupport projectId={id} />
       <OperatorSupport projectId={id} />
       <div className="tabs">
@@ -1665,7 +1675,7 @@ function MemoryPanel({ project, onRefresh }: { project: Project; onRefresh: () =
             <span className="muted">{current.agentTurns} turn(s)</span>
             {current.finishedAt && <span className="muted">{current.finishedAt}</span>}
           </div>
-          {current.error && <FailureBanner message={current.error} />}
+          {current.error && <FailureBanner message={current.error} headline="This run failed." />}
           <details className="fold">
             <summary>Run log</summary>
             {current.prompt && (
@@ -2040,7 +2050,8 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
 
   async function merge() {
     if (!canOperate || closed) return;
-    if (!window.confirm(`Merge !${iid} in GitLab as the operator PAT?`)) return;
+    const forgeName = project ? FORGE_NAMES[project.forge] : "the forge";
+    if (!window.confirm(`Merge !${iid} on ${forgeName} as the operator PAT?`)) return;
     setMerging(true);
     setActionErr(null);
     try {
@@ -2068,7 +2079,11 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
         <h2 style={{ margin: 0 }}>!{iid} {title}</h2>
         {pill(cycle.status.currentStatus)}
         {cycle.status.mrrApproved && <span className="pill ok">mrr approved</span>}
-        {snapshot?.mr?.url && <a href={snapshot.mr.url} target="_blank" rel="noreferrer">GitLab</a>}
+        {snapshot?.mr?.url && (
+          <a href={snapshot.mr.url} target="_blank" rel="noreferrer">
+            {project ? FORGE_NAMES[project.forge] : "Open"}
+          </a>
+        )}
         {!closed && (
           <button onClick={reviewNow}
             title="Review the current commit. Free if it has already been reviewed.">
@@ -2102,6 +2117,7 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
         <FailureBanner
           kind={cycle.reviews.find((r) => r.state === "FAILED")?.errorKind}
           message={cycle.reviews.find((r) => r.state === "FAILED")?.error}
+          headline={`Nothing was posted to ${project ? FORGE_NAMES[project.forge] : "the forge"}.`}
         />
       )}
       <div className="split">
@@ -2649,7 +2665,7 @@ function MrThread({ projectId, iid, onPosted }: {
     <details className="fold">
       <summary>Overall thread</summary>
       <p className="muted">
-        Posts a new GitLab discussion as the operator PAT — not a finding reply, and not the
+        Posts a new discussion as the operator PAT — not a finding reply, and not the
         review bot.
       </p>
       <form onSubmit={post}>
@@ -2702,7 +2718,7 @@ function CommitDiffs({ projectId, iid, findings, onPickLine }: {
         line show under it{onPickLine ? ", and clicking a line files one there" : ""}.
       </p>
       {err && <p className="err">{err}</p>}
-      {commits === null && !err && <p className="muted">Open to load commits from GitLab…</p>}
+      {commits === null && !err && <p className="muted">Open to load commits…</p>}
       {commits && commits.length === 0 && <p className="muted">No commits.</p>}
       {commits?.map((c) => (
         <div className="card" key={c.sha}>
@@ -2981,7 +2997,7 @@ function ReviewDetail({ id }: { id: string }) {
       </div>
       <p className="muted">
         !{review.mrIid} · {review.headSha.slice(0, 8)} · {review.createdAt}
-        {review.mr?.url && <> · <a href={review.mr.url} target="_blank" rel="noreferrer">GitLab</a></>}
+        {review.mr?.url && <> · <a href={review.mr.url} target="_blank" rel="noreferrer">Open</a></>}
       </p>
       <GitMeta mr={review.mr} sha={review.headSha} />
       {review.error && <FailureBanner kind={review.errorKind} message={review.error} />}

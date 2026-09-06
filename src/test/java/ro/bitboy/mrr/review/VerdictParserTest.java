@@ -232,4 +232,147 @@ class VerdictParserTest {
             assertThat(f.line()).isNull();
         });
     }
+
+    /**
+     * The failure this session was actually chasing. The final turn strips every tool, so the
+     * model cannot really call one — but the shape of an attempt can still leak into the text
+     * ahead of the answer, and the fragment is valid JSON entirely on its own. Grabbing the
+     * first balanced object used to mean that fragment was all {@code parse} ever read: it
+     * parsed cleanly, had neither {@code summary} nor {@code findings}, and the reviewer
+     * fail-closed with "the model did not return a JSON verdict" — a real answer sitting
+     * unread right after it.
+     */
+    @Test
+    void aStrayToolCallShapedFragmentAheadOfTheVerdictDoesNotShadowIt() {
+        ReviewModel.Verdict v = parser.parse("""
+                {"path":"src/harness/cli.py","start_line":1100,"end_line":1210}
+                { "summary": "Looks fine.", "findings": [], "prior": [] }
+                """);
+
+        assertThat(v).isNotNull();
+        assertThat(v.summary()).isEqualTo("Looks fine.");
+        assertThat(v.findings()).isEmpty();
+    }
+
+    /** Garbled text between two candidates is exactly the kind of noise this has to shrug off. */
+    @Test
+    void garbageBetweenTwoCandidatesDoesNotStopTheRealOneBeingFound() {
+        ReviewModel.Verdict v = parser.parse(
+                "{\"path\":\"A.java\",\"line\":1}\nрыстә\n"
+                        + "{\"summary\":\"ok\",\"findings\":[]}");
+
+        assertThat(v).isNotNull();
+        assertThat(v.summary()).isEqualTo("ok");
+    }
+
+    /**
+     * Three candidates rather than two, and the verdict-shaped one is in the middle rather
+     * than last — the shape check has to be doing the choosing, not just "prefer the end".
+     */
+    @Test
+    void theVerdictShapedCandidateWinsEvenWhenItIsNotTheLastOne() {
+        ReviewModel.Verdict v = parser.parse("""
+                {"path":"A.java","line":1}
+                {"summary":"ok","findings":[]}
+                {"unrelated":"trailing remark, also happens to be JSON"}
+                """);
+
+        assertThat(v).isNotNull();
+        assertThat(v.summary()).isEqualTo("ok");
+    }
+
+    /** With no verdict-shaped candidate at all, the last one is still the better guess. */
+    @Test
+    void fallsBackToTheLastCandidateWhenNoneIsVerdictShaped() {
+        assertThat(parser.parseReply(
+                "{\"path\":\"A.java\",\"line\":1}\n{\"status\":\"addressed\",\"reply\":\"Fixed.\"}"))
+                .satisfies(r -> {
+                    assertThat(r.addressed()).isTrue();
+                    assertThat(r.reply()).isEqualTo("Fixed.");
+                });
+    }
+
+    /**
+     * mrr's own review of this branch caught it: {@code parseReply} shared {@code parse}'s
+     * "prefer the summary/findings-shaped candidate" rule, which is exactly the wrong shape
+     * for a reply. A reply prompt carries the original finding as context, so an earlier
+     * candidate that happens to look like a full verdict — echoed or quoted context, not the
+     * model's answer — used to win over the genuine {@code {status, reply}} object sitting
+     * later, and {@code parseReply} would then read the wrong candidate, fail its own
+     * {@code status}/{@code reply} check, and silently fall back to treating the whole thing
+     * as unaddressed prose.
+     */
+    @Test
+    void aVerdictShapedCandidateAheadOfARealReplyDoesNotShadowIt() {
+        VerdictParser.ReplyVerdict r = parser.parseReply("""
+                Your finding was:
+                {"summary":"leak","findings":[{"file":"A.java","body":"close it"}]}
+                {"status":"addressed","reply":"Fixed in HEAD."}
+                """);
+
+        assertThat(r.addressed()).isTrue();
+        assertThat(r.reply()).isEqualTo("Fixed in HEAD.");
+    }
+
+    /** The mirror image: a reply-shaped candidate ahead of a review must not shadow it either. */
+    @Test
+    void aReplyShapedCandidateAheadOfARealVerdictDoesNotShadowIt() {
+        ReviewModel.Verdict v = parser.parse("""
+                {"status":"addressed","reply":"unrelated echo"}
+                {"summary":"ok","findings":[]}
+                """);
+
+        assertThat(v).isNotNull();
+        assertThat(v.summary()).isEqualTo("ok");
+    }
+
+    /**
+     * mrr's own review caught this one too: the fenced-block path used to be checked before
+     * candidates were even collected, so a stray object the model happened to wrap in a
+     * ```json fence — quoted context, an example — was trusted wholesale and returned before
+     * {@code wantedShape} ever got a say, wrong shape or not. A fence buys a blob nothing now;
+     * it is a candidate exactly like a bare one.
+     */
+    @Test
+    void aFencedStrayObjectOfTheWrongShapeDoesNotShadowARealReplyEither() {
+        VerdictParser.ReplyVerdict r = parser.parseReply("""
+                Your finding was:
+                ```json
+                {"summary":"leak","findings":[{"file":"A.java","body":"close it"}]}
+                ```
+                {"status":"addressed","reply":"Fixed in HEAD."}
+                """);
+
+        assertThat(r.addressed()).isTrue();
+        assertThat(r.reply()).isEqualTo("Fixed in HEAD.");
+    }
+
+    /** The mirror image, fenced: a fenced reply-shaped object must not shadow a real verdict. */
+    @Test
+    void aFencedReplyShapedObjectDoesNotShadowARealVerdictEither() {
+        ReviewModel.Verdict v = parser.parse("""
+                ```json
+                {"status":"addressed","reply":"unrelated echo"}
+                ```
+                {"summary":"ok","findings":[]}
+                """);
+
+        assertThat(v).isNotNull();
+        assertThat(v.summary()).isEqualTo("ok");
+    }
+
+    /** The plain fenced case still works with no special-casing behind it any more. */
+    @Test
+    void aFencedVerdictThatIsTheOnlyCandidateStillParses() {
+        ReviewModel.Verdict v = parser.parse("""
+                Here is my review:
+
+                ```json
+                {"summary":"Looks fine.","findings":[],"prior":[]}
+                ```
+                """);
+
+        assertThat(v).isNotNull();
+        assertThat(v.summary()).isEqualTo("Looks fine.");
+    }
 }
