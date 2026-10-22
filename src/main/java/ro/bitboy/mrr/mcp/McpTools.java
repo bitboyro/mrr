@@ -17,6 +17,7 @@ import ro.bitboy.mrr.model.Finding;
 import ro.bitboy.mrr.model.MrStatus;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Review;
+import ro.bitboy.mrr.review.AgentReviews;
 import ro.bitboy.mrr.review.Findings;
 import ro.bitboy.mrr.review.Reviewer;
 import ro.bitboy.mrr.review.Trigger;
@@ -47,15 +48,17 @@ public class McpTools {
     private final MemoryService memory;
     private final Findings findings;
     private final Trigger trigger;
+    private final AgentReviews agentReviews;
 
     public McpTools(Store store, ForgeFactory forges, Reviewer reviewer, MemoryService memory,
-                    Findings findings, Trigger trigger) {
+                    Findings findings, Trigger trigger, AgentReviews agentReviews) {
         this.store = store;
         this.forges = forges;
         this.reviewer = reviewer;
         this.memory = memory;
         this.findings = findings;
         this.trigger = trigger;
+        this.agentReviews = agentReviews;
     }
 
     @Tool(name = "list_projects",
@@ -143,7 +146,7 @@ public class McpTools {
     public Review rerunReview(
             @ToolParam(description = "The review id") String reviewId,
             ToolContext toolContext) {
-        Review review = visibleReview(caller(toolContext), reviewId);
+        Review review = visibleReview(interactiveCaller(toolContext), reviewId);
         if (!review.state().isTerminal()) {
             throw ApiException.conflict("Review is already running.");
         }
@@ -165,8 +168,56 @@ public class McpTools {
             @ToolParam(description = "The mrr project id, from list_projects") String projectId,
             @ToolParam(description = "The merge-request iid") long mrIid,
             ToolContext toolContext) {
-        Project project = store.requireVisible(caller(toolContext), projectId);
+        Project project = store.requireVisible(interactiveCaller(toolContext), projectId);
         return trigger.now(project, mrIid).review().summary();
+    }
+
+    @Tool(name = "get_review_policy", description = "Read the project's connected agent account and automatic review policy: ALL or ASSIGNED. Auto-review must also be enabled. Account permissions are managed on the forge.")
+    public ro.bitboy.mrr.model.ReviewPolicy getReviewPolicy(
+            @ToolParam(description = "The mrr project id") String projectId, ToolContext toolContext) {
+        store.requireVisible(caller(toolContext), projectId);
+        return store.reviewPolicy(projectId);
+    }
+
+    @Tool(name = "get_review_packet",
+            description = "Fetch what you need to review a merge request yourself: the live "
+                    + "request, the diff, the findings still open, and the project's review "
+                    + "instructions. Requires an agent key minted for this project — an ordinary "
+                    + "token is refused. diffTruncated is true when the diff was clipped at the "
+                    + "instance's max diff size. Use submit_review to post what you write; mrr "
+                    + "posts it on the forge. You do not need a GitLab token for that.")
+    public AgentReviews.ReviewPacket getReviewPacket(
+            @ToolParam(description = "The mrr project id, from list_projects") String projectId,
+            @ToolParam(description = "The merge-request iid") long mrIid,
+            ToolContext toolContext) {
+        return agentReviews.packet(caller(toolContext), projectId, mrIid);
+    }
+
+    @Tool(name = "submit_review",
+            description = "Post a review you wrote. mrr opens one thread per finding and a "
+                    + "separate summary on the forge, and records them in its ledger. This does "
+                    + "not replace a model review of the same commit — it is appended. It does "
+                    + "not edit the model's overview. Requires an agent key for this project. "
+                    + "submissionId is an idempotency key: sending the same one again returns "
+                    + "the review already stored and posts nothing more. prior is optional; "
+                    + "omit it to leave existing findings open. Each prior item is findingId, "
+                    + "addressed, and an optional note. Each finding has title, and optionally "
+                    + "body, file, line, and severity (BLOCKER, MAJOR, MINOR).")
+    public Review submitReview(
+            @ToolParam(description = "The mrr project id") String projectId,
+            @ToolParam(description = "The merge-request iid") long mrIid,
+            @ToolParam(description = "Idempotency key, 1–120 characters: letters, digits, '.', '_', ':', '-'")
+            String submissionId,
+            @ToolParam(description = "The headSha from get_review_packet; rejected if the commit changed") String headSha,
+            @ToolParam(description = "The review summary, in Markdown") String summary,
+            @ToolParam(description = "Findings to open. Each needs a title.", required = false)
+            java.util.List<AgentReviews.FindingDraft> findings,
+            @ToolParam(description = "Judgements on findings already open. Omit to close nothing.",
+                    required = false)
+            java.util.List<AgentReviews.PriorDraft> prior,
+            ToolContext toolContext) {
+        return agentReviews.submit(caller(toolContext), projectId, mrIid,
+                new AgentReviews.Submission(submissionId, summary, findings, prior, headSha));
     }
 
     @Tool(name = "create_finding",
@@ -187,7 +238,7 @@ public class McpTools {
             @ToolParam(description = "BLOCKER, MAJOR or MINOR. Defaults to MAJOR.",
                     required = false) String severity,
             ToolContext toolContext) {
-        Principal caller = caller(toolContext);
+        Principal caller = interactiveCaller(toolContext);
         Project project = store.requireVisible(caller, projectId);
         return findings.file(Findings.Actor.of(caller), project, mrIid, new Findings.Draft(
                 filePath, line, severity == null ? null : Finding.Severity.parse(severity),
@@ -208,7 +259,7 @@ public class McpTools {
             @ToolParam(description = "Why — kept on the finding's history", required = false)
             String note,
             ToolContext toolContext) {
-        Principal caller = caller(toolContext);
+        Principal caller = interactiveCaller(toolContext);
         Finding finding = store.findFinding(findingId)
                 .orElseThrow(() -> ApiException.notFound("finding"));
         Project project = store.requireVisible(caller, finding.projectId());
@@ -237,7 +288,7 @@ public class McpTools {
             @ToolParam(description = "The new comment body, in the forge's flavour of Markdown")
             String markdown,
             ToolContext toolContext) {
-        Review review = visibleReview(caller(toolContext), reviewId);
+        Review review = visibleReview(interactiveCaller(toolContext), reviewId);
         if (review.noteId() == null || review.discussionId() == null) {
             throw ApiException.conflict("This review has no posted comment to update.");
         }
@@ -322,6 +373,14 @@ public class McpTools {
         return store.resolveToken(token).orElseThrow(() -> new ApiException(
                 HttpStatus.UNAUTHORIZED,
                 "invalid_token", "The presented API token is not valid."));
+    }
+
+    private Principal interactiveCaller(ToolContext context) {
+        Principal caller = caller(context);
+        if (caller.isAgentKey()) {
+            throw ApiException.forbidden("An agent key may submit an agent review, but cannot manage reviews or human decisions.");
+        }
+        return caller;
     }
 
     private Review visibleReview(Principal caller, String reviewId) {

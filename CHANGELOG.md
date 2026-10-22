@@ -6,7 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Serve `/health` through Actuator as a liveness-only endpoint, with database and disk probes disabled.
+
+- Reject malformed secret keys instead of silently dropping non-base64 characters; wrapped key files remain supported.
+
 ### Added
+
+- External review packets and submissions over REST/MCP, authenticated by project-scoped agent
+  keys. Submitted reviews keep their own findings and summary beside model reviews, deduplicate
+  by submission ID, and reject stale head commits. Scoped keys do not inherit admin powers.
+- A connected forge account and per-project automatic review policy: review every request, or
+  review only while that account is an assignee or requested reviewer. Webhooks and catch-up
+  scans apply the same policy. The UI verifies the account against its review token and stores
+  an optional contact email; the forge manages the account's mailbox and permissions.
+- A separate auto-review switch that leaves note, resolve, close and merge handling enabled.
 
 - **Apache-2.0 license.** `LICENSE`, `NOTICE`, and `CONTRIBUTING.md` added ahead of publishing
   the repository as a public GitHub push mirror of the canonical GitLab repo. `.gitleaks.toml`

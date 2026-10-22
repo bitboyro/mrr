@@ -56,7 +56,7 @@ final class ForgejoWebhook {
         return switch (action) {
             case "opened" -> ForgeEvent.Action.OPENED;
             case "reopened" -> ForgeEvent.Action.REOPENED;
-            case "synchronized", "synchronize", "edited" -> ForgeEvent.Action.UPDATED;
+            case "synchronized", "synchronize", "edited", "assigned", "unassigned", "review_requested", "review_request_removed" -> ForgeEvent.Action.UPDATED;
             // Forgejo has no merge action: a merge is a close that also set the merged flag.
             case "closed" -> pr.path("merged").asBoolean(false)
                     ? ForgeEvent.Action.MERGED : ForgeEvent.Action.CLOSED;

@@ -59,6 +59,36 @@ class ProjectControllerTest {
     }
 
     @Test
+    void connectsTheTokenAccountAndPersistsAssignmentPolicyAcrossProjectUpdates() {
+        String id = TestStores.persist(store, TestStores.project(alice.userId(), "policy", "hook")).id();
+        var rule = new ro.bitboy.mrr.model.ReviewPolicy(
+                ro.bitboy.mrr.model.ReviewPolicy.Mode.ASSIGNED, null, "reviews@example.com");
+        var saved = projects.reviewPolicy(alice, id, rule);
+        assertThat(saved.username()).isEqualTo("mrr-bot");
+        assertThat(projects.reviewPolicy(alice, id)).isEqualTo(saved);
+        store.updateProject(store.findProject(id).orElseThrow().withAutoReview(false));
+        assertThat(store.reviewPolicy(id)).isEqualTo(saved);
+    }
+
+    @Test
+    void refusesAnAccountThatDoesNotOwnTheReviewToken() {
+        String id = TestStores.persist(store, TestStores.project(alice.userId(), "policy", "hook")).id();
+        assertThatThrownBy(() -> projects.reviewPolicy(alice, id,
+                new ro.bitboy.mrr.model.ReviewPolicy(ro.bitboy.mrr.model.ReviewPolicy.Mode.ASSIGNED,
+                        "somebody-else", null)))
+                .isInstanceOf(ApiException.class).hasMessageContaining("must match");
+        assertThat(store.reviewPolicy(id).mode()).isEqualTo(ro.bitboy.mrr.model.ReviewPolicy.Mode.ALL);
+    }
+
+    @Test
+    void anAgentKeyCannotRewriteItsOwnReviewPolicy() {
+        String id = TestStores.persist(store, TestStores.project(alice.userId(), "policy", "hook")).id();
+        Principal key = store.resolveToken(store.createAgentKey(alice.userId(), "agent", List.of(id))).orElseThrow();
+        assertThatThrownBy(() -> projects.reviewPolicy(key, id, ro.bitboy.mrr.model.ReviewPolicy.all()))
+                .isInstanceOf(ApiException.class).hasMessageContaining("cannot change");
+    }
+
+    @Test
     void gitlabUrlIsCopiedButTheModelFollowsItsCatalogEntry() {
         settings.save(Map.of(RuntimeSettings.BASE_URL, "https://mrr.example.com/"));
         ForgeInstance gitlab = store.createForgeInstance(admin, true, "gitlab.com", ForgeKind.GITLAB, "https://gitlab.com/");
@@ -140,7 +170,7 @@ class ProjectControllerTest {
 
         ProjectController.Upsert noEntry = new ProjectController.Upsert(
                 "calc", true, null, null, null, "https://gitlab.com", "group/calc", "glpat-x",
-                null, null, null, null, false, 1, List.of(), false, false, false);
+                null, null, null, null, false, 1, List.of(), false, false, null, false);
         assertThatThrownBy(() -> projects.create(alice, noEntry))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).getMessage())
@@ -252,6 +282,6 @@ class ProjectControllerTest {
         return new ProjectController.Upsert(
                 "calc", true, forge, forgeInstanceId, null, gitlabUrl, repoId, "glpat-x", null,
                 null, llmProviderId == null ? defaultLlm.id() : llmProviderId,
-                null, false, 1, List.of(), false, false, false);
+                null, false, 1, List.of(), false, false, null, false);
     }
 }

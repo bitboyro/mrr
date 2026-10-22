@@ -8,7 +8,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
-import org.springframework.web.client.RestClient;
+import ro.bitboy.mrr.web.TestRestClients;
 import ro.bitboy.mrr.forge.AnchorRef;
 import ro.bitboy.mrr.forge.Discussion;
 import ro.bitboy.mrr.forge.DiscussionView;
@@ -71,7 +71,7 @@ class GitHubForgeTest {
             }
         });
         host.start();
-        forge = new GitHubForge(RestClient.builder());
+        forge = new GitHubForge(TestRestClients.builder());
     }
 
     @AfterEach

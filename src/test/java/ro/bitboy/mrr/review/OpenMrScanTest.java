@@ -47,6 +47,18 @@ class OpenMrScanTest {
     }
 
     @Test
+    void catchesAssignmentsMissedByWebhooksWithoutReviewingUnassignedRequests() {
+        store.saveReviewPolicy(project.id(), new ro.bitboy.mrr.model.ReviewPolicy(
+                ro.bitboy.mrr.model.ReviewPolicy.Mode.ASSIGNED, "mrr-bot", null));
+        gitlab.openMrs = List.of(openMr(7, "sha-assignment"));
+        assertThat(scan.scan(project).queued()).isZero();
+        gitlab.assignedUsers.add("mrr-bot");
+        assertThat(scan.scan(project).queued()).isEqualTo(1);
+        store.markReady(store.findReview(project.id(), 7, "sha-assignment").orElseThrow().id(), "discussion", "note");
+        assertThat(scan.scan(project).queued()).isZero();
+    }
+
+    @Test
     void queuesANewHeadSha() {
         gitlab.openMrs = List.of(openMr(7, "sha-new"));
 
@@ -55,6 +67,19 @@ class OpenMrScanTest {
         assertThat(result.queued()).isEqualTo(1);
         Review review = store.findReview(project.id(), 7, "sha-new").orElseThrow();
         assertThat(reviewer.submitted).containsExactly(review.id());
+    }
+
+    @Test
+    void autoReviewOffDoesNotQueue() {
+        store.updateProject(project.withAutoReview(false));
+        project = store.findProject(project.id()).orElseThrow();
+        gitlab.openMrs = List.of(openMr(7, "sha-off"));
+
+        OpenMrScan.ScanResult result = scan.scan(project);
+
+        assertThat(result.queued()).isEqualTo(0);
+        assertThat(reviewer.submitted).isEmpty();
+        assertThat(store.findReview(project.id(), 7, "sha-off")).isEmpty();
     }
 
     @Test

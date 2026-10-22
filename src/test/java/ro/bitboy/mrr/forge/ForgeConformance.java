@@ -9,6 +9,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
 import org.springframework.web.client.RestClient;
+import ro.bitboy.mrr.web.TestRestClients;
 import ro.bitboy.mrr.model.ForgeKind;
 import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.Project;
@@ -75,7 +76,7 @@ abstract class ForgeConformance {
             }
         });
         host.start();
-        forge = adapter(RestClient.builder());
+        forge = adapter(TestRestClients.builder());
         project = project();
     }
 
@@ -102,10 +103,46 @@ abstract class ForgeConformance {
     }
 
     private ForgeKind adapterKind() {
-        return adapter(RestClient.builder()).kind();
+        return adapter(TestRestClients.builder()).kind();
     }
 
     // ── the questions every host has to answer ───────────────────────────────────────
+
+    @Test
+    void assignmentUsesTheLiveAssigneeUsername() {
+        assignmentResponse("assignees");
+        assertThat(forge.isAssignedTo(project, 7, "MRR-BOT")).isTrue();
+        assertThat(forge.isAssignedTo(project, 7, "somebody-else")).isFalse();
+    }
+
+    @Test
+    void assignmentUsesRequestedReviewersToo() {
+        assignmentResponse(adapterKind() == ForgeKind.GITLAB ? "reviewers" : "requested_reviewers");
+        assertThat(forge.isAssignedTo(project, 7, "mrr-bot")).isTrue();
+        assertThat(forge.isAssignedTo(project, 7, "wrong-user")).isFalse();
+    }
+
+    @Test
+    void assignmentNeverMatchesADisplayName() {
+        String field = adapterKind() == ForgeKind.GITLAB ? "username" : "login";
+        String json = "{\"assignees\":[{\"" + field + "\":\"someone-else\",\"name\":\"mrr-bot\"}]}";
+        host.setDispatcher(new Dispatcher() {
+            @Override public MockResponse dispatch(RecordedRequest request) {
+                return new MockResponse().setHeader("Content-Type", "application/json").setBody(json);
+            }
+        });
+        assertThat(forge.isAssignedTo(project, 7, "mrr-bot")).isFalse();
+    }
+
+    private void assignmentResponse(String collection) {
+        String field = adapterKind() == ForgeKind.GITLAB ? "username" : "login";
+        String json = "{\"" + collection + "\":[{\"" + field + "\":\"mrr-bot\"}]}";
+        host.setDispatcher(new Dispatcher() {
+            @Override public MockResponse dispatch(RecordedRequest request) {
+                return new MockResponse().setHeader("Content-Type", "application/json").setBody(json);
+            }
+        });
+    }
 
     @Test
     void theDiffComesBackAsPerFilePatchesInMrrsOwnShape() {

@@ -20,10 +20,16 @@
     <description>AI code review for GitLab merge requests</description>
 
     <!--
-      Deliberately dependency-light: web, jdbc, sqlite, the MCP starter, springdoc, and the
-      Anthropic SDK. No Spring Security (one TokenFilter), no JPA (JdbcClient + schema.sql),
-      no WebFlux (RestClient), no Actuator (a two-line /health). mrr must build for someone
-      who has never heard of the bitboy platform, so it resolves from Maven Central only.
+      Deliberately dependency-light: web, jdbc, sqlite, actuator, the MCP starter, springdoc,
+      and the Anthropic SDK. No Spring Security (one TokenFilter), no JPA (JdbcClient +
+      schema.sql), no WebFlux (RestClient). mrr must build for someone who has never heard of
+      the bitboy platform, so it resolves from Maven Central only.
+
+      Actuator earns its place for /health: the endpoint is remapped to the bare path the
+      container healthcheck and start-instance.sh already call, DataSource probing is off so it
+      stays a pure liveness check, and only `health` is exposed. That is a starter for one
+      endpoint, but it is the starter the Spring ecosystem points at, and the hand-rolled
+      controller it replaces was drifting toward re-implementing it.
 
       anthropic-java is the one dependency past the original five-dep budget. Hand-rolling
       the Messages API wire format is a maintenance liability on a surface that moves — the
@@ -97,6 +103,10 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
         <dependency>
             <groupId>org.xerial</groupId>

@@ -61,6 +61,34 @@ class WebhookControllerTest {
     }
 
     @Test
+    void assignmentPolicyWaitsForAssignmentThenReviewsAndDeduplicatesTheSameCommit() {
+        store.saveReviewPolicy(project.id(), new ro.bitboy.mrr.model.ReviewPolicy(
+                ro.bitboy.mrr.model.ReviewPolicy.Mode.ASSIGNED, "mrr-bot", null));
+        webhooks.receive("gitlab", project.id(), headers(SECRET), mr("open", "sha-assigned"));
+        assertThat(reviewer.submitted).isEmpty();
+        assertThat(store.findReview(project.id(), 42, "sha-assigned")).isEmpty();
+        gitlab.assignedUsers.add("mrr-bot");
+        webhooks.receive("gitlab", project.id(), headers(SECRET), mr("update", "sha-assigned"));
+        webhooks.receive("gitlab", project.id(), headers(SECRET), mr("update", "sha-assigned"));
+        assertThat(reviewer.submitted).hasSize(1);
+        webhooks.receive("gitlab", project.id(), headers(SECRET), mr("update", "sha-next"));
+        assertThat(reviewer.submitted).hasSize(2);
+        gitlab.assignedUsers.clear();
+        webhooks.receive("gitlab", project.id(), headers(SECRET), mr("update", "sha-unassigned"));
+        assertThat(reviewer.submitted).hasSize(2);
+    }
+
+    @Test
+    void aRotatedTokenForAnotherAccountCannotTriggerAssignmentReviews() {
+        store.saveReviewPolicy(project.id(), new ro.bitboy.mrr.model.ReviewPolicy(
+                ro.bitboy.mrr.model.ReviewPolicy.Mode.ASSIGNED, "old-agent", null));
+        gitlab.assignedUsers.add("old-agent");
+        assertThatThrownBy(() -> webhooks.receive("gitlab", project.id(), headers(SECRET), mr("open", "sha-mismatch")))
+                .isInstanceOf(ApiException.class).hasMessageContaining("no longer identifies");
+        assertThat(reviewer.submitted).isEmpty();
+    }
+
+    @Test
     void rejectsABadWebhookToken() {
         ResponseEntity<?> response = webhooks.receive("gitlab", project.id(), headers("wrong"), mr("open", "sha-1"));
 
@@ -78,6 +106,23 @@ class WebhookControllerTest {
         assertThat(reviewer.submitted).containsExactly(review.id());
         assertThat(store.findMrStatus(project.id(), 42).orElseThrow().currentStatus())
                 .isEqualTo(MrStatus.Status.REVIEWING);
+    }
+
+    @Test
+    void autoReviewOffSkipsTheModelAndStillAcceptsANote() {
+        store.updateProject(project.withAutoReview(false));
+        project = store.findProject(project.id()).orElseThrow();
+
+        ResponseEntity<?> skipped = webhooks.receive("gitlab", project.id(), headers(SECRET), mr("open", "sha-off"));
+
+        assertThat(skipped.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(skipped.getBody()).extracting("reason").isEqualTo("auto_review_off");
+        assertThat(reviewer.submitted).isEmpty();
+        assertThat(store.findReview(project.id(), 42, "sha-off")).isEmpty();
+
+        ResponseEntity<?> note = webhooks.receive("gitlab", project.id(), headers(SECRET), note(false));
+        assertThat(note.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(note.getBody()).extracting("reason").isEqualTo("note_on_a_thread_mrr_does_not_own");
     }
 
     @Test

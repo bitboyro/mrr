@@ -214,12 +214,18 @@ public class OpenMrScan implements ApplicationRunner {
     }
 
     private int queueIfNew(Project project, MergeRequest mr) {
+        if (!project.autoReview()) {
+            return 0;
+        }
         if (project.skipDrafts() && mr.draft()) {
             log.info("scan skip {}!{} — draft", project.name(), mr.iid());
             return 0;
         }
         if (mr.sha() == null || mr.sha().isBlank()) {
             log.warn("scan skip {}!{} — the host listed no head SHA", project.name(), mr.iid());
+            return 0;
+        }
+        if (!store.reviewPolicy(project.id()).permits(forges.forProject(project), project, mr.iid())) {
             return 0;
         }
         MergeRequestInfo info = new MergeRequestInfo(

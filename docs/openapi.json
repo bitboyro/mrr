@@ -27,6 +27,38 @@
         },
         "type": "object"
       },
+      "AgentKey": {
+        "description": "A freshly minted agent key. The only time the secret is readable.",
+        "properties": {
+          "name": {
+            "description": "The label given at creation.",
+            "type": "string"
+          },
+          "projectIds": {
+            "description": "Projects this key may act on.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "token": {
+            "description": "The secret. Store it now \u2014 it cannot be retrieved again.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "AgentKeyName": {
+        "description": "Label for a new agent key. Omit for \"agent\".",
+        "properties": {
+          "name": {
+            "description": "Label to recognise the key by later.",
+            "example": "cursor",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "AgentSkill": {
         "description": "A named skill. Enabled ones that match the MR source branch are concatenated into the system prompt.",
         "properties": {
@@ -118,6 +150,13 @@
             "description": "Label to recognise it by later. Defaults to \"token\".",
             "example": "ci",
             "type": "string"
+          },
+          "projectIds": {
+            "description": "When set, the token is an agent key and may act only on these projects. The user it is minted for must be able to see each one. Omit for an ordinary token, which cannot submit an agent review.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "userId": {
             "description": "Whose token this is. Omit to mint one for yourself.",
@@ -410,6 +449,27 @@
           "title": {
             "description": "One-line statement of the problem.",
             "example": "Off-by-one overruns the array on every row",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "FindingDraft": {
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "severity": {
+            "type": "string"
+          },
+          "title": {
             "type": "string"
           }
         },
@@ -1207,6 +1267,33 @@
         },
         "type": "object"
       },
+      "OpenFinding": {
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "filePath": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "line": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "severity": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "OperatorReport": {
         "description": "What a project's operator token is and what it unlocks. Checked when the project page loads.",
         "properties": {
@@ -1290,8 +1377,17 @@
           "admin": {
             "type": "boolean"
           },
+          "agentKey": {
+            "type": "boolean"
+          },
           "name": {
             "type": "string"
+          },
+          "projectIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "role": {
             "enum": [
@@ -1300,7 +1396,27 @@
             ],
             "type": "string"
           },
+          "tokenId": {
+            "type": "string"
+          },
+          "tokenName": {
+            "type": "string"
+          },
           "userId": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "PriorDraft": {
+        "properties": {
+          "addressed": {
+            "type": "boolean"
+          },
+          "findingId": {
+            "type": "string"
+          },
+          "note": {
             "type": "string"
           }
         },
@@ -1323,6 +1439,10 @@
           },
           "autoApprove": {
             "description": "When true, mrr Approves the GitLab MR after a review that leaves zero open findings, and Unapproves if a later commit reintroduces one. The PAT must be allowed to approve. Default false.",
+            "type": "boolean"
+          },
+          "autoReview": {
+            "description": "When true (the default), a webhook or the periodic scan asks the model to review. When false, those paths leave the request alone and an agent key can submit the review instead. Notes, resolves, and merges are still handled either way.",
             "type": "boolean"
           },
           "createdAt": {
@@ -1624,7 +1744,7 @@
         "type": "object"
       },
       "Review": {
-        "description": "One review of one commit on one merge request.\n\nKeyed on `(projectId, mrIid, headSha)` \u2014 that triple is what makes redelivered webhooks free. The `mr` block is a snapshot taken when the review ran, not a live view of the merge request.",
+        "description": "One review of one commit on one merge request.\n\nA model review is keyed on `(projectId, mrIid, headSha)` \u2014 that triple is what makes redelivered webhooks free. An agent submission does not occupy it: `source` is AGENT, `submissionId` is the caller's idempotency key, and `headSha` is still the commit that was reviewed. The `mr` block is a snapshot taken when the review ran, not a live view of the merge request.",
         "properties": {
           "agentTurns": {
             "description": "How many model turns actually ran. 0 until the agent starts. Kept on list responses.",
@@ -1700,6 +1820,14 @@
             "description": "The review the model produced. Null in list responses. May be set even on a FAILED review \u2014 the model succeeded and posting did not.",
             "type": "string"
           },
+          "source": {
+            "description": "MODEL \u2014 mrr's own reviewer. AGENT \u2014 submitted through an agent key and posted without calling the model.",
+            "enum": [
+              "MODEL",
+              "AGENT"
+            ],
+            "type": "string"
+          },
           "state": {
             "description": "PENDING \u2014 claimed, queued.\nPROCESSING \u2014 diff fetched, model running.\nREADY \u2014 reviewed and posted. Terminal.\nFAILED \u2014 see `error`. Terminal.\nCANCELLED \u2014 the MR was merged or closed while the review was running, so the result was never posted. Terminal.\n\nStop polling on any terminal state.",
             "enum": [
@@ -1711,9 +1839,79 @@
             ],
             "type": "string"
           },
+          "submissionId": {
+            "description": "Caller-supplied idempotency key for an agent submission. Null on a model review.",
+            "type": "string"
+          },
           "trace": {
             "$ref": "#/components/schemas/AgentTrace",
             "description": "The conversation after the initial prompt: assistant turns, tool calls, and truncated tool results. Null in list responses."
+          }
+        },
+        "type": "object"
+      },
+      "ReviewPacket": {
+        "properties": {
+          "autoReview": {
+            "type": "boolean"
+          },
+          "diff": {
+            "type": "string"
+          },
+          "diffTruncated": {
+            "type": "boolean"
+          },
+          "headSha": {
+            "type": "string"
+          },
+          "instructions": {
+            "type": "string"
+          },
+          "mrIid": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "openFindings": {
+            "items": {
+              "$ref": "#/components/schemas/OpenFinding"
+            },
+            "type": "array"
+          },
+          "projectId": {
+            "type": "string"
+          },
+          "sourceBranch": {
+            "type": "string"
+          },
+          "targetBranch": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "webUrl": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ReviewPolicy": {
+        "properties": {
+          "email": {
+            "description": "Optional contact email. Manage the actual mailbox and notification settings on the forge.",
+            "type": "string"
+          },
+          "mode": {
+            "description": "ALL reviews every eligible request; ASSIGNED reviews only while the agent is an assignee or requested reviewer.",
+            "enum": [
+              "ALL",
+              "ASSIGNED"
+            ],
+            "type": "string"
+          },
+          "username": {
+            "description": "The forge username verified against the project's review token.",
+            "type": "string"
           }
         },
         "type": "object"
@@ -1946,6 +2144,32 @@
         },
         "type": "object"
       },
+      "Submission": {
+        "properties": {
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/FindingDraft"
+            },
+            "type": "array"
+          },
+          "headSha": {
+            "type": "string"
+          },
+          "prior": {
+            "items": {
+              "$ref": "#/components/schemas/PriorDraft"
+            },
+            "type": "array"
+          },
+          "submissionId": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "ThreadUpsert": {
         "description": "An overall GitLab discussion on the merge request, not a finding reply.",
         "properties": {
@@ -1973,6 +2197,12 @@
           },
           "prefix": {
             "type": "string"
+          },
+          "projectIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "type": "object"
@@ -2029,6 +2259,10 @@
           },
           "autoApprove": {
             "description": "When true, mrr Approves the GitLab MR after a review that leaves zero open findings, and Unapproves if a later commit reintroduces one. Default false.",
+            "type": "boolean"
+          },
+          "autoReview": {
+            "description": "When true (the default), webhooks and the periodic scan ask the model to review. Set false to leave those paths quiet and accept reviews from an agent key instead. Notes, resolves and merges are unaffected.",
             "type": "boolean"
           },
           "enabled": {
@@ -2883,6 +3117,67 @@
         ]
       }
     },
+    "/api/projects/{id}/agent-keys": {
+      "post": {
+        "description": "The plaintext is returned once. The key can submit a review and read the review packet for this project only. An ordinary token cannot, and an agent key cannot mint another.",
+        "operationId": "mintAgentKey",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentKeyName"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentKey"
+                }
+              }
+            },
+            "description": "Created; the response carries the only copy of the secret"
+          },
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentKey"
+                }
+              }
+            },
+            "description": "Caller is an agent key"
+          },
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentKey"
+                }
+              }
+            },
+            "description": "No such project, or not yours"
+          }
+        },
+        "summary": "Mint an agent key for this project",
+        "tags": [
+          "Projects"
+        ]
+      }
+    },
     "/api/projects/{id}/documents": {
       "get": {
         "operationId": "listDocuments",
@@ -3471,6 +3766,77 @@
           }
         },
         "summary": "What this project's operator token is, and what it unlocks",
+        "tags": [
+          "Projects"
+        ]
+      }
+    },
+    "/api/projects/{id}/review-policy": {
+      "get": {
+        "operationId": "reviewPolicy",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewPolicy"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Fetch the agent account and automatic review policy",
+        "tags": [
+          "Projects"
+        ]
+      },
+      "put": {
+        "description": "Uses the project's existing review token. ASSIGNED verifies that token's username and reviews only requests where it is an assignee or requested reviewer. Email is contact metadata; account creation, mailbox and permissions are managed on the forge. Auto-review must also be enabled. Explicit Review now bypasses assignment filtering; external MCP submissions are independent.",
+        "operationId": "reviewPolicy_1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewPolicy"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewPolicy"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "summary": "Connect a forge account and choose when it reviews",
         "tags": [
           "Projects"
         ]
@@ -4736,6 +5102,118 @@
         ]
       }
     },
+    "/api/projects/{projectId}/merge-requests/{mrIid}/agent-reviews": {
+      "post": {
+        "description": "Opens one thread per finding and a separate summary. Does not edit the model's overview. A repeated `submissionId` returns the review already stored and posts nothing more. Works whether or not auto-review is on.",
+        "operationId": "submit",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "mrIid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Submission"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            },
+            "description": "The token is not an agent key"
+          },
+          "409": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            },
+            "description": "The request is merged or closed, or has no head commit"
+          }
+        },
+        "summary": "Post an agent's review onto the merge request",
+        "tags": [
+          "Agent reviews"
+        ]
+      }
+    },
+    "/api/projects/{projectId}/merge-requests/{mrIid}/review-packet": {
+      "get": {
+        "description": "The live request, its diff, the findings still open, and the project's review instructions. Requires an agent key for this project. The diff is clipped at the instance's max diff size, and `diffTruncated` says so.",
+        "operationId": "packet",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "mrIid",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "403": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewPacket"
+                }
+              }
+            },
+            "description": "The token is not an agent key"
+          },
+          "404": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewPacket"
+                }
+              }
+            },
+            "description": "No such project, or the forge has no such request"
+          }
+        },
+        "summary": "Fetch the material an agent needs to review a merge request",
+        "tags": [
+          "Agent reviews"
+        ]
+      }
+    },
     "/api/projects/{projectId}/repo": {
       "delete": {
         "description": "Removes the working copy from disk. The coupling index is kept, since it holds no source and took real history to build; a later review re-clones and carries on from where it left off.",
@@ -5377,32 +5855,6 @@
         ]
       }
     },
-    "/health": {
-      "get": {
-        "description": "Returns 200 once the HTTP listener is up and the context has started. It does not probe the database or GitLab \u2014 a green response means mrr is running, not that a review would succeed.",
-        "operationId": "health",
-        "responses": {
-          "200": {
-            "content": {
-              "*/*": {
-                "schema": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Up"
-          }
-        },
-        "security": [],
-        "summary": "Liveness check",
-        "tags": [
-          "Health"
-        ]
-      }
-    },
     "/webhooks/{forge}/{projectId}": {
       "post": {
         "description": "Register this URL in the project's webhook settings with merge/pull request events ticked, using the secret returned when the project was created.\n\n`{forge}` is `gitlab`, `forgejo` (also `gitea`, `codeberg`) or `github`, and must match the project's own forge. **`/webhooks/gitlab/{projectId}` keeps working forever** \u2014 every hook already registered in a GitLab UI points at it, and mrr does not create hooks.\n\nReturns immediately. Fetching the diff and calling a model happen on a background worker, because hosts time deliveries out and retry them \u2014 blocking here would mean re-reviewing.\n\nOnly opened, reopened and updated actions are reviewed. Merge and close cancel any in-flight review and mark the cycle MERGED or CLOSED so the UI follows the host. Approvals are acknowledged and ignored.\n\nDeduplicated on `(project, mr_iid, head sha)`. A redelivery, or an update that changed only a label, returns the existing review with `created: false` and spends nothing.",
@@ -5514,6 +5966,10 @@
       "name": "Catalogs"
     },
     {
+      "description": "A review written outside mrr and posted by mrr. The caller is an agent key bound to the project. mrr opens the threads on the forge. It does not call the model, and it does not replace a model review of the same commit.",
+      "name": "Agent reviews"
+    },
+    {
       "description": "Named instruction documents owned by the caller (or, for ADMIN, every user). Attaching a library skill to a project does not copy the body \u2014 edits here apply on the next review of every attached project. Delete is 409 while a project still uses the skill.",
       "name": "Skill library"
     },
@@ -5528,10 +5984,6 @@
     {
       "description": "Runtime log levels and the in-memory log ring. Admin only. Levels are not persisted: a restart restores `logging.level` from config. Set `ro.bitboy.mrr` to DEBUG to log full agent message bodies. `GET /api/logs` is the tail.",
       "name": "Loggers"
-    },
-    {
-      "description": "Liveness. Used by the container healthcheck.",
-      "name": "Health"
     },
     {
       "description": "The record of every review mrr has run: the webhook that triggered it, the merge request as it stood at that commit, the exact prompt sent to the model, and what came back.\n\nA review is a snapshot, not a live view of the MR \u2014 retitle an MR and push again and you get a second review carrying the new title, with the first left intact.",

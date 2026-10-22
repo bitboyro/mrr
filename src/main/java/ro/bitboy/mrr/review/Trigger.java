@@ -61,6 +61,11 @@ public class Trigger {
                     "This project is disabled, so mrr is not reviewing anything on it. Enable "
                             + "it first.");
         }
+        if (!project.autoReview()) {
+            throw ApiException.conflict(
+                    "Auto-review is off for this project, so mrr will not call the model. "
+                            + "Submit the review with an agent key instead.");
+        }
         MergeRequest mr = forges.forProject(project).mergeRequest(project, mrIid)
                 .orElseThrow(() -> ApiException.notFound("merge request " + mrIid + " on the forge"));
         if (ended(mr.state())) {

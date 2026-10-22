@@ -24,6 +24,7 @@ import ro.bitboy.mrr.model.ForgeInstance;
 import ro.bitboy.mrr.model.ForgeKind;
 import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.Project;
+import ro.bitboy.mrr.model.ReviewPolicy;
 import ro.bitboy.mrr.review.OpenMrScan;
 import ro.bitboy.mrr.store.Store;
 import ro.bitboy.mrr.web.ApiException;
@@ -104,6 +105,7 @@ public class ProjectController {
                 request.agentTools() == null ? List.of() : request.agentTools(),
                 Boolean.TRUE.equals(request.autoApprove()),
                 Boolean.TRUE.equals(request.holdFindings()),
+                request.autoReview() == null || request.autoReview(),
                 Boolean.TRUE.equals(request.librarianEnabled()),
                 null, ro.bitboy.mrr.model.MemoryStatus.NONE, null,
                 null, null, null, Instant.now());
@@ -130,6 +132,38 @@ public class ProjectController {
     @GetMapping("/api/projects/{id}")
     public Project get(Principal caller, @PathVariable String id) {
         return store.requireVisible(caller, id).redacted();
+    }
+
+    @Operation(summary = "Fetch the agent account and automatic review policy")
+    @GetMapping("/api/projects/{id}/review-policy")
+    public ReviewPolicy reviewPolicy(Principal caller, @PathVariable String id) {
+        store.requireVisible(caller, id);
+        return store.reviewPolicy(id);
+    }
+
+    @Operation(summary = "Connect a forge account and choose when it reviews",
+            description = "Uses the project's existing review token. ASSIGNED verifies that token's username and reviews only requests where it is an assignee or requested reviewer. Email is contact metadata; account creation, mailbox and permissions are managed on the forge. Auto-review must also be enabled. Explicit Review now bypasses assignment filtering; external MCP submissions are independent.")
+    @PutMapping("/api/projects/{id}/review-policy")
+    public ReviewPolicy reviewPolicy(Principal caller, @PathVariable String id,
+                                     @RequestBody ReviewPolicy request) {
+        ApiException.requireBody(request);
+        if (caller.isAgentKey()) throw ApiException.forbidden("An agent key cannot change review policy.");
+        Project project = store.requireVisible(caller, id);
+        String username = request.username();
+        if (request.mode() == ReviewPolicy.Mode.ASSIGNED || username != null) {
+            String authenticated = usernameOf(project);
+            if (authenticated == null || authenticated.isBlank()) {
+                throw ApiException.badRequest("The forge could not identify the review token's account. Check its access before connecting an agent.");
+            }
+            if (username != null && !username.equalsIgnoreCase(authenticated)) {
+                throw ApiException.badRequest("The username must match the account that owns the review token.");
+            }
+            username = authenticated;
+        }
+        ReviewPolicy saved = new ReviewPolicy(request.mode(), username, request.email());
+        store.saveReviewPolicy(id, saved);
+        openMrScan.enqueue(project);
+        return saved;
     }
 
     /** Secret fields are left untouched when omitted, so a partial update can't blank them. */
@@ -164,6 +198,7 @@ public class ProjectController {
                 request.agentTools() == null ? existing.agentTools() : request.agentTools(),
                 request.autoApprove() == null ? existing.autoApprove() : request.autoApprove(),
                 request.holdFindings() == null ? existing.holdFindings() : request.holdFindings(),
+                request.autoReview() == null ? existing.autoReview() : request.autoReview(),
                 request.librarianEnabled() == null ? existing.librarianEnabled()
                         : request.librarianEnabled(),
                 existing.memoryHeadSha(), existing.memoryStatus(), existing.memoryRefreshedAt(),
@@ -175,6 +210,28 @@ public class ProjectController {
             store.upsertNamedSkill(updated.id(), "reviewer", request.skill());
         }
         return updated.redacted();
+    }
+
+    @Operation(summary = "Mint an agent key for this project",
+            description = """
+                    The plaintext is returned once. The key can submit a review and read the \
+                    review packet for this project only. An ordinary token cannot, and an \
+                    agent key cannot mint another.""")
+    @ApiResponse(responseCode = "201", description = "Created; the response carries the only copy of the secret")
+    @ApiResponse(responseCode = "403", description = "Caller is an agent key")
+    @ApiResponse(responseCode = "404", description = "No such project, or not yours")
+    @PostMapping("/api/projects/{id}/agent-keys")
+    @ResponseStatus(HttpStatus.CREATED)
+    public AgentKey mintAgentKey(Principal caller, @PathVariable String id,
+                                 @RequestBody(required = false) AgentKeyName request) {
+        if (caller.isAgentKey()) {
+            throw ApiException.forbidden("An agent key cannot mint keys.");
+        }
+        Project project = store.requireVisible(caller, id);
+        String name = request == null || request.name() == null || request.name().isBlank()
+                ? "agent" : request.name().trim();
+        String token = store.createAgentKey(caller.userId(), name, List.of(project.id()));
+        return new AgentKey(token, name, List.of(project.id()));
     }
 
     @Operation(summary = "Delete a project",
@@ -318,10 +375,29 @@ public class ProjectController {
                     + "them, until somebody releases or discards each one. They count against "
                     + "the merge gate while they wait. Default false.")
             Boolean holdFindings,
+            @Schema(description = "When true (the default), webhooks and the periodic scan ask "
+                    + "the model to review. Set false to leave those paths quiet and accept "
+                    + "reviews from an agent key instead. Notes, resolves and merges are "
+                    + "unaffected.")
+            Boolean autoReview,
             @Schema(description = "Enable the optional librarian addon. Disable never deletes memory.")
             Boolean librarianEnabled) {
     }
 
+
+    @Schema(description = "Label for a new agent key. Omit for \"agent\".")
+    public record AgentKeyName(
+            @Schema(description = "Label to recognise the key by later.", example = "cursor")
+            String name) {
+    }
+
+    @Schema(description = "A freshly minted agent key. The only time the secret is readable.")
+    public record AgentKey(
+            @Schema(description = "The secret. Store it now — it cannot be retrieved again.")
+            String token,
+            @Schema(description = "The label given at creation.") String name,
+            @Schema(description = "Projects this key may act on.") List<String> projectIds) {
+    }
 
     @Schema(description = "A newly registered project, plus the two values GitLab needs.")
     public record Registered(

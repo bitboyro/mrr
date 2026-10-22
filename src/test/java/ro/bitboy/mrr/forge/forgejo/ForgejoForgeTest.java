@@ -7,7 +7,7 @@ import okhttp3.mockwebserver.RecordedRequest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.web.client.RestClient;
+import ro.bitboy.mrr.web.TestRestClients;
 import ro.bitboy.mrr.forge.AnchorRef;
 import ro.bitboy.mrr.forge.Diff;
 import ro.bitboy.mrr.forge.Discussion;
@@ -54,7 +54,7 @@ class ForgejoForgeTest {
             }
         });
         host.start();
-        forge = new ForgejoForge(RestClient.builder());
+        forge = new ForgejoForge(TestRestClients.builder());
     }
 
     @AfterEach

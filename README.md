@@ -294,6 +294,47 @@ The same instance serves **MCP** over streamable HTTP at `/mcp`, authenticated w
 token in `X-API-Key` and scoped to that token's owner exactly as REST is. Tools:
 [`docs/mcp-tools.json`](docs/mcp-tools.json).
 
+An **agent key** is a token minted for specific projects (`POST /api/projects/{id}/agent-keys`,
+or `projectIds` on `POST /api/tokens`). Only that key may call `get_review_packet` and
+`submit_review`. The packet is the diff, the open findings, and the project's review
+instructions. `submit_review` posts the agent's review on the forge — one thread per finding
+and its own summary — and records it beside any model review of the same commit. It does not
+replace that review, and it does not edit the model's overview. A repeated `submissionId`
+returns the review already stored, including a failed delivery; it never blindly reposts a
+partial submission. Include `headSha` from the packet when submitting: mrr rejects a review
+if a newer commit has arrived. The same two calls are
+`GET /api/projects/{id}/merge-requests/{iid}/review-packet` and
+`POST /api/projects/{id}/merge-requests/{iid}/agent-reviews`.
+
+**Auto-review** is separate from disabling the project. On, a webhook and the periodic scan
+ask the model, as before. Off, those paths leave the request alone — notes, resolves, and
+merges still run — and the review on the forge is the one an agent key submitted. An ordinary
+token cannot submit one, and a GitLab MCP cannot either: a note it posts is not a finding in
+this ledger.
+
+**Agent account and assignment policy.** Create a dedicated account on the forge (or use a
+service account where supported), give it the repository access needed for reading code and
+posting reviews, and set the project's review token to that account's token. Its email,
+notifications, membership and permissions are managed on the forge. Keep the separate operator
+token for merge actions; the reviewer does not need permission to merge.
+
+On the project page, **Agent account and review policy** connects that token's username and an
+optional contact email. Choose **Review every request** (`ALL`, the default) or **Review when
+assigned** (`ASSIGNED`). The latter runs the project's configured model only when the account is
+an assignee or requested reviewer of the request; subsequent commits are reviewed while it stays
+assigned. Assignment changes arrive through merge/pull-request webhooks, and the periodic scan
+catches missed assignments. Repeated deliveries for the same commit do not spend another review.
+The account is checked against the token when saving and again when testing assignment; changing
+the token to a different account requires reconnecting the policy.
+
+The policy is `GET/PUT /api/projects/{id}/review-policy` with
+`{"mode":"ASSIGNED","username":"review-bot","email":"reviews@example.com"}`. Leave username
+blank to discover the token's account. Email is contact metadata; mrr does not create a mailbox or
+process email. `get_review_policy` exposes the same settings through MCP. Auto-review must be on
+for either automatic policy. **Review now** is an explicit request and bypasses assignment
+filtering. External agent-key submissions are independent of this automatic-model policy.
+
+
 Neither file is hand-edited. **`mvn verify` regenerates `docs/openapi.json`**: it boots the
 packaged app on port 8137, reads the spec springdoc serves, and stops it again — so a changed
 signature or `@Operation` shows up as a diff in the same build that compiled it. Everything

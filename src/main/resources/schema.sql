@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS tokens (
     token_hash   TEXT NOT NULL UNIQUE,               -- SHA-256 of the secret; never the secret
     prefix       TEXT NOT NULL,                      -- display only, e.g. "mrr_a3f9"
     created_at   TEXT NOT NULL,
-    last_used_at TEXT
+    last_used_at TEXT,
+    project_ids  TEXT                                -- JSON array; NULL = every project the user can see
 );
 
 CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens(user_id);
@@ -91,6 +92,12 @@ CREATE TABLE IF NOT EXISTS projects (
     agent_max_turns   INTEGER NOT NULL DEFAULT 1,    -- 1 = today's single shot
     agent_tools       TEXT,                          -- comma-separated; empty = no tools
     auto_approve      INTEGER NOT NULL DEFAULT 0,    -- approve the MR when zero findings remain
+    -- Model reviews on webhook and scan. Off leaves note handling in place and waits
+    -- for an agent key to submit a review, which mrr then posts.
+    auto_review       INTEGER NOT NULL DEFAULT 1,
+    review_policy     TEXT NOT NULL DEFAULT 'ALL',
+    review_agent_username TEXT,
+    review_agent_email TEXT,
     -- Hold agent findings back until a person releases them. Off by default: the product must
     -- not get slower for everyone in order to serve the teams that need a human between the
     -- model and the merge request.
@@ -139,6 +146,12 @@ CREATE TABLE IF NOT EXISTS reviews (
     project_id  TEXT NOT NULL REFERENCES projects(id),
     mr_iid      INTEGER NOT NULL,
     head_sha    TEXT NOT NULL,
+    -- MODEL rows keep the commit in head_sha, which is what the unique key below dedupes.
+    -- AGENT rows store the commit in commit_sha and a unique idempotency value in head_sha,
+    -- so a submitted review can sit beside the model's review of the same commit.
+    source      TEXT NOT NULL DEFAULT 'MODEL',       -- MODEL | AGENT
+    commit_sha  TEXT,
+    submission_id TEXT,                              -- client idempotency key for an agent review
     state       TEXT NOT NULL,                       -- PENDING | PROCESSING | READY | FAILED | CANCELLED
     payload     TEXT,                                -- raw webhook body, verbatim
     prompt      TEXT,                                -- initial system + user; tool trail is `trace`
@@ -193,6 +206,10 @@ CREATE TABLE IF NOT EXISTS reviews (
     -- head commit collides here and we return the existing review instead of re-reviewing.
     UNIQUE (project_id, mr_iid, head_sha)
 );
+
+-- One agent submission posts once. A retry with the same id returns that review.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_submission
+    ON reviews(project_id, submission_id) WHERE submission_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_reviews_project ON reviews(project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reviews_mr ON reviews(project_id, mr_iid);

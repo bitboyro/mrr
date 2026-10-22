@@ -8,7 +8,7 @@ import okhttp3.mockwebserver.RecordedRequest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.web.client.RestClient;
+import ro.bitboy.mrr.web.TestRestClients;
 import ro.bitboy.mrr.MrrProperties;
 import ro.bitboy.mrr.RuntimeSettings;
 import ro.bitboy.mrr.TestStores;
@@ -36,7 +36,7 @@ class OpenAiModelTest {
         openai = new MockWebServer();
         openai.start();
         String base = openai.url("/v1/").toString().replaceAll("/+$", "");
-        model = new OpenAiModel(RestClient.builder(), "sk-test", base, "gpt-5.6-luna");
+        model = new OpenAiModel(TestRestClients.builder(), "sk-test", base, "gpt-5.6-luna");
     }
 
     @AfterEach
@@ -69,7 +69,7 @@ class OpenAiModelTest {
                 """));
         RuntimeSettings settings = RuntimeSettings.frozen(TestStores.properties());
         String base = openai.url("/v1/").toString().replaceAll("/+$", "");
-        OpenAiModel withSettings = new OpenAiModel(RestClient.builder(), "sk-test", base,
+        OpenAiModel withSettings = new OpenAiModel(TestRestClients.builder(), "sk-test", base,
                 "gpt-5.6-luna", settings);
 
         withSettings.completeChat("sys", List.of(Turn.user("diff")), List.of());

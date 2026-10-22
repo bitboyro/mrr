@@ -3,7 +3,7 @@ package ro.bitboy.mrr.forge.forgejo;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
-import org.springframework.web.client.RestClient;
+import ro.bitboy.mrr.web.TestRestClients;
 import ro.bitboy.mrr.forge.ForgeEvent;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -12,7 +12,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ForgejoWebhookTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private final ForgejoForge forge = new ForgejoForge(RestClient.builder());
+    private final ForgejoForge forge = new ForgejoForge(TestRestClients.builder());
 
     @Test
     void synchronizedIsWhatGitlabCallsUpdate() {

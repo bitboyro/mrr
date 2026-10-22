@@ -23,6 +23,7 @@ import ro.bitboy.mrr.model.MrStatus;
 import ro.bitboy.mrr.model.Project;
 import ro.bitboy.mrr.model.Reply;
 import ro.bitboy.mrr.model.Review;
+import ro.bitboy.mrr.model.ReviewPolicy;
 import ro.bitboy.mrr.model.ReviewModel;
 import ro.bitboy.mrr.model.Role;
 import ro.bitboy.mrr.model.SessionParticipant;
@@ -154,13 +155,28 @@ public class Store {
      * and a display prefix reach the database.
      */
     public String createToken(String userId, String name) {
+        return insertToken(userId, name, null);
+    }
+
+    /**
+     * A key that may act only on {@code projectIds}. An ordinary token, from
+     * {@link #createToken}, has a null list and cannot submit an agent review.
+     */
+    public String createAgentKey(String userId, String name, List<String> projectIds) {
+        if (projectIds == null || projectIds.isEmpty()) {
+            throw ApiException.badRequest("An agent key needs at least one project.");
+        }
+        return insertToken(userId, name, projectIdsJson(projectIds));
+    }
+
+    private String insertToken(String userId, String name, String projectIds) {
         String token = Ids.newToken();
         db.sql("""
-                INSERT INTO tokens (id, user_id, name, token_hash, prefix, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO tokens (id, user_id, name, token_hash, prefix, created_at, project_ids)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """)
                 .params(Ids.newId(), userId, name, Ids.sha256(token), Ids.prefixOf(token),
-                        Instant.now().toString())
+                        Instant.now().toString(), projectIds)
                 .update();
         return token;
     }
@@ -168,13 +184,15 @@ public class Store {
     /** Resolves a presented token to its caller. The hash lookup is the authentication. */
     public Optional<Principal> resolveToken(String token) {
         return db.sql("""
-                SELECT u.id, u.name, u.role
+                SELECT u.id, u.name, u.role, t.id AS token_id, t.name AS token_name, t.project_ids
                 FROM tokens t JOIN users u ON u.id = t.user_id
                 WHERE t.token_hash = ?
                 """)
                 .param(Ids.sha256(token))
                 .query((rs, n) -> new Principal(
-                        rs.getString("id"), rs.getString("name"), Role.valueOf(rs.getString("role"))))
+                        rs.getString("id"), rs.getString("name"), Role.valueOf(rs.getString("role")),
+                        rs.getString("token_id"), projectIdsOf(rs.getString("project_ids")),
+                        rs.getString("token_name")))
                 .optional();
     }
 
@@ -185,10 +203,14 @@ public class Store {
     }
 
     public List<TokenInfo> listTokens(String userId) {
-        return db.sql("SELECT id, name, prefix, created_at, last_used_at FROM tokens WHERE user_id = ? ORDER BY created_at")
+        return db.sql("""
+                SELECT id, name, prefix, created_at, last_used_at, project_ids
+                FROM tokens WHERE user_id = ? ORDER BY created_at
+                """)
                 .param(userId)
                 .query((rs, n) -> new TokenInfo(rs.getString("id"), rs.getString("name"),
-                        rs.getString("prefix"), rs.getString("created_at"), rs.getString("last_used_at")))
+                        rs.getString("prefix"), rs.getString("created_at"), rs.getString("last_used_at"),
+                        projectIdsOf(rs.getString("project_ids"))))
                 .list();
     }
 
@@ -198,7 +220,8 @@ public class Store {
                 .params(tokenId, userId).update() > 0;
     }
 
-    public record TokenInfo(String id, String name, String prefix, String createdAt, String lastUsedAt) {
+    public record TokenInfo(String id, String name, String prefix, String createdAt, String lastUsedAt,
+                            List<String> projectIds) {
     }
 
     // ── projects ─────────────────────────────────────────────────────────────────────
@@ -226,8 +249,8 @@ public class Store {
                                       gitlab_token, gitlab_operator_token, webhook_secret,
                                       llm_provider_id, skill, skip_drafts,
                                       agent_max_turns, agent_tools, auto_approve, hold_findings,
-                                      librarian_enabled, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      auto_review, librarian_enabled, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)
                 .params(p.id(), p.ownerId(), p.name(), p.enabled() ? 1 : 0, p.forge().name(),
                         p.gitlabUrl(),
@@ -236,7 +259,7 @@ public class Store {
                         secrets.seal(p.webhookSecret()), p.llmProviderId(), p.skill(),
                         p.skipDrafts() ? 1 : 0,
                         p.agentMaxTurns(), toolsCsv(p.agentTools()), p.autoApprove() ? 1 : 0,
-                        p.holdFindings() ? 1 : 0,
+                        p.holdFindings() ? 1 : 0, p.autoReview() ? 1 : 0,
                         p.librarianEnabled() ? 1 : 0, p.createdAt().toString())
                 .update();
         return p;
@@ -249,7 +272,7 @@ public class Store {
                        gitlab_token = ?, gitlab_operator_token = ?, webhook_secret = ?,
                        llm_provider_id = ?, skill = ?, skip_drafts = ?, agent_max_turns = ?,
                        agent_tools = ?, auto_approve = ?, hold_findings = ?,
-                       librarian_enabled = ?
+                       auto_review = ?, librarian_enabled = ?
                 WHERE id = ?
                 """)
                 .params(p.name(), p.enabled() ? 1 : 0, p.forge().name(), p.gitlabUrl(),
@@ -258,9 +281,22 @@ public class Store {
                         secrets.seal(p.webhookSecret()),
                         p.llmProviderId(), p.skill(), p.skipDrafts() ? 1 : 0,
                         p.agentMaxTurns(), toolsCsv(p.agentTools()), p.autoApprove() ? 1 : 0,
-                        p.holdFindings() ? 1 : 0,
+                        p.holdFindings() ? 1 : 0, p.autoReview() ? 1 : 0,
                         p.librarianEnabled() ? 1 : 0, p.id())
                 .update();
+    }
+
+    public ReviewPolicy reviewPolicy(String projectId) {
+        return db.sql("SELECT review_policy, review_agent_username, review_agent_email FROM projects WHERE id = ?")
+                .param(projectId)
+                .query((rs, n) -> new ReviewPolicy(ReviewPolicy.Mode.valueOf(rs.getString("review_policy")),
+                        rs.getString("review_agent_username"), rs.getString("review_agent_email")))
+                .optional().orElseThrow(() -> ApiException.notFound("project"));
+    }
+
+    public void saveReviewPolicy(String projectId, ReviewPolicy policy) {
+        db.sql("UPDATE projects SET review_policy = ?, review_agent_username = ?, review_agent_email = ? WHERE id = ?")
+                .params(policy.mode().name(), policy.username(), policy.email(), projectId).update();
     }
 
     public Optional<Project> findProject(String id) {
@@ -277,16 +313,20 @@ public class Store {
      */
     public Project requireVisible(Principal caller, String projectId) {
         return findProject(projectId)
-                .filter(caller::owns)
+                .filter(caller::allows)
                 .orElseThrow(() -> ApiException.notFound("project"));
     }
 
-    /** Admins list everything; everyone else lists only their own. */
+    /** Admins list everything; everyone else lists only their own. An agent key lists its projects. */
     public List<Project> listProjects(Principal caller) {
-        return caller.isAdmin()
+        List<Project> all = caller.role() == Role.ADMIN
                 ? db.sql(PROJECT_SELECT + " ORDER BY p.created_at").query(this::toProject).list()
                 : db.sql(PROJECT_SELECT + " WHERE p.owner_id = ? ORDER BY p.created_at")
                         .param(caller.userId()).query(this::toProject).list();
+        if (!caller.isAgentKey()) {
+            return all;
+        }
+        return all.stream().filter(p -> caller.projectIds().contains(p.id())).toList();
     }
 
     public List<Project> listEnabledProjects() {
@@ -372,6 +412,59 @@ public class Store {
     public record Claim(Review review, boolean created) {
     }
 
+    /** The agent submission already stored for this project and idempotency key, if any. */
+    public Optional<Review> findAgentSubmission(String projectId, String submissionId) {
+        return db.sql("SELECT * FROM reviews WHERE project_id = ? AND submission_id = ?")
+                .params(projectId, submissionId)
+                .query(Store::toReview).optional();
+    }
+
+    /**
+     * Inserts an agent review. {@code head_sha} is {@code agent/} plus the submission id, so
+     * it does not collide with the model's row for the same commit. {@code commit_sha} is
+     * that commit, and it is what {@link #toReview} reports as {@code headSha}.
+     *
+     * @return the stored review, and whether this call inserted it
+     */
+    public Claim insertAgentReview(String projectId, long mrIid, String submissionId,
+                                   String commitSha, String payload, MergeRequestInfo mr) {
+        Optional<Review> existing = findAgentSubmission(projectId, submissionId);
+        if (existing.isPresent()) {
+            return new Claim(existing.get(), false);
+        }
+        String id = Ids.newId();
+        String idempotencyKey = "agent/" + submissionId;
+        try {
+            db.sql("""
+                    INSERT INTO reviews (id, project_id, mr_iid, head_sha, source, commit_sha,
+                                         submission_id, state, payload, created_at,
+                                         mr_title, mr_url, mr_state, mr_action, mr_draft,
+                                         source_branch, target_branch,
+                                         mr_author_name, mr_author_username,
+                                         actor_name, actor_username,
+                                         commit_message, commit_author_name, commit_author_email,
+                                         commit_at, labels, files_changed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """)
+                    .params(id, projectId, mrIid, idempotencyKey, Review.Source.AGENT.name(),
+                            commitSha, submissionId, Review.State.PENDING.name(), payload,
+                            Instant.now().toString(),
+                            mr.title(), mr.url(), mr.state(), mr.action(), bool(mr.draft()),
+                            mr.sourceBranch(), mr.targetBranch(),
+                            mr.authorName(), mr.authorUsername(),
+                            mr.actorName(), mr.actorUsername(),
+                            mr.commitMessage(), mr.commitAuthorName(), mr.commitAuthorEmail(),
+                            mr.commitAt() == null ? null : mr.commitAt().toString(),
+                            mr.labels(), mr.filesChanged())
+                    .update();
+            return new Claim(findReview(id).orElseThrow(), true);
+        } catch (DataAccessException e) {
+            return findAgentSubmission(projectId, submissionId)
+                    .map(found -> new Claim(found, false))
+                    .orElseThrow(() -> e);
+        }
+    }
+
     public Optional<Review> findReview(String id) {
         return db.sql("SELECT * FROM reviews WHERE id = ?").param(id)
                 .query(Store::toReview).optional();
@@ -398,6 +491,7 @@ public class Store {
                 SELECT * FROM reviews
                 WHERE project_id = ? AND mr_iid = ? AND id != ?
                   AND state = ? AND discussion_id IS NOT NULL AND note_id IS NOT NULL
+                  AND (source IS NULL OR source = 'MODEL')
                 ORDER BY created_at DESC LIMIT 1
                 """)
                 .params(projectId, mrIid, exceptReviewId, Review.State.READY.name())
@@ -452,6 +546,7 @@ public class Store {
         return db.sql("""
                 SELECT DISTINCT discussion_id FROM reviews
                 WHERE project_id = ? AND mr_iid = ? AND discussion_id IS NOT NULL
+                  AND (source IS NULL OR source = 'MODEL')
                 ORDER BY discussion_id
                 """)
                 .params(projectId, mrIid)
@@ -462,13 +557,21 @@ public class Store {
         String sql = "SELECT r.* FROM reviews r JOIN projects p ON p.id = r.project_id WHERE 1=1"
                 + (projectId == null ? "" : " AND r.project_id = ?")
                 + (mrIid == null ? "" : " AND r.mr_iid = ?")
-                + (caller.isAdmin() ? "" : " AND p.owner_id = ?")
+                + (caller.role() == Role.ADMIN ? "" : " AND p.owner_id = ?")
+                + (caller.isAgentKey() ? " AND r.project_id IN ("
+                        + String.join(",", java.util.Collections.nCopies(caller.projectIds().size(), "?"))
+                        + ")" : "")
                 + " ORDER BY r.created_at DESC LIMIT ?";
         var spec = db.sql(sql);
         int i = 1;
         if (projectId != null) spec = spec.param(i++, projectId);
         if (mrIid != null) spec = spec.param(i++, mrIid);
-        if (!caller.isAdmin()) spec = spec.param(i++, caller.userId());
+        if (caller.role() != Role.ADMIN) spec = spec.param(i++, caller.userId());
+        if (caller.isAgentKey()) {
+            for (String id : caller.projectIds()) {
+                spec = spec.param(i++, id);
+            }
+        }
         return spec.param(i, limit).query(Store::toReview).list();
     }
 
@@ -597,6 +700,9 @@ public class Store {
      * is deliberately preserved, so the re-run edits the comment it already posted.
      */
     public void resetForRerun(String reviewId) {
+        if (findReview(reviewId).map(r -> r.source() == Review.Source.AGENT).orElse(false)) {
+            throw ApiException.conflict("An external review cannot be rerun by the model. Submit a new agent review instead.");
+        }
         db.sql("""
                 UPDATE reviews SET state = ?, response = NULL, error = NULL, error_kind = NULL,
                        finished_at = NULL, prompt = NULL, agent_turns = 0, trace = NULL
@@ -1823,6 +1929,7 @@ public class Store {
                 toolsList(rs.getString("agent_tools")),
                 rs.getInt("auto_approve") == 1,
                 columnInt(rs, "hold_findings") == 1,
+                autoReviewColumn(rs),
                 columnInt(rs, "librarian_enabled") == 1,
                 rs.getString("memory_head_sha"),
                 memoryStatus(rs.getString("memory_status")),
@@ -1849,15 +1956,22 @@ public class Store {
                 nullableInt(rs, "diverged_commits_count"),
                 nullableBool(rs, "has_conflicts"));
 
+        Review.Source source = reviewSource(columnText(rs, "source"));
+        String commitSha = columnText(rs, "commit_sha");
+        String headSha = rs.getString("head_sha");
+        if (source == Review.Source.AGENT && commitSha != null && !commitSha.isBlank()) {
+            headSha = commitSha;
+        }
         return new Review(
                 rs.getString("id"), rs.getString("project_id"), rs.getLong("mr_iid"),
-                rs.getString("head_sha"), Review.State.valueOf(rs.getString("state")),
+                headSha, Review.State.valueOf(rs.getString("state")),
                 mr,
                 rs.getString("payload"), rs.getString("prompt"), rs.getString("response"),
                 rs.getString("note_id"), rs.getString("discussion_id"), rs.getString("error"),
                 failureKind(rs.getString("error_kind")),
                 instant(rs.getString("created_at")), instant(rs.getString("finished_at")),
-                rs.getInt("agent_turns"), AgentTrace.parse(rs.getString("trace")));
+                rs.getInt("agent_turns"), AgentTrace.parse(rs.getString("trace")),
+                source, columnText(rs, "submission_id"));
     }
 
     private static Finding toFinding(ResultSet rs, int n) throws SQLException {
@@ -2070,6 +2184,64 @@ public class Store {
         } catch (SQLException e) {
             return null;
         }
+    }
+
+    /** Missing or null means on: every project reviewed itself before the switch existed. */
+    private static boolean autoReviewColumn(ResultSet rs) {
+        try {
+            int value = rs.getInt("auto_review");
+            return rs.wasNull() || value == 1;
+        } catch (SQLException e) {
+            return true;
+        }
+    }
+
+    private static Review.Source reviewSource(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return Review.Source.MODEL;
+        }
+        try {
+            return Review.Source.valueOf(raw);
+        } catch (IllegalArgumentException e) {
+            return Review.Source.MODEL;
+        }
+    }
+
+    private static String projectIdsJson(List<String> ids) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < ids.size(); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append('"').append(ids.get(i).replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+        }
+        return sb.append(']').toString();
+    }
+
+    /** Null when the token is ordinary. Empty is treated as ordinary too. */
+    private static List<String> projectIdsOf(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String body = raw.trim();
+        if (body.length() < 2 || body.charAt(0) != '[' || body.charAt(body.length() - 1) != ']') {
+            return null;
+        }
+        body = body.substring(1, body.length() - 1).trim();
+        if (body.isEmpty()) {
+            return null;
+        }
+        List<String> ids = new java.util.ArrayList<>();
+        for (String part : body.split(",")) {
+            String id = part.trim();
+            if (id.length() >= 2 && id.charAt(0) == '"' && id.charAt(id.length() - 1) == '"') {
+                id = id.substring(1, id.length() - 1);
+            }
+            if (!id.isEmpty()) {
+                ids.add(id);
+            }
+        }
+        return ids.isEmpty() ? null : List.copyOf(ids);
     }
 
     private static int columnInt(ResultSet rs, String column) throws SQLException {

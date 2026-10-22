@@ -52,7 +52,7 @@ final class GitHubWebhook {
             case "reopened" -> ForgeEvent.Action.REOPENED;
             // "synchronize" is GitHub for "new commits were pushed". "edited" is a title or body
             // change, which cannot carry code but is filtered on the head SHA anyway.
-            case "synchronize", "edited", "ready_for_review" -> ForgeEvent.Action.UPDATED;
+            case "synchronize", "edited", "ready_for_review", "assigned", "unassigned", "review_requested", "review_request_removed" -> ForgeEvent.Action.UPDATED;
             // Like Forgejo, a merge is a close that also set the merged flag.
             case "closed" -> pr.path("merged").asBoolean(false) || pr.hasNonNull("merged_at")
                     ? ForgeEvent.Action.MERGED : ForgeEvent.Action.CLOSED;

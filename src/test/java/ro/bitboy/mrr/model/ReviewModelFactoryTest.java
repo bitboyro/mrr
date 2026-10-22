@@ -3,7 +3,7 @@ package ro.bitboy.mrr.model;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.web.client.RestClient;
+import ro.bitboy.mrr.web.TestRestClients;
 import ro.bitboy.mrr.RuntimeSettings;
 import ro.bitboy.mrr.TestStores;
 
@@ -15,7 +15,7 @@ class ReviewModelFactoryTest {
 
     @BeforeEach
     void setUp() {
-        factory = new ReviewModelFactory(RestClient.builder(),
+        factory = new ReviewModelFactory(TestRestClients.builder(),
                 RuntimeSettings.frozen(TestStores.properties()));
     }
 

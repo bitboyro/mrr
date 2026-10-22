@@ -624,6 +624,17 @@ public class GitHubForge extends ForgeHttp implements Forge {
 
     /** A GitHub App's token answers as {@code <slug>[bot]}, which is a username like any other. */
     @Override
+    public boolean isAssignedTo(Project project, long mrIid, String username) {
+        JsonNode request = exchange(project, HttpMethod.GET, "/pulls/" + mrIid, null);
+        for (String field : new String[] {"assignees", "requested_reviewers"}) {
+            for (JsonNode person : request.path(field)) {
+                if (username.equalsIgnoreCase(person.path("login").asText())) return true;
+            }
+        }
+        return username.equalsIgnoreCase(request.path("assignee").path("login").asText());
+    }
+
+    @Override
     public String tokenUsername(Project project) {
         try {
             JsonNode body = exchangeAbsolute(project, HttpMethod.GET, apiBase(project) + "/user",

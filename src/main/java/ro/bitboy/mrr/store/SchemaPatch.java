@@ -47,6 +47,18 @@ public class SchemaPatch {
         addColumn("projects", "agent_max_turns", "INTEGER NOT NULL DEFAULT 1");
         addColumn("projects", "agent_tools", "TEXT");
         addColumn("projects", "auto_approve", "INTEGER NOT NULL DEFAULT 0");
+        addColumn("projects", "auto_review", "INTEGER NOT NULL DEFAULT 1");
+        addColumn("projects", "review_policy", "TEXT NOT NULL DEFAULT 'ALL'");
+        addColumn("projects", "review_agent_username", "TEXT");
+        addColumn("projects", "review_agent_email", "TEXT");
+        addColumn("tokens", "project_ids", "TEXT");
+        addColumn("reviews", "source", "TEXT NOT NULL DEFAULT 'MODEL'");
+        addColumn("reviews", "commit_sha", "TEXT");
+        addColumn("reviews", "submission_id", "TEXT");
+        db.sql("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_submission
+                ON reviews(project_id, submission_id) WHERE submission_id IS NOT NULL
+                """).update();
         addColumn("projects", "last_error_kind", "TEXT");
         addColumn("projects", "last_error", "TEXT");
         addColumn("projects", "last_error_at", "TEXT");

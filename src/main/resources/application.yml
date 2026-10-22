@@ -49,6 +49,29 @@ spring:
 server:
   port: ${SERVER_PORT:8130}
 
+management:
+  endpoints:
+    web:
+      base-path: /
+      path-mapping:
+        health: health
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: false
+  # Liveness only, matching the controller this replaced: a green /health means the listener
+  # is up, not that the database, a forge, or the disk is in any particular state. Both
+  # default indicators that probe something are off — db, and diskSpace, which would 503 the
+  # container healthcheck on a low-disk condition the listener has survived.
+  health:
+    db:
+      enabled: false
+    diskspace:
+      enabled: false
+
 mrr:
   # Encryption for the per-project credentials (GitLab PATs, webhook secret, model key).
   # Unset means they are stored in plaintext and mrr warns loudly on every boot.

@@ -198,12 +198,22 @@ public class WebhookController {
             return ignore(project, mrIid, "draft");
         }
 
+        // Notes, merges and closes were handled above. What remains is a model review,
+        // and a project can decline those without going dark.
+        if (!project.autoReview()) {
+            return ignore(project, mrIid, "auto_review_off");
+        }
+
         String headSha = event.headSha();
         if (mrIid == 0 || headSha == null) {
             log.warn("webhook rejected for {} — payload carried no request number or head sha",
                     project.name());
             throw ApiException.badRequest(
                     "payload is missing the merge/pull request number or its head commit sha");
+        }
+
+        if (!store.reviewPolicy(project.id()).permits(forges.forProject(project), project, mrIid)) {
+            return ignore(project, mrIid, "agent_not_assigned");
         }
 
         // An update is a firehose — it fires on every title edit, label, assignee, and

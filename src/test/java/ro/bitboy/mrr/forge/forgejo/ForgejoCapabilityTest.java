@@ -8,7 +8,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
-import org.springframework.web.client.RestClient;
+import ro.bitboy.mrr.web.TestRestClients;
 import ro.bitboy.mrr.forge.ForgeCapabilities;
 import ro.bitboy.mrr.forge.Signatures;
 import ro.bitboy.mrr.model.ForgeKind;
@@ -66,7 +66,7 @@ class ForgejoCapabilityTest {
                   "/repos/{owner}/{repo}/pulls/{index}/comments/{id}/replies":{},
                   "/repos/{owner}/{repo}/pulls/{index}/reviews/{id}/dismissals":{}}}""";
 
-        ForgeCapabilities caps = new ForgejoForge(RestClient.builder()).capabilities(project());
+        ForgeCapabilities caps = new ForgejoForge(TestRestClients.builder()).capabilities(project());
 
         assertThat(caps.resolvableThreads()).isTrue();
         assertThat(caps.threadedReplies()).isTrue();
@@ -79,7 +79,7 @@ class ForgejoCapabilityTest {
         swagger = """
                 {"paths":{"/repos/{owner}/{repo}/pulls/{index}/reviews":{}}}""";
 
-        ForgeCapabilities caps = new ForgejoForge(RestClient.builder()).capabilities(project());
+        ForgeCapabilities caps = new ForgejoForge(TestRestClients.builder()).capabilities(project());
 
         assertThat(caps.resolvableThreads()).isFalse();
         assertThat(caps.threadedReplies()).isFalse();
@@ -96,7 +96,7 @@ class ForgejoCapabilityTest {
     void aProbeThatCannotAnswerFailsClosedAndSaysSo() {
         swagger = null;  // API docs disabled, or the instance is unreachable
 
-        ForgeCapabilities caps = new ForgejoForge(RestClient.builder()).capabilities(project());
+        ForgeCapabilities caps = new ForgejoForge(TestRestClients.builder()).capabilities(project());
 
         assertThat(caps.resolvableThreads()).isFalse();
         assertThat(caps.unknown())
@@ -107,7 +107,7 @@ class ForgejoCapabilityTest {
     void resolveIsRefusedOutrightRatherThanPretendedWhenTheHostLacksIt() {
         swagger = """
                 {"paths":{"/repos/{owner}/{repo}/pulls/{index}/reviews":{}}}""";
-        ForgejoForge forge = new ForgejoForge(RestClient.builder());
+        ForgejoForge forge = new ForgejoForge(TestRestClients.builder());
 
         // Silently diverging from the host is the one outcome that is not acceptable: a call
         // that cannot do what it says must fail rather than return as if it had.
@@ -120,7 +120,7 @@ class ForgejoCapabilityTest {
     void theProbeIsCachedSoItIsNotRunOnEveryReview() {
         swagger = """
                 {"paths":{"/repos/{owner}/{repo}/pulls/{index}/reviews":{}}}""";
-        ForgejoForge forge = new ForgejoForge(RestClient.builder());
+        ForgejoForge forge = new ForgejoForge(TestRestClients.builder());
         Project project = project();
 
         forge.capabilities(project);
@@ -132,7 +132,7 @@ class ForgejoCapabilityTest {
 
     @Test
     void bothForgejoAndGiteaSignatureHeadersVerify() {
-        ForgejoForge forge = new ForgejoForge(RestClient.builder());
+        ForgejoForge forge = new ForgejoForge(TestRestClients.builder());
         Project project = project();
         String body = "{\"action\":\"opened\"}";
         String hex = Signatures.hmacSha256Hex(project.webhookSecret(), body);

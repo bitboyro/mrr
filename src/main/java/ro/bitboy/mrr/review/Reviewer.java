@@ -210,6 +210,29 @@ public class Reviewer {
         return true;
     }
 
+    /**
+     * Posts a review an agent already wrote. No model call, and the project's hold-findings
+     * switch does not apply: the caller asked for this to be published. The summary is a new
+     * discussion. It does not edit the model's overview.
+     */
+    public Review publishAgent(Project project, Review review, ReviewModel.Verdict verdict,
+                               String submittedBy) {
+        List<Finding> priorOpen = store.openFindings(project.id(), review.mrIid()).stream()
+                .filter(f -> !f.state().isPending())
+                .toList();
+        synchronized (lockFor(project.id(), review.mrIid())) {
+            resolveAddressed(project, review, verdict, priorOpen);
+            List<Finding> opened = openAgentThreads(project, review, verdict, submittedBy);
+            String summary = Prompts.agentSummary(verdict, opened, submittedBy);
+            Discussion posted = forge(project).postDiscussion(project, review.mrIid(), summary);
+            store.saveResponse(review.id(), summary);
+            store.markReady(review.id(), posted.discussionId(), posted.noteId());
+            store.clearProjectError(project.id());
+        }
+        finishCleanOrNeedsWork(project, store.findReview(review.id()).orElse(review));
+        return store.findReview(review.id()).orElseThrow();
+    }
+
     void run(String reviewId) {
         Review review = store.findReview(reviewId).orElseThrow();
         Project project = store.findProject(review.projectId()).orElseThrow();
@@ -587,6 +610,39 @@ public class Reviewer {
         log.info("held {} finding(s) on {}!{} — {} releases findings by hand",
                 held.size(), project.name(), review.mrIid(), project.name());
         return held;
+    }
+
+    /**
+     * The same thread-per-finding post as {@link #openThreads}, always posted, attributed to
+     * the agent key that submitted it.
+     */
+    private List<Finding> openAgentThreads(Project project, Review review, ReviewModel.Verdict verdict,
+                                           String submittedBy) {
+        if (verdict.findings().isEmpty()) {
+            return List.of();
+        }
+        Forge forge = forge(project);
+        Optional<AnchorRef> refs = can(project).inlineThreads()
+                ? forge.diffRefs(project, review.mrIid())
+                : Optional.empty();
+        List<Finding> opened = new ArrayList<>();
+        for (ReviewModel.NewFinding found : verdict.findings()) {
+            String body = Prompts.agentFindingComment(found, submittedBy);
+            Optional<Discussion> inline = Optional.empty();
+            if (refs.isPresent() && found.file() != null && found.line() != null) {
+                inline = forge.postInlineDiscussion(project, review.mrIid(), refs.get(),
+                        found.file(), found.line(), body);
+            }
+            Discussion discussion = inline.orElseGet(
+                    () -> forge.postDiscussion(project, review.mrIid(), body));
+            opened.add(store.createFinding(new Finding(
+                    Ids.newId(), review.id(), project.id(), review.mrIid(),
+                    found.file(), found.line(), found.severity(), found.title(), body,
+                    discussion.discussionId(), discussion.noteId(), inline.isPresent(),
+                    Finding.State.OPEN, Instant.now(), null, null,
+                    Finding.Origin.AGENT, null, null, found.role())));
+        }
+        return opened;
     }
 
     /**
