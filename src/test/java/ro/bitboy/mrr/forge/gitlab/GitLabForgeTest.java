@@ -7,6 +7,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.client.RestClient;
+import ro.bitboy.mrr.web.TestRestClients;
 import ro.bitboy.mrr.model.ForgeKind;
 import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.Project;
@@ -33,7 +34,7 @@ class GitLabForgeTest {
     void setUp() throws Exception {
         gitlab = new MockWebServer();
         gitlab.start();
-        client = new GitLabForge(RestClient.builder());
+        client = new GitLabForge(TestRestClients.builder());
     }
 
     @AfterEach
@@ -168,6 +169,8 @@ class GitLabForgeTest {
         assertThatThrownBy(() -> client.postInlineDiscussion(
                 project("g/p"), 4, anchor, "A.java", 3, "## finding"))
                 .isInstanceOf(ApiException.class);
+        // Retrying a POST after an ambiguous failure can create a duplicate discussion.
+        assertThat(gitlab.getRequestCount()).isEqualTo(2);
     }
 
     @Test

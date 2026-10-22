@@ -7,9 +7,11 @@ import java.time.Instant;
 @Schema(description = """
         One review of one commit on one merge request.
 
-        Keyed on `(projectId, mrIid, headSha)` — that triple is what makes redelivered \
-        webhooks free. The `mr` block is a snapshot taken when the review ran, not a live \
-        view of the merge request.""")
+        A model review is keyed on `(projectId, mrIid, headSha)` — that triple is what \
+        makes redelivered webhooks free. An agent submission does not occupy it: `source` \
+        is AGENT, `submissionId` is the caller's idempotency key, and `headSha` is still \
+        the commit that was reviewed. The `mr` block is a snapshot taken when the review \
+        ran, not a live view of the merge request.""")
 public record Review(
         String id,
         String projectId,
@@ -41,7 +43,13 @@ public record Review(
         int agentTurns,
         @Schema(description = "The conversation after the initial prompt: assistant turns, "
                 + "tool calls, and truncated tool results. Null in list responses.", nullable = true)
-        AgentTrace trace
+        AgentTrace trace,
+        @Schema(description = "MODEL — mrr's own reviewer. AGENT — submitted through an agent key "
+                + "and posted without calling the model.")
+        Source source,
+        @Schema(description = "Caller-supplied idempotency key for an agent submission. Null on "
+                + "a model review.", nullable = true)
+        String submissionId
 ) {
 
     @Schema(description = """
@@ -65,18 +73,39 @@ public record Review(
         }
     }
 
+    @Schema(description = "Who produced the review. MODEL is mrr's reviewer. AGENT was submitted.")
+    public enum Source {
+        MODEL,
+        AGENT
+    }
+
+    public Review {
+        if (source == null) source = Source.MODEL;
+    }
+
+    /** A model review. Agent submissions pass {@link Source#AGENT} and a submission id. */
+    public Review(String id, String projectId, long mrIid, String headSha, State state,
+                  MergeRequestInfo mr, String payload, String prompt, String response,
+                  String noteId, String discussionId, String error, FailureKind errorKind,
+                  Instant createdAt, Instant finishedAt, int agentTurns, AgentTrace trace) {
+        this(id, projectId, mrIid, headSha, state, mr, payload, prompt, response,
+                noteId, discussionId, error, errorKind, createdAt, finishedAt, agentTurns, trace,
+                Source.MODEL, null);
+    }
+
     /**
      * The list view. Drops the bulky columns — payload, prompt, response, and trace —
      * while keeping {@code agentTurns} and the merge-request snapshot.
      */
     public Review summary() {
         return new Review(id, projectId, mrIid, headSha, state, mr, null, null, null,
-                noteId, discussionId, error, errorKind, createdAt, finishedAt, agentTurns, null);
+                noteId, discussionId, error, errorKind, createdAt, finishedAt, agentTurns, null,
+                source, submissionId);
     }
 
     public Review withMr(MergeRequestInfo updated) {
         return new Review(id, projectId, mrIid, headSha, state, updated, payload, prompt,
                 response, noteId, discussionId, error, errorKind, createdAt, finishedAt,
-                agentTurns, trace);
+                agentTurns, trace, source, submissionId);
     }
 }

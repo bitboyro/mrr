@@ -550,6 +550,17 @@ public class GitLabForge extends ForgeHttp implements Forge {
     }
 
     @Override
+    public boolean isAssignedTo(Project project, long mrIid, String username) {
+        JsonNode request = exchange(project, HttpMethod.GET, "/merge_requests/" + mrIid, null);
+        for (String field : new String[] {"assignees", "reviewers"}) {
+            for (JsonNode person : request.path(field)) {
+                if (username.equalsIgnoreCase(person.path("username").asText())) return true;
+            }
+        }
+        return username.equalsIgnoreCase(request.path("assignee").path("username").asText());
+    }
+
+    @Override
     public String tokenUsername(Project project) {
         String base = baseUrl(project);
         if (base.isBlank()) {

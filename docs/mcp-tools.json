@@ -105,6 +105,45 @@
       "name": "get_review"
     },
     {
+      "description": "Fetch what you need to review a merge request yourself: the live request, the diff, the findings still open, and the project's review instructions. Requires an agent key minted for this project \u2014 an ordinary token is refused. diffTruncated is true when the diff was clipped at the instance's max diff size. Use submit_review to post what you write; mrr posts it on the forge. You do not need a GitLab token for that.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "mrIid": {
+            "description": "The merge-request iid",
+            "type": "integer"
+          },
+          "projectId": {
+            "description": "The mrr project id, from list_projects",
+            "type": "string"
+          }
+        },
+        "required": [
+          "projectId",
+          "mrIid"
+        ],
+        "type": "object"
+      },
+      "name": "get_review_packet"
+    },
+    {
+      "description": "Read the project's connected agent account and automatic review policy: ALL or ASSIGNED. Auto-review must also be enabled. Account permissions are managed on the forge.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "projectId": {
+            "description": "The mrr project id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "projectId"
+        ],
+        "type": "object"
+      },
+      "name": "get_review_policy"
+    },
+    {
       "description": "List memory documents in a project, optionally restricted to a space (project, mrs, notes). Summaries without bodies.",
       "inputSchema": {
         "additionalProperties": false,
@@ -281,6 +320,98 @@
         "type": "object"
       },
       "name": "set_finding_state"
+    },
+    {
+      "description": "Post a review you wrote. mrr opens one thread per finding and a separate summary on the forge, and records them in its ledger. This does not replace a model review of the same commit \u2014 it is appended. It does not edit the model's overview. Requires an agent key for this project. submissionId is an idempotency key: sending the same one again returns the review already stored and posts nothing more. prior is optional; omit it to leave existing findings open. Each prior item is findingId, addressed, and an optional note. Each finding has title, and optionally body, file, line, and severity (BLOCKER, MAJOR, MINOR).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "findings": {
+            "description": "Findings to open. Each needs a title.",
+            "items": {
+              "properties": {
+                "body": {
+                  "type": "string"
+                },
+                "file": {
+                  "type": "string"
+                },
+                "line": {
+                  "format": "int32",
+                  "type": "integer"
+                },
+                "severity": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "body",
+                "file",
+                "line",
+                "severity",
+                "title"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "headSha": {
+            "description": "The headSha from get_review_packet; rejected if the commit changed",
+            "type": "string"
+          },
+          "mrIid": {
+            "description": "The merge-request iid",
+            "type": "integer"
+          },
+          "prior": {
+            "description": "Judgements on findings already open. Omit to close nothing.",
+            "items": {
+              "properties": {
+                "addressed": {
+                  "type": "boolean"
+                },
+                "findingId": {
+                  "type": "string"
+                },
+                "note": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "addressed",
+                "findingId",
+                "note"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "projectId": {
+            "description": "The mrr project id",
+            "type": "string"
+          },
+          "submissionId": {
+            "description": "Idempotency key, 1\u2013120 characters: letters, digits, '.', '_', ':', '-'",
+            "type": "string"
+          },
+          "summary": {
+            "description": "The review summary, in Markdown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "projectId",
+          "mrIid",
+          "submissionId",
+          "headSha",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "name": "submit_review"
     },
     {
       "description": "Replace the body of the review comment mrr posted on the merge request. Use to correct or amend a review in place rather than adding a second comment.",

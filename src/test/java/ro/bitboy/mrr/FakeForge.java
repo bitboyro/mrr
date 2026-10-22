@@ -49,6 +49,7 @@ public final class FakeForge implements Forge {
     /** Null means the host rejects every position, which is the default and the common case. */
     public Discussion inlineDiscussion;
     public String tokenUser = "mrr-bot";
+    public final List<String> assignedUsers = new ArrayList<>();
     /** Where the mirror layer is told to clone from. Null means the host reported none. */
     public String cloneUrl = "https://forge.test/repo.git";
     public String defaultBranch = "main";
@@ -177,6 +178,11 @@ public final class FakeForge implements Forge {
     @Override
     public List<DiscussionView> listDiscussions(Project project, long mrIid) {
         return List.copyOf(discussions);
+    }
+
+    @Override
+    public boolean isAssignedTo(Project project, long mrIid, String username) {
+        return assignedUsers.stream().anyMatch(username::equalsIgnoreCase);
     }
 
     @Override

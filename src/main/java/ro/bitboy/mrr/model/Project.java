@@ -90,6 +90,11 @@ public record Project(
                 + "merge gate while they wait. Default false: the review posts as soon as it "
                 + "finishes, which is what most teams want.")
         boolean holdFindings,
+        @Schema(description = "When true (the default), a webhook or the periodic scan asks the "
+                + "model to review. When false, those paths leave the request alone and an "
+                + "agent key can submit the review instead. Notes, resolves, and merges are "
+                + "still handled either way.")
+        boolean autoReview,
         @Schema(description = "Optional librarian addon. When true, Initialize/Refresh is available. "
                 + "Disable never deletes memory files.")
         boolean librarianEnabled,
@@ -139,7 +144,7 @@ public record Project(
                    Instant createdAt) {
         this(id, ownerId, name, enabled, forge, gitlabUrl, gitlabProjectId, gitlabToken,
                 gitlabOperatorToken, webhookSecret, llmProviderId, llm, skill, skipDrafts,
-                agentMaxTurns, agentTools, autoApprove, false, librarianEnabled, memoryHeadSha,
+                agentMaxTurns, agentTools, autoApprove, false, true, librarianEnabled, memoryHeadSha,
                 memoryStatus, memoryRefreshedAt, lastErrorKind, lastError, lastErrorAt, createdAt);
     }
 
@@ -188,7 +193,15 @@ public record Project(
         return new Project(id, ownerId, name, enabled, forge, gitlabUrl, gitlabProjectId,
                 token, gitlabOperatorToken, webhookSecret, llmProviderId, llm,
                 skill, skipDrafts, agentMaxTurns, agentTools, autoApprove, holdFindings,
-                librarianEnabled, memoryHeadSha, memoryStatus, memoryRefreshedAt,
+                autoReview, librarianEnabled, memoryHeadSha, memoryStatus, memoryRefreshedAt,
+                lastErrorKind, lastError, lastErrorAt, createdAt);
+    }
+
+    public Project withAutoReview(boolean autoReview) {
+        return new Project(id, ownerId, name, enabled, forge, gitlabUrl, gitlabProjectId,
+                gitlabToken, gitlabOperatorToken, webhookSecret, llmProviderId, llm,
+                skill, skipDrafts, agentMaxTurns, agentTools, autoApprove, holdFindings,
+                autoReview, librarianEnabled, memoryHeadSha, memoryStatus, memoryRefreshedAt,
                 lastErrorKind, lastError, lastErrorAt, createdAt);
     }
 
@@ -205,7 +218,7 @@ public record Project(
                 mask(gitlabToken), mask(gitlabOperatorToken), mask(webhookSecret),
                 llmProviderId, llm == null ? null : llm.redacted(),
                 skill, skipDrafts, agentMaxTurns,
-                agentTools, autoApprove, holdFindings, librarianEnabled, memoryHeadSha,
+                agentTools, autoApprove, holdFindings, autoReview, librarianEnabled, memoryHeadSha,
                 memoryStatus, memoryRefreshedAt, lastErrorKind, lastError, lastErrorAt,
                 createdAt);
     }

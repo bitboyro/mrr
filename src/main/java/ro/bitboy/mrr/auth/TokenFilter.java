@@ -56,9 +56,27 @@ public class TokenFilter extends OncePerRequestFilter {
             return;
         }
 
+        if (principal.get().isAgentKey() && !agentRoute(request.getMethod(), request.getRequestURI())) {
+            response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+            response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+            mapper.writeValue(response.getOutputStream(), new ErrorResponse("agent_key_scope",
+                    "An agent key may read its projects and reviews, or submit an agent review. Use an ordinary token to manage the instance.", null));
+            return;
+        }
+
         store.touchToken(token.get());
         request.setAttribute(PRINCIPAL_ATTRIBUTE, principal.get());
         chain.doFilter(request, response);
+    }
+
+    static boolean agentRoute(String method, String path) {
+        if ("GET".equals(method)) {
+            return "/api/me".equals(path) || "/api/projects".equals(path)
+                    || path.startsWith("/api/projects/") || "/api/reviews".equals(path)
+                    || path.startsWith("/api/reviews/");
+        }
+        return "POST".equals(method)
+                && path.matches("/api/projects/[^/]+/merge-requests/[0-9]+/agent-reviews");
     }
 
     /** Accepts {@code Authorization: Bearer <token>} or {@code X-API-Key: <token>}. */

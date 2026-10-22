@@ -105,6 +105,15 @@ public class AdminController {
         store.findUser(userId).orElseThrow(() -> ApiException.notFound("user"));
 
         String name = request.name() == null || request.name().isBlank() ? "token" : request.name();
+        if (request.projectIds() != null && !request.projectIds().isEmpty()) {
+            User user = store.findUser(userId).orElseThrow(() -> ApiException.notFound("user"));
+            Principal asUser = new Principal(user.id(), user.name(), user.role());
+            for (String projectId : request.projectIds()) {
+                store.requireVisible(asUser, projectId);
+            }
+            return new CreatedToken(store.createAgentKey(userId, name, request.projectIds()),
+                    userId, name);
+        }
         return new CreatedToken(store.createToken(userId, name), userId, name);
     }
 
@@ -150,7 +159,11 @@ public class AdminController {
             @Schema(description = "Whose token this is. Omit to mint one for yourself.")
             String userId,
             @Schema(description = "Label to recognise it by later. Defaults to \"token\".", example = "ci")
-            String name) {
+            String name,
+            @Schema(description = "When set, the token is an agent key and may act only on these "
+                    + "projects. The user it is minted for must be able to see each one. Omit "
+                    + "for an ordinary token, which cannot submit an agent review.")
+            List<String> projectIds) {
     }
 
     @Schema(description = "A freshly minted token. The only time the secret is readable.")

@@ -39,6 +39,7 @@ type Project = {
   agentMaxTurns: number;
   agentTools: string[];
   autoApprove: boolean;
+  autoReview: boolean;
   holdFindings: boolean;
   librarianEnabled: boolean;
   memoryHeadSha: string | null;
@@ -110,6 +111,7 @@ type Finding = {
 };
 type Review = {
   id: string;
+  source: "MODEL" | "AGENT";
   projectId: string;
   mrIid: number;
   headSha: string;
@@ -1202,6 +1204,7 @@ function ProjectHome({ id }: { id: string }) {
       <p className="muted">
         {FORGE_NAMES[project.forge]} · {project.gitlabUrl}/{project.gitlabProjectId} · {project.llm?.model ?? "no entry"}
         {project.autoApprove ? " · auto-approve on" : ""}
+        {project.autoReview ? "" : " · auto-review off"}
         {project.holdFindings ? " · findings held" : ""}
         {project.librarianEnabled ? " · librarian on" : ""}
         {project.memoryStatus && project.memoryStatus !== "NONE" ? ` · memory ${project.memoryStatus}` : ""}
@@ -1213,6 +1216,8 @@ function ProjectHome({ id }: { id: string }) {
         headline={`Nothing was posted to ${FORGE_NAMES[project.forge]}.`} />
       <ForgeSupport projectId={id} />
       <OperatorSupport projectId={id} />
+      <ReviewPolicyPanel projectId={id} />
+      <AgentKey projectId={id} />
       <div className="tabs">
         <button className={tab === "mrs" ? "on" : ""} onClick={() => setTab("mrs")}>Merge requests</button>
         <button className={tab === "memory" ? "on" : ""} onClick={() => setTab("memory")}>Memory</button>
@@ -1721,13 +1726,110 @@ function MemoryPanel({ project, onRefresh }: { project: Project; onRefresh: () =
   );
 }
 
+type ReviewPolicy = { mode: "ALL" | "ASSIGNED"; username: string | null; email: string | null };
+
+function ReviewPolicyPanel({ projectId }: { projectId: string }) {
+  const [policy, setPolicy] = useState<ReviewPolicy | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    api<ReviewPolicy>(`/api/projects/${projectId}/review-policy`)
+      .then(setPolicy).catch((e) => setErr(e.message));
+  }, [projectId]);
+
+  async function save() {
+    if (!policy) return;
+    setBusy(true); setErr(null); setSaved(false);
+    try {
+      const result = await api<ReviewPolicy>(`/api/projects/${projectId}/review-policy`, {
+        method: "PUT", body: JSON.stringify(policy),
+      });
+      setPolicy(result); setSaved(true);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally { setBusy(false); }
+  }
+
+  function change(patch: Partial<ReviewPolicy>) {
+    setPolicy((current) => current ? { ...current, ...patch } : current);
+    setSaved(false);
+  }
+
+  return (
+    <details className="callout">
+      <summary>Agent account and review policy</summary>
+      <p>Create the account on your forge, grant it access to this repository, and put its token
+        in the project's review-token field. Reviews post as that account. Configure its mailbox,
+        notifications and repository permissions on the forge.</p>
+      {policy && <>
+        <label>Review policy</label>
+        <select value={policy.mode} onChange={(e) => change({ mode: e.target.value as ReviewPolicy["mode"] })}>
+          <option value="ALL">Review every request</option>
+          <option value="ASSIGNED">Review when assigned</option>
+        </select>
+        <label>Agent username</label>
+        <input value={policy.username ?? ""} onChange={(e) => change({ username: e.target.value })}
+          placeholder="Leave blank to identify the review token's account" />
+        <label>Contact email (optional)</label>
+        <input type="email" value={policy.email ?? ""} onChange={(e) => change({ email: e.target.value })} />
+        <p className="muted">Assignment means an assignee or a requested reviewer. While assigned,
+          new commits trigger reviews too. Auto-review must be on. Review now explicitly requests
+          a review regardless of assignment; external agent submissions remain available.</p>
+        <button onClick={save} disabled={busy}>{busy ? "Checking account…" : "Save policy"}</button>
+        {saved && <p className="muted">Saved{policy.username ? ` · connected as @${policy.username}` : ""}.</p>}
+      </>}
+      {err && <p className="err">{err}</p>}
+    </details>
+  );
+}
+
+function AgentKey({ projectId }: { projectId: string }) {
+  const [secret, setSecret] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function mint() {
+    setErr(null);
+    setBusy(true);
+    try {
+      const created = await api<{ token: string }>(`/api/projects/${projectId}/agent-keys`, {
+        method: "POST", body: JSON.stringify({ name: "agent" }),
+      });
+      setSecret(created.token);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="callout">
+      <p>
+        An agent key lets Cursor, Claude, or another agent read the review packet and submit a
+        review. mrr posts it on the forge. An ordinary token cannot. The secret is shown once.
+      </p>
+      <button type="button" onClick={mint} disabled={busy}>Mint agent key</button>
+      {secret && (
+        <>
+          <label>Agent key</label>
+          <input readOnly value={secret} />
+        </>
+      )}
+      {err && <p className="err">{err}</p>}
+    </div>
+  );
+}
+
 function ProjectForm({ id }: { id?: string }) {
   const [form, setForm] = useState({
     name: "", forge: "GITLAB" as ForgeKind,
     gitlabUrl: "https://gitlab.com", gitlabProjectId: "", gitlabToken: "",
     gitlabOperatorToken: "", skill: "",
     skipDrafts: false, agentMaxTurns: 1, agentTools: "", autoApprove: false,
-    holdFindings: false,
+    autoReview: true, holdFindings: false,
     librarianEnabled: false, enabled: true,
   });
   const [secret, setSecret] = useState<{ webhookUrl: string; webhookSecret: string } | null>(null);
@@ -1778,6 +1880,7 @@ function ProjectForm({ id }: { id?: string }) {
       agentMaxTurns: p.agentMaxTurns,
       agentTools: p.agentTools.join(","),
       autoApprove: p.autoApprove,
+      autoReview: p.autoReview,
       holdFindings: p.holdFindings,
       librarianEnabled: p.librarianEnabled,
       enabled: p.enabled,
@@ -1817,6 +1920,7 @@ function ProjectForm({ id }: { id?: string }) {
       agentMaxTurns: Number(form.agentMaxTurns) || 1,
       agentTools: tools,
       autoApprove: form.autoApprove,
+      autoReview: form.autoReview,
       holdFindings: form.holdFindings,
       librarianEnabled: form.librarianEnabled,
       enabled: form.enabled,
@@ -1953,11 +2057,16 @@ function ProjectForm({ id }: { id?: string }) {
         <div className="toggles">
           <Toggle on={form.skipDrafts} onChange={(v) => set("skipDrafts", v)}>Skip drafts</Toggle>
           <Toggle on={form.autoApprove} onChange={(v) => set("autoApprove", v)}>Auto-approve when clean</Toggle>
+          <Toggle on={form.autoReview} onChange={(v) => set("autoReview", v)}>Auto-review</Toggle>
           <Toggle on={form.holdFindings} onChange={(v) => set("holdFindings", v)}>
             Hold findings for review before posting
           </Toggle>
           {id && <Toggle on={form.enabled} onChange={(v) => set("enabled", v)}>Enabled</Toggle>}
         </div>
+        <p className="muted">
+          Auto-review asks the model on a webhook. Turn it off and an agent key submits the
+          review instead. Enabled is the whole project; turning that off drops notes too.
+        </p>
       </div>
       <div className="opt-block">
         <label>Agent</label>
@@ -2090,7 +2199,8 @@ function MrCycle({ projectId, iid }: { projectId: string; iid: string }) {
             Review now
           </button>
         )}
-        {cycle.status.latestReviewId && <button onClick={rerun}>Re-run latest</button>}
+        {cycle.status.latestReviewId && cycle.reviews.find((r) => r.id === cycle.status.latestReviewId)?.source !== "AGENT"
+          && <button onClick={rerun}>Re-run latest</button>}
         {canOperate && !closed && (
           <button className="danger" onClick={merge} disabled={merging}>
             {merging ? "Merging…" : "Merge"}

@@ -139,6 +139,36 @@ class StoreTest {
     }
 
     @Test
+    void anAgentKeySeesOnlyItsProjectsAndDoesNotOccupyTheModelSha() {
+        Project aliceApp = TestStores.persist(store, project(alice.id(), "alice-app"));
+        Project bobApp = TestStores.persist(store, project(bob.id(), "bob-app"));
+        String secret = store.createAgentKey(admin.id(), "cursor", List.of(aliceApp.id()));
+
+        Principal key = store.resolveToken(secret).orElseThrow();
+        assertThat(key.isAgentKey()).isTrue();
+        assertThat(key.isAdmin()).isFalse();
+        assertThat(key.tokenName()).isEqualTo("cursor");
+        assertThat(store.listProjects(key)).extracting(Project::name).containsExactly("alice-app");
+        assertThat(store.requireVisible(key, aliceApp.id()).id()).isEqualTo(aliceApp.id());
+        assertThatThrownBy(() -> store.requireVisible(key, bobApp.id()))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(404));
+
+        store.insertAgentReview(aliceApp.id(), 7, "sub-1", "sha-commit", "{}", mrInfo());
+        Store.Claim model = store.claimReview(aliceApp.id(), 7, "sha-commit", "{}", mrInfo());
+        assertThat(model.created()).isTrue();
+        assertThat(store.findReview(aliceApp.id(), 7, "sha-commit").orElseThrow().source())
+                .isEqualTo(Review.Source.MODEL);
+        assertThat(store.findAgentSubmission(aliceApp.id(), "sub-1").orElseThrow().headSha())
+                .isEqualTo("sha-commit");
+        assertThat(store.findAgentSubmission(aliceApp.id(), "sub-1").orElseThrow().source())
+                .isEqualTo(Review.Source.AGENT);
+
+        Store.Claim again = store.insertAgentReview(aliceApp.id(), 7, "sub-1", "sha-commit", "{}", mrInfo());
+        assertThat(again.created()).isFalse();
+    }
+
+    @Test
     void operatorTokenIsStoredAndMaskedOnRead() {
         LlmProvider llm = TestStores.llmProvider(alice.id());
         Project created = TestStores.persist(store, new Project(Ids.newId(), alice.id(), "app", true, ForgeKind.GITLAB,

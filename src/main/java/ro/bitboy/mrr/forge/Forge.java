@@ -191,6 +191,11 @@ public interface Forge {
      */
     String tokenUsername(Project project);
 
+    /** Live assignees and requested reviewers, matched by username rather than display name. */
+    default boolean isAssignedTo(Project project, long mrIid, String username) {
+        throw new UnsupportedOperationException("This forge cannot read review assignments.");
+    }
+
     // ── webhooks ─────────────────────────────────────────────────────────────────────
 
     /**

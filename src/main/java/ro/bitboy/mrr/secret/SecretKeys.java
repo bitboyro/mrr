@@ -63,20 +63,24 @@ final class SecretKeys {
         return HexFormat.of().parseHex(value);
     }
 
+    /**
+     * Strict on purpose. The MIME decoder would have handled a wrapped key file for free, but it
+     * silently drops anything outside the alphabet — {@code "hello world ... !!"} decodes to 33
+     * bytes rather than failing. For a value with no recovery path, a mangled key must be
+     * rejected, not quietly turned into a different valid one. Whitespace is stripped first so a
+     * wrapped file still works.
+     */
     private static byte[] tryBase64(String value) {
-        // Url-safe first: '-' and '_' are invalid in the standard alphabet, so a url-safe key
+        String compact = value.replaceAll("\\s", "");
+        // Url-safe next: '-' and '_' are invalid in the standard alphabet, so a url-safe key
         // would otherwise be rejected outright.
-        String candidate = value.indexOf('-') >= 0 || value.indexOf('_') >= 0
-                ? value.replace('-', '+').replace('_', '/')
-                : value;
+        String candidate = compact.indexOf('-') >= 0 || compact.indexOf('_') >= 0
+                ? compact.replace('-', '+').replace('_', '/')
+                : compact;
         try {
             return Base64.getDecoder().decode(candidate);
-        } catch (IllegalArgumentException padded) {
-            try {
-                return Base64.getMimeDecoder().decode(candidate);
-            } catch (IllegalArgumentException e) {
-                return null;
-            }
+        } catch (IllegalArgumentException e) {
+            return null;
         }
     }
 

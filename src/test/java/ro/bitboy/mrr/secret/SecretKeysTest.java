@@ -63,7 +63,28 @@ class SecretKeysTest {
     @Test
     void rejectsSomethingThatIsNeitherBase64NorHex() {
         assertThatThrownBy(() -> SecretKeys.parse("not a key!!!"))
-                .isInstanceOf(IllegalArgumentException.class);
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("neither base64 nor hex");
+    }
+
+    /**
+     * A lenient decoder drops characters outside the alphabet, so prose can decode to a
+     * plausible length and be accepted as a key. It must be refused instead.
+     */
+    @Test
+    void rejectsProseThatALenientDecoderWouldAccept() {
+        assertThatThrownBy(() ->
+                SecretKeys.parse("hello world this is definitely not a base64 key at all!!"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("neither base64 nor hex");
+    }
+
+    /** A key file wrapped across lines is still one key. */
+    @Test
+    void acceptsBase64WrappedAcrossLines() {
+        String wrapped = Base64.getEncoder().encodeToString(RAW);
+        assertThat(SecretKeys.parse(wrapped.substring(0, 20) + "\n" + wrapped.substring(20)))
+                .isEqualTo(RAW);
     }
 
     @Test

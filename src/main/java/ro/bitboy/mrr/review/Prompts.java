@@ -405,6 +405,46 @@ final class Prompts {
                 + "thread.\n\n" + text;
     }
 
+    /**
+     * An agent submission's summary. Distinct from {@link #OVERVIEW_PREFIX} on purpose: the
+     * scan treats that prefix as a leftover model overview and resolves it.
+     */
+    static final String AGENT_REVIEW_PREFIX = "### Agent review";
+
+    static String agentFindingComment(ReviewModel.NewFinding finding, String submittedBy) {
+        return findingComment(finding) + "\n\n<sub>Submitted by " + submittedByLabel(submittedBy)
+                + " via mrr.</sub>";
+    }
+
+    static String agentSummary(ReviewModel.Verdict verdict, List<Finding> opened, String submittedBy) {
+        StringBuilder sb = new StringBuilder(AGENT_REVIEW_PREFIX + "\n\n");
+        if (verdict.summary() != null && !verdict.summary().isBlank()) {
+            sb.append(verdict.summary().trim()).append("\n\n");
+        }
+        if (opened.isEmpty()) {
+            sb.append("No findings.\n");
+        } else {
+            sb.append("**").append(opened.size()).append(" finding(s)** — each in its own thread:\n\n");
+            for (Finding f : opened) {
+                sb.append("- ").append(badge(f.severity())).append(' ');
+                if (f.filePath() != null) {
+                    sb.append('`').append(f.filePath());
+                    if (f.line() != null) {
+                        sb.append(':').append(f.line());
+                    }
+                    sb.append("` — ");
+                }
+                sb.append(f.title()).append('\n');
+            }
+        }
+        sb.append("\n<sub>Submitted by ").append(submittedByLabel(submittedBy)).append(" via mrr.</sub>\n");
+        return sb.toString();
+    }
+
+    private static String submittedByLabel(String submittedBy) {
+        return submittedBy == null || submittedBy.isBlank() ? "an agent" : submittedBy;
+    }
+
     static final String OVERVIEW_PREFIX = "### mrr review";
 
     static boolean isOverview(String body) {

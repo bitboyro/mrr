@@ -6,7 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.SimpleDriverDataSource;
-import org.springframework.web.client.RestClient;
+import ro.bitboy.mrr.web.TestRestClients;
 import ro.bitboy.mrr.FakeForge;
 import ro.bitboy.mrr.MrrProperties;
 import ro.bitboy.mrr.RuntimeSettings;
@@ -45,7 +45,7 @@ class LibrarianTest {
         RuntimeSettings settings = RuntimeSettings.frozen(properties);
         librarian = new Librarian(store, memoryStore, new MemoryService(memoryStore),
                 ForgeFactory.fixed(new FakeForge()),
-                new ReviewModelFactory(RestClient.builder(), settings),
+                new ReviewModelFactory(TestRestClients.builder(), settings),
                 settings, new ObjectMapper());
         project = TestStores.persist(store, TestStores.project(
                 store.createUser("alice", Role.USER).id(), "calc", "hook-secret"));

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpMethod;
 import org.springframework.web.client.RestClient;
+import ro.bitboy.mrr.web.TestRestClients;
 import ro.bitboy.mrr.model.ForgeKind;
 import ro.bitboy.mrr.model.LlmProvider;
 import ro.bitboy.mrr.model.Project;
@@ -39,7 +40,7 @@ class ForgeHttpTest {
     void startHost() throws Exception {
         host = new MockWebServer();
         host.start();
-        forge = new TestForge(RestClient.builder());
+        forge = new TestForge(TestRestClients.builder());
     }
 
     @AfterEach

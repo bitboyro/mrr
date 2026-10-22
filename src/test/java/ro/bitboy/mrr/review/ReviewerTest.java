@@ -764,7 +764,7 @@ class ReviewerTest {
                 project.forge(), project.gitlabUrl(), project.gitlabProjectId(),
                 project.gitlabToken(), project.gitlabOperatorToken(), project.webhookSecret(),
                 project.llmProviderId(), project.llm(), project.skill(), project.skipDrafts(),
-                4, tools, project.autoApprove(), project.holdFindings(),
+                4, tools, project.autoApprove(), project.holdFindings(), project.autoReview(),
                 project.librarianEnabled(), project.memoryHeadSha(), project.memoryStatus(),
                 project.memoryRefreshedAt(), project.lastErrorKind(), project.lastError(),
                 project.lastErrorAt(), project.createdAt());
