@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Defer the finding-history sequence index until existing event rows have their sequence
+  column added and backfilled, allowing older production databases to upgrade.
+
 - Create the agent-submission index after migrating existing review tables, so upgrades from
   databases created before agent reviews can start successfully.
 

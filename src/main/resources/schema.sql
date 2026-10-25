@@ -309,7 +309,7 @@ CREATE INDEX IF NOT EXISTS idx_finding_events_mr ON finding_events(project_id, m
 -- Enforced, not just intended: recordEvent computes a candidate seq and this is what makes a
 -- second writer racing on the same finding collide instead of silently taking the same
 -- position. See recordEvent for the retry that follows from a collision here.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_events_seq ON finding_events(finding_id, seq);
+-- SchemaPatch creates idx_finding_events_seq after adding and backfilling seq.
 
 -- One model answer on a finding thread. A review is a commit; a reply is a human talking
 -- back to a finding mrr already posted. prompt + trace are the transcript.
