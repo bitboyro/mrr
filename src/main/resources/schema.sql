@@ -207,9 +207,8 @@ CREATE TABLE IF NOT EXISTS reviews (
     UNIQUE (project_id, mr_iid, head_sha)
 );
 
--- One agent submission posts once. A retry with the same id returns that review.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_submission
-    ON reviews(project_id, submission_id) WHERE submission_id IS NOT NULL;
+-- SchemaPatch creates idx_reviews_submission after adding submission_id to existing
+-- review tables. schema.sql also runs before that migration on upgrades.
 
 CREATE INDEX IF NOT EXISTS idx_reviews_project ON reviews(project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reviews_mr ON reviews(project_id, mr_iid);

@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Create the agent-submission index after migrating existing review tables, so upgrades from
+  databases created before agent reviews can start successfully.
+
 - Serve `/health` through Actuator as a liveness-only endpoint, with database and disk probes disabled.
 
 - Reject malformed secret keys instead of silently dropping non-base64 characters; wrapped key files remain supported.
